@@ -1,0 +1,15 @@
+# Credenciales - NUNCA subir
+.env
+ml_tokens.json
+estado_sigma.json
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Excel temporales
+~$*.xlsx
+
+# Datos sensibles de costos (opcional, si no querés subirlos)
+# costos_mensuales/
