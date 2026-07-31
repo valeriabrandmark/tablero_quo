@@ -23,6 +23,10 @@ HEADERS = {"X-Auth-Token": TOKEN}
 # Archivo donde recordamos hasta cuando trajimos datos
 ARCHIVO_ESTADO = "estado_sigma.json"
 
+# Solo traemos ventas desde esta fecha (coincide con FECHA_CORTE de modelo.py,
+# ya que antes de esto no tenemos costos historicos cargados y no se usan)
+FECHA_INICIO_VENTAS = date(2026, 5, 6)
+
 # Pausa base entre llamadas (segundos). Subila si te bloquean seguido.
 PAUSA = 1.0
 
@@ -80,8 +84,12 @@ def guardar_en_bd(df, tabla, modo="replace"):
                 lambda x: _json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else x
             )
     engine = create_engine(
-        f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
-        f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
+    f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
+    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}",
+    connect_args={
+        "client_encoding": "utf8",
+        "options": "-c client_encoding=UTF8"
+    }
     )
     with engine.begin() as con:
         con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
@@ -145,40 +153,48 @@ def extraer_ofertas():
 
 def extraer_ventas(estado):
     """Ventas por TRAMOS MENSUALES (evita el problema de paginacion).
-       Trae mes por mes desde inicio de 2026 hasta hoy."""
+       Trae desde FECHA_INICIO_VENTAS (06-05-2026) hasta hoy."""
     print("\n=== VENTAS (articulos vendidos) por meses ===")
 
     hoy = date.today()
-    anio = 2026
     todas = []
 
-    for mes in range(1, hoy.month + 1):
-        primer_dia = date(anio, mes, 1)
-        ultimo_dia_mes = calendar.monthrange(anio, mes)[1]
-        ultimo_dia = date(anio, mes, ultimo_dia_mes)
+    primer_dia = FECHA_INICIO_VENTAS
+    mes_cursor = date(FECHA_INICIO_VENTAS.year, FECHA_INICIO_VENTAS.month, 1)
+
+    while mes_cursor <= hoy:
+        ultimo_dia_mes = calendar.monthrange(mes_cursor.year, mes_cursor.month)[1]
+        ultimo_dia = date(mes_cursor.year, mes_cursor.month, ultimo_dia_mes)
         if ultimo_dia > hoy:
             ultimo_dia = hoy
 
         dde = primer_dia.isoformat()
         hta = ultimo_dia.isoformat()
-        print(f"\n  --- Mes {mes:02d} ({dde} a {hta}) ---")
+        print(f"\n  --- {mes_cursor.year}-{mes_cursor.month:02d} ({dde} a {hta}) ---")
 
         datos_mes = llamar_sigma(
             "ExportArticulosVendidos",
             {"dde": dde, "hta": hta}
         )
         cant = len(datos_mes)
-        print(f"  Mes {mes:02d}: {cant} lineas de venta")
+        print(f"  {mes_cursor.year}-{mes_cursor.month:02d}: {cant} lineas de venta")
 
         if cant >= 28000:
-            print(f"  ATENCION: el mes {mes:02d} trae {cant} registros, cerca del tope.")
-            print(f"  Podria estar incompleto. Avisar para partir este mes por quincenas.")
+            print(f"  ATENCION: este tramo trae {cant} registros, cerca del tope.")
+            print(f"  Podria estar incompleto. Avisar para partir por quincenas.")
 
         todas.extend(datos_mes)
         time.sleep(10)   # pausa entre meses para no gatillar el 429
 
+        # avanzar al primer dia del mes siguiente
+        if mes_cursor.month == 12:
+            mes_cursor = date(mes_cursor.year + 1, 1, 1)
+        else:
+            mes_cursor = date(mes_cursor.year, mes_cursor.month + 1, 1)
+        primer_dia = mes_cursor
+
     df = pd.json_normalize(todas)
-    print(f"\n  TOTAL ventas 2026: {len(df)} lineas")
+    print(f"\n  TOTAL ventas desde {FECHA_INICIO_VENTAS.isoformat()}: {len(df)} lineas")
     guardar_en_bd(df, "sigma_ventas", modo="replace")
 
     estado["ventas_hasta"] = hoy.isoformat()
@@ -226,9 +242,9 @@ if __name__ == "__main__":
    # extraer_ofertas()
 
     # --- Otras extracciones (comentadas; activar cuando corresponda) ---
-    estado = extraer_ventas(estado)
+    #estado = extraer_ventas(estado)
     #estado = extraer_compras(estado)
-    # extraer_articulos()
+    extraer_articulos()
     # extraer_stock()  -> el stock ahora viene de DIGIP, no de Sigma
     
 

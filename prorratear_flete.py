@@ -30,13 +30,22 @@ def construir_fact_ventas_flete():
     # --- 1) Traer lineas de la distribuidora (Mayorista) ---
     print("Leyendo fact_ventas (Mayorista)...")
     fact = pd.read_sql("""
-        SELECT nro_orden, sku, unidad, costo_unitario, cantidad, precio_neto
+        SELECT nro_orden, sku, unidad, cantidad, precio_neto
         FROM gold.fact_ventas
         WHERE canal = 'Mayorista'
           AND unidad IN ('Quo', 'Noa')
           AND nro_orden IS NOT NULL
     """, engine)
     print(f"  Lineas de distri: {len(fact)}")
+
+    # --- 1b) Traer volumetria por SKU (litros por unidad, cargados en Sigma) ---
+    print("Leyendo volumetria (litrosUnitarios) de sigma_articulos...")
+    vol = pd.read_sql('SELECT id AS sku, "litrosUnitarios" FROM bronze.sigma_articulos', engine)
+    litros_por_sku = dict(zip(vol["sku"].astype(str), vol["litrosUnitarios"]))
+
+    def litros_de(sku):
+        v = litros_por_sku.get(str(sku))
+        return float(v) if v is not None and v != 0 else None
 
     # --- 2) Traer preparaciones (para saber preparacion_id y transporte por pedido) ---
     print("Leyendo digip_preparaciones...")
@@ -62,82 +71,88 @@ def construir_fact_ventas_flete():
         prep, left_on="nro_orden_str", right_on="pedido_codigo", how="left"
     )
 
-    # Si un pedido se partio en varias preparaciones (envio parcial), DIGIP no nos dice
-    # que parte de cada SKU fue en cada preparacion. Repartimos la linea por IGUAL entre
-    # las N preparaciones asociadas, prorrateamos cada porcion, y al final se vuelve a
-    # unir en una sola fila por linea (ver paso 7).
-    cant_preparaciones = merged.groupby(["nro_orden", "sku"])["preparacion_id"].transform(
-        lambda s: s.notna().sum() if s.notna().sum() > 0 else 1
-    )
+    # Aviso informativo: un mismo (nro_orden, sku) puede repetirse porque Sigma
+    # cargo el mismo articulo en 2 renglones de factura (normal en el ERP).
+    # Confirmado que cada pedido va a UNA sola preparacion (sin envios partidos),
+    # asi que no hace falta repartir nada: cada linea prorratea normal y al final
+    # se suman las que comparten nro_orden+sku en una sola fila (paso 7).
     dup = merged.groupby(["nro_orden", "sku"]).size()
     duplicados = dup[dup > 1]
     if len(duplicados) > 0:
-        print(f"  ATENCION: {len(duplicados)} lineas con envio partido (mas de una preparacion). "
-              f"Se reparten por igual entre preparaciones y se reunen en una sola fila al final.")
+        print(f"  Info: {len(duplicados)} combinaciones nro_orden+sku con mas de un renglon "
+              f"de factura (normal). Se suman en una sola fila al final.")
 
-    # --- 5) Calcular clave_fila por porcion (misma logica que la vista) ---
+    # --- 5) Calcular clave_fila por linea (misma logica que la vista) ---
     merged["clave_fila"] = merged.apply(calcular_clave_fila, axis=1)
-    merged["costo_neto_porcion"] = (
-        merged["costo_unitario"].fillna(0) * merged["cantidad"].fillna(0) / cant_preparaciones
-    )
+
+    # Base de prorrateo: litros x cantidad (volumen real de la linea).
+    # Si el SKU no tiene litrosUnitarios cargado (raro, ~0.3% de los casos),
+    # usamos cantidad sola como respaldo para no perder la linea del calculo.
+    def volumen_de_fila(row):
+        litros = litros_de(row["sku"])
+        if litros is not None:
+            return litros * (row["cantidad"] or 0)
+        return row["cantidad"] or 0  # fallback: sin dato de volumen, usar unidades
+
+    merged["volumen_linea"] = merged.apply(volumen_de_fila, axis=1)
     merged["flete_total_clave"] = merged["clave_fila"].map(flete_map)
 
-    # Costo neto total de la preparacion (sumando todas las porciones que caen ahi),
-    # para prorratear proporcionalmente
-    merged["costo_neto_total_clave"] = merged.groupby("clave_fila")["costo_neto_porcion"].transform("sum")
+    # Volumen total de la preparacion, para prorratear proporcionalmente
+    merged["volumen_total_clave"] = merged.groupby("clave_fila")["volumen_linea"].transform("sum")
 
-    # --- 6) Prorrateo por porcion (real donde hay dato, estimado 5% donde no) ---
-    porciones = []
+    # --- 6) Prorrateo por linea (real donde hay dato, estimado 5% donde no) ---
+    lineas = []
     for _, row in merged.iterrows():
         clave = row["clave_fila"]
         flete_total = row["flete_total_clave"]
-        costo_total_clave = row["costo_neto_total_clave"]
+        volumen_total_clave = row["volumen_total_clave"]
 
-        porcion_real = (
-            clave is not None
+        linea_real = (
+            pd.notna(clave)
             and pd.notna(flete_total)
             and flete_total != 0
-            and costo_total_clave and costo_total_clave > 0
+            and volumen_total_clave and volumen_total_clave > 0
         )
 
-        if porcion_real:
-            flete_porcion = flete_total * (row["costo_neto_porcion"] / costo_total_clave)
+        if linea_real:
+            flete_linea_calc = flete_total * (row["volumen_linea"] / volumen_total_clave)
         else:
-            flete_porcion = None  # se recalcula como estimado al reunir, si hace falta
+            flete_linea_calc = None  # se recalcula como estimado al reunir, si hace falta
 
-        porciones.append({
-            "nro_orden": row["nro_orden"],
+        lineas.append({
+            "nro_orden": row["nro_orden_str"],
             "sku": row["sku"],
             "cantidad": row["cantidad"],
             "precio_neto": row["precio_neto"],
-            "clave_fila": clave,
-            "flete_porcion_real": flete_porcion,
-            "porcion_real": porcion_real,
+            "clave_fila": clave if pd.notna(clave) else None,
+            "flete_linea_real": flete_linea_calc,
+            "linea_real": linea_real,
         })
 
-    df_porciones = pd.DataFrame(porciones)
+    df_lineas = pd.DataFrame(lineas)
 
-    # --- 7) Reunir porciones en UNA fila por linea (nro_orden + sku) ---
+    # --- 7) Reunir en UNA fila por linea (nro_orden + sku) ---
     resultado = []
-    for (nro_orden, sku), grupo in df_porciones.groupby(["nro_orden", "sku"], dropna=False):
-        todas_reales = grupo["porcion_real"].all()
+    for (nro_orden, sku), grupo in df_lineas.groupby(["nro_orden", "sku"], dropna=False):
+        todas_reales = grupo["linea_real"].all()
         if todas_reales:
-            flete_linea = grupo["flete_porcion_real"].sum()
+            flete_final = grupo["flete_linea_real"].sum()
             tiene_real = True
         else:
-            # si alguna porcion no tuvo flete real, la linea entera cae a estimado
+            # si algun renglon no tuvo flete real, la combinacion entera cae a estimado
             # (evita mezclar "un poco real + un poco estimado" en la misma linea)
-            cant_total = grupo["cantidad"].iloc[0]
+            cant_total = grupo["cantidad"].sum()
             precio_neto = grupo["precio_neto"].iloc[0]
-            flete_linea = (precio_neto or 0) * (cant_total or 0) * 0.05
+            flete_final = (precio_neto or 0) * (cant_total or 0) * 0.05
             tiene_real = False
 
-        clave_repr = ", ".join(sorted(set(c for c in grupo["clave_fila"] if c is not None))) or None
+        claves_validas = [c for c in grupo["clave_fila"] if pd.notna(c)]
+        clave_repr = ", ".join(sorted(set(claves_validas))) if claves_validas else None
         resultado.append({
             "nro_orden": nro_orden,
             "sku": sku,
             "clave_fila": clave_repr,
-            "flete_prorrateado": round(float(flete_linea), 2),
+            "flete_prorrateado": round(float(flete_final), 2),
             "tiene_flete_real": bool(tiene_real),
         })
 

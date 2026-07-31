@@ -9,7 +9,8 @@ load_dotenv()
 
 engine = create_engine(
     f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
-    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
+    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}",
+    connect_args={"client_encoding": "utf8"}
 )
 
 # Fecha de corte: solo ventas del 6 de mayo 2026 en adelante
@@ -54,7 +55,12 @@ def construir_fact_ventas():
     iva_por_sku = dict(zip(art["id"].astype(str), art["ivaPorcentual"]))
 
     # Proveedor y marca por sku (de sigma_articulos)
-    prov = pd.read_sql('SELECT id, "proveedorNombre", marca FROM bronze.sigma_articulos', engine)
+    # NOTA: la columna "marca" plana viene vacia desde la API de Sigma.
+    # El dato real esta anidado en "attributes.marca".
+    prov = pd.read_sql(
+        'SELECT id, "proveedorNombre", "attributes.marca" AS marca FROM bronze.sigma_articulos',
+        engine
+    )
     proveedor_por_sku = {str(k).strip(): v for k, v in zip(prov["id"], prov["proveedorNombre"])}
     marca_por_sku = {str(k).strip(): v for k, v in zip(prov["id"], prov["marca"])}
 
