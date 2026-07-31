@@ -53,12 +53,16 @@ def construir_fact_ventas():
     art = pd.read_sql('SELECT id, "ivaPorcentual" FROM bronze.sigma_articulos', engine)
     iva_por_sku = dict(zip(art["id"].astype(str), art["ivaPorcentual"]))
 
-    # Proveedor por sku (de sigma_articulos)
-    prov = pd.read_sql('SELECT id, "proveedorNombre" FROM bronze.sigma_articulos', engine)
+    # Proveedor y marca por sku (de sigma_articulos)
+    prov = pd.read_sql('SELECT id, "proveedorNombre", marca FROM bronze.sigma_articulos', engine)
     proveedor_por_sku = {str(k).strip(): v for k, v in zip(prov["id"], prov["proveedorNombre"])}
+    marca_por_sku = {str(k).strip(): v for k, v in zip(prov["id"], prov["marca"])}
 
     def proveedor_de(sku):
         return proveedor_por_sku.get(str(sku).strip())
+
+    def marca_de(sku):
+        return marca_por_sku.get(str(sku).strip())
 
     # Costo de envio por orden (de ml_envios)
     env = pd.read_sql("SELECT order_id, costo_envio FROM bronze.ml_envios", engine)
@@ -78,7 +82,8 @@ def construir_fact_ventas():
     sigma = pd.read_sql("""
         SELECT empresa, surcursal, fecha, "itemArticuloId", "itemDescripcion",
                "itemCantidad", "itemPrecioUnitario", "clienteNombre",
-               "itemDescuento", "itemDescuentoGlobal", "itemDescuentoFinanciero"
+               "itemDescuento", "itemDescuentoGlobal", "itemDescuentoFinanciero",
+               "itemPedidoId"
         FROM bronze.sigma_ventas
         WHERE empresa IN ('0001','0002','0003','0004')
     """, engine)
@@ -109,12 +114,13 @@ def construir_fact_ventas():
         costo = costo_de(sku, mc)
         margen = None if costo is None else (precio_neto - costo) * cant
         filas.append({
-            "canal": "Mayorista", "unidad": unidad, "tipo": tipo, "nro_orden": None,
+            "canal": "Mayorista", "unidad": unidad, "tipo": tipo, "nro_orden": r["itemPedidoId"],
             "fecha": f, "mes_comercial": mc, "sku": sku, "producto": r["itemDescripcion"],
             "cantidad": cant, "precio_unitario": precio, "precio_neto": precio_neto,
             "iva_pct": iva, "costo_unitario": costo, "comision": 0,
             "total_linea": cant * precio_con_iva, "margen_total": margen,
             "proveedor": proveedor_de(sku),
+            "marca": marca_de(sku),
             "cliente": r["clienteNombre"],
         })
 
@@ -145,6 +151,7 @@ def construir_fact_ventas():
             "iva_pct": iva, "costo_unitario": costo, "comision": 0,
             "total_linea": cant * precio, "margen_total": margen,
             "proveedor": proveedor_de(sku),
+            "marca": marca_de(sku),
             "cliente": r["cliente_nombre"],
         })
 
@@ -205,6 +212,7 @@ def construir_fact_ventas():
                     "envio": round(envio_item, 2),
                     "total_linea": cant * precio, "margen_total": margen,
                     "proveedor": proveedor_de(sku),
+                    "marca": marca_de(sku),
                     "cliente": r["buyer.nickname"],
                 })
 
