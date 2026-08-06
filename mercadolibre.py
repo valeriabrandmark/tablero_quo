@@ -10,7 +10,7 @@ load_dotenv()
 
 ARCHIVO_TOKENS = "ml_tokens.json"
 USER_ID = os.getenv("ML_USER_ID")
-PAUSA = 0.5
+PAUSA = 1.0
 
 
 def cargar_tokens():
@@ -45,19 +45,34 @@ def renovar_access_token():
     return nuevos["access_token"]
 
 
-def llamar_ml(endpoint, access_token, params=None):
-    """Llama a la API de ML con el access_token."""
+def llamar_ml(endpoint, access_token, params=None, max_reintentos=6):
+    """Llama a la API de ML con el access_token. Reintenta automaticamente en 429."""
     url = "https://api.mercadolibre.com" + endpoint
     headers = {"Authorization": f"Bearer {access_token}"}
-    r = requests.get(url, headers=headers, params=params)
-    if r.status_code == 401:      # token vencido: renovar y reintentar
-        print("  401: renovando token...")
-        access_token = renovar_access_token()
-        headers = {"Authorization": f"Bearer {access_token}"}
+
+    intento = 0
+    while True:
         r = requests.get(url, headers=headers, params=params)
-    r.raise_for_status()
-    time.sleep(PAUSA)
-    return r.json()
+
+        if r.status_code == 401:      # token vencido: renovar y reintentar
+            print("  401: renovando token...")
+            access_token = renovar_access_token()
+            headers = {"Authorization": f"Bearer {access_token}"}
+            r = requests.get(url, headers=headers, params=params)
+
+        if r.status_code == 429:
+            intento += 1
+            if intento > max_reintentos:
+                r.raise_for_status()  # se rindio, que explote como antes
+            # Si ML manda Retry-After, respetarlo. Si no, backoff progresivo.
+            espera = int(r.headers.get("Retry-After", 0)) or (5 * intento)
+            print(f"  429: esperando {espera}s antes de reintentar (intento {intento}/{max_reintentos})...")
+            time.sleep(espera)
+            continue   # vuelve a pedir el mismo request, no avanza el offset
+
+        r.raise_for_status()
+        time.sleep(PAUSA)
+        return r.json()
 
 
 def guardar_en_bd(df, tabla, modo="replace"):
@@ -85,56 +100,75 @@ def guardar_en_bd(df, tabla, modo="replace"):
 # ============================================================
 
 def extraer_ventas_ml():
-    """Ordenes de ML por QUINCENAS (para no topar el limite de offset 10.000)."""
+    """Ordenes de ML por QUINCENAS (para no topar el limite de offset 10.000).
+       Cada tramo se cachea en un archivo local: si el script se corta,
+       al volver a correrlo salta los tramos ya descargados sin volver
+       a golpear la API. El guardado en la base se hace UNA sola vez al
+       final, con todos los tramos juntos, para que el esquema de columnas
+       sea consistente (evita el error de columnas faltantes por normalizar
+       cada tramo por separado)."""
     from datetime import date, timedelta
     print("\n=== VENTAS MERCADO LIBRE (por quincenas) ===")
+
+    os.makedirs("cache_ml_ventas", exist_ok=True)
 
     access_token = renovar_access_token()
 
     hoy = date.today()
-    inicio = date(2026, 1, 1)
+    inicio = date(2026, 5, 6)
     todas = []
 
-    # Generamos tramos de ~15 dias
     tramo_inicio = inicio
     while tramo_inicio <= hoy:
         tramo_fin = tramo_inicio + timedelta(days=14)   # 15 dias en total
         if tramo_fin > hoy:
             tramo_fin = hoy
 
-        desde = f"{tramo_inicio.isoformat()}T00:00:00.000-00:00"
-        hasta = f"{tramo_fin.isoformat()}T23:59:59.000-00:00"
-        print(f"\n  --- {tramo_inicio} a {tramo_fin} ---")
+        archivo_cache = f"cache_ml_ventas/{tramo_inicio.isoformat()}_{tramo_fin.isoformat()}.json"
 
-        offset = 0
-        limit = 50
-        tramo_ordenes = []
-        while True:
-            datos = llamar_ml(
-                "/orders/search",
-                access_token,
-                params={
-                    "seller": USER_ID,
-                    "order.date_created.from": desde,
-                    "order.date_created.to": hasta,
-                    "offset": offset,
-                    "limit": limit,
-                },
-            )
-            resultados = datos.get("results", [])
-            if not resultados:
-                break
-            tramo_ordenes.extend(resultados)
-            total = datos.get("paging", {}).get("total", 0)
-            offset += limit
-            if offset >= total or offset >= 10000:
-                break
+        if os.path.exists(archivo_cache):
+            print(f"\n  --- {tramo_inicio} a {tramo_fin} --- (desde cache)")
+            with open(archivo_cache, encoding="utf-8") as f:
+                tramo_ordenes = json.load(f)
+            print(f"  Tramo: {len(tramo_ordenes)} ordenes (cacheadas)")
+        else:
+            desde = f"{tramo_inicio.isoformat()}T00:00:00.000-00:00"
+            hasta = f"{tramo_fin.isoformat()}T23:59:59.000-00:00"
+            print(f"\n  --- {tramo_inicio} a {tramo_fin} ---")
 
-        print(f"  Tramo: {len(tramo_ordenes)} ordenes")
-        if len(tramo_ordenes) >= 9999:
-            print(f"  ATENCION: este tramo llego al limite. Habria que partirlo mas fino.")
+            offset = 0
+            limit = 50
+            tramo_ordenes = []
+            while True:
+                datos = llamar_ml(
+                    "/orders/search",
+                    access_token,
+                    params={
+                        "seller": USER_ID,
+                        "order.date_created.from": desde,
+                        "order.date_created.to": hasta,
+                        "offset": offset,
+                        "limit": limit,
+                    },
+                )
+                resultados = datos.get("results", [])
+                if not resultados:
+                    break
+                tramo_ordenes.extend(resultados)
+                total = datos.get("paging", {}).get("total", 0)
+                offset += limit
+                if offset >= total or offset >= 10000:
+                    break
+
+            print(f"  Tramo: {len(tramo_ordenes)} ordenes")
+            if len(tramo_ordenes) >= 9999:
+                print(f"  ATENCION: este tramo llego al limite. Habria que partirlo mas fino.")
+
+            # Guardamos el tramo en cache ANTES de seguir, asi no se pierde si se corta despues
+            with open(archivo_cache, "w", encoding="utf-8") as f:
+                json.dump(tramo_ordenes, f, ensure_ascii=False)
+
         todas.extend(tramo_ordenes)
-
         tramo_inicio = tramo_fin + timedelta(days=1)
 
     df = pd.json_normalize(todas)
@@ -231,7 +265,7 @@ def extraer_stock_full():
 
 if __name__ == "__main__":
     print("ML User ID:", USER_ID)
-    #extraer_ventas_ml()
+    extraer_ventas_ml()
     #extraer_publicaciones_ml()
     extraer_stock_full()
     print("\n=== LISTO. Revisa la tabla ml_ventas en Supabase. ===")

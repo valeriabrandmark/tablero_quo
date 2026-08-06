@@ -17,6 +17,46 @@ engine = create_engine(
 FECHA_CORTE = date(2026, 5, 6)
 
 
+# Mapeo de codigo de vendedor a nombre (tabla de Sigma, no se extrae por API)
+VENDEDORES = {
+    "001": "CASA CENTRAL",
+    "002": "AGENCIA",
+    "003": "ECOMMERCE",
+    "004": "IGNACIO",
+    "005": "IVANA",
+    "006": "SILVIO",
+    "007": "RAMON",
+    "008": "PABLO",
+    "009": "MELI",
+    "010": "ALEJANDRO",
+    "011": "TRADE",
+    "012": "BTL",
+    "013": "PROYECTOS ESPECIALES",
+    "014": "RICARDO",
+    "WEB": "VENDEDOR WEB",
+}
+
+
+EMPRESAS = {
+    "0001": "Quo Marketing SRL",
+    "0002": "Noa Comercial SRL",
+    "0003": "Presupuesto QUO",
+    "0004": "Presupuesto Noa",
+}
+
+
+def empresa_de(codigo):
+    if codigo is None:
+        return None
+    return EMPRESAS.get(str(codigo).strip(), f"Empresa {codigo}")
+
+
+def vendedor_de(codigo):
+    if codigo is None:
+        return None
+    return VENDEDORES.get(str(codigo).strip(), f"Vendedor {codigo}")
+
+
 def mes_comercial(fecha):
     """Devuelve el mes comercial 'AAAA-MM' segun la regla del 6 al 5.
        Dia >= 6 -> mes actual. Dia < 6 -> mes anterior."""
@@ -89,7 +129,8 @@ def construir_fact_ventas():
         SELECT empresa, surcursal, fecha, "itemArticuloId", "itemDescripcion",
                "itemCantidad", "itemPrecioUnitario", "clienteNombre",
                "itemDescuento", "itemDescuentoGlobal", "itemDescuentoFinanciero",
-               "itemPedidoId"
+               "itemPedidoId", vendedor, "comprobanteCodigo", "comprobanteNumero",
+               "comprobanteTipo"
         FROM bronze.sigma_ventas
         WHERE empresa IN ('0001','0002','0003','0004')
     """, engine)
@@ -114,6 +155,8 @@ def construir_fact_ventas():
         desc_g = (r["itemDescuentoGlobal"] or 0) / 100
         desc_f = (r["itemDescuentoFinanciero"] or 0) / 100
         precio = precio_lista * (1 - desc) * (1 - desc_g) * (1 - desc_f)   # precio real de venta
+        # % de descuento/oferta combinado (los 3 descuentos de Sigma juntos, como un solo %)
+        oferta_pct = round((1 - (1 - desc) * (1 - desc_g) * (1 - desc_f)) * 100, 2)
         iva = iva_de(sku)
         precio_neto = precio                          # Sigma ya viene SIN IVA (y ahora con descuento)
         precio_con_iva = precio * (1 + iva / 100)     # para el % de rentabilidad
@@ -128,6 +171,10 @@ def construir_fact_ventas():
             "proveedor": proveedor_de(sku),
             "marca": marca_de(sku),
             "cliente": r["clienteNombre"],
+            "vendedor": vendedor_de(r["vendedor"]),
+            "comprobante": f"{r['comprobanteTipo']}-{r['comprobanteCodigo']}-{r['comprobanteNumero']}" if r["comprobanteCodigo"] else None,
+            "oferta_pct": oferta_pct,
+            "empresa": empresa_de(r["empresa"]),
         })
 
     # --- 2) TIENDA NUBE ---

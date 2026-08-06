@@ -242,7 +242,7 @@ if __name__ == "__main__":
    # extraer_ofertas()
 
     # --- Otras extracciones (comentadas; activar cuando corresponda) ---
-    #estado = extraer_ventas(estado)
+    estado = extraer_ventas(estado)
     #estado = extraer_compras(estado)
     extraer_articulos()
     # extraer_stock()  -> el stock ahora viene de DIGIP, no de Sigma
