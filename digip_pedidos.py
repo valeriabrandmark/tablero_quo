@@ -2,6 +2,7 @@ import os
 import json
 import requests
 import pandas as pd
+from datetime import date
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
@@ -17,16 +18,21 @@ engine = create_engine(
     connect_args={"client_encoding": "utf8"}
 )
 
+# Mismo criterio que sigma.py/mercadolibre.py: desde el 6 de mayo (FECHA_CORTE
+# del modelo) hasta hoy, siempre dinamico para no quedar viejo.
+FECHA_DESDE = date(2026, 5, 6)
+
 
 def extraer_pedidos():
-    print("=== Extrayendo pedidos RemitidoExterno de junio 2026 ===")
+    hoy = date.today()
+    print(f"=== Extrayendo pedidos RemitidoExterno ({FECHA_DESDE.isoformat()} a {hoy.isoformat()}) ===")
     todos = []
     page = 1
     while True:
         params = {
             "PedidoEstado": "RemitidoExterno",
-            "FechaPedidoDesde": "2026-06-01T00:00:00",
-            "FechaPedidoHasta": "2026-07-31T23:59:59",
+            "FechaPedidoDesde": f"{FECHA_DESDE.isoformat()}T00:00:00",
+            "FechaPedidoHasta": f"{hoy.isoformat()}T23:59:59",
             "Page": page,
             "PerPage": 500,
             "OrderCriteria": "CodigoPedido",

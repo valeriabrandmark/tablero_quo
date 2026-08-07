@@ -60,7 +60,6 @@ def construir_fact_ventas_flete():
         SELECT clave_fila, neto_cobrado_transporte
         FROM bronze.fletes
         WHERE neto_cobrado_transporte IS NOT NULL
-          AND neto_cobrado_transporte <> 0
     """, engine)
     flete_map = dict(zip(fletes["clave_fila"], fletes["neto_cobrado_transporte"]))
     print(f"  Claves con flete real cargado: {len(flete_map)}")
@@ -110,7 +109,6 @@ def construir_fact_ventas_flete():
         linea_real = (
             pd.notna(clave)
             and pd.notna(flete_total)
-            and flete_total != 0
             and volumen_total_clave and volumen_total_clave > 0
         )
 

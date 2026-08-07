@@ -14,3 +14,42 @@
 [2026-08-06 13:17:58] Ejecutando clasificar_clientes.py (intento 1/2)...
 [2026-08-06 13:18:04] OK: clasificar_clientes.py termino sin errores.
 [2026-08-06 13:18:04] ========== ORQUESTADOR TERMINADO CON EXITO (16.4 min) ==========
+[2026-08-07 16:14:55] ========== INICIO DEL ORQUESTADOR ==========
+[2026-08-07 16:14:55] Ejecutando sigma.py (intento 1/3)...
+[2026-08-07 16:19:05] ERROR en sigma.py (intento 1/3):
+[2026-08-07 16:19:05] C:\Users\usuario\Documents\mi-tablero\sigma.py", line 175, in extraer_ventas
+    datos_mes = llamar_sigma(
+        "ExportArticulosVendidos",
+        {"dde": dde, "hta": hta}
+    )
+  File "C:\Users\usuario\Documents\mi-tablero\sigma.py", line 52, in llamar_sigma
+    r = requests.get(url, headers=HEADERS, params=params)
+  File "C:\Users\usuario\Documents\mi-tablero\venv\Lib\site-packages\requests\api.py", line 87, in get
+    return request("get", url, params=params, **kwargs)
+  File "C:\Users\usuario\Documents\mi-tablero\venv\Lib\site-packages\requests\api.py", line 71, in request
+    return session.request(method=method, url=url, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\usuario\Documents\mi-tablero\venv\Lib\site-packages\requests\sessions.py", line 651, in request
+    resp = self.send(prep, **send_kwargs)
+  File "C:\Users\usuario\Documents\mi-tablero\venv\Lib\site-packages\requests\sessions.py", line 784, in send
+    r = adapter.send(request, **kwargs)
+  File "C:\Users\usuario\Documents\mi-tablero\venv\Lib\site-packages\requests\adapters.py", line 727, in send
+    raise SSLError(e, request=request)
+requests.exceptions.SSLError: HTTPSConnectionPool(host='secure.sig2k.com', port=443): Max retries exceeded with url: /sigmasaas/quomkt@sigma/sigma/api/v10/ExportArticulosVendidos?dde=2026-08-01&hta=2026-08-07 (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1081)')))
+
+[2026-08-07 16:19:05] Esperando 60s antes de reintentar sigma.py...
+[2026-08-07 16:20:05] Ejecutando sigma.py (intento 2/3)...
+[2026-08-07 16:25:10] OK: sigma.py termino sin errores.
+[2026-08-07 16:25:10] Ejecutando digip_pedidos.py (intento 1/3)...
+[2026-08-07 16:25:32] OK: digip_pedidos.py termino sin errores.
+[2026-08-07 16:25:32] Ejecutando digip_preparaciones.py (intento 1/3)...
+[2026-08-07 16:37:11] OK: digip_preparaciones.py termino sin errores.
+[2026-08-07 16:37:11] Ejecutando costos.py (intento 1/2)...
+[2026-08-07 16:39:45] OK: costos.py termino sin errores.
+[2026-08-07 16:39:45] Ejecutando modelo.py (intento 1/3)...
+[2026-08-07 16:44:50] OK: modelo.py termino sin errores.
+[2026-08-07 16:44:50] Ejecutando prorratear_flete.py (intento 1/2)...
+[2026-08-07 16:45:20] OK: prorratear_flete.py termino sin errores.
+[2026-08-07 16:45:20] Ejecutando clasificar_clientes.py (intento 1/2)...
+[2026-08-07 16:45:30] OK: clasificar_clientes.py termino sin errores.
+[2026-08-07 16:45:30] ========== ORQUESTADOR TERMINADO CON EXITO (30.6 min) ==========
