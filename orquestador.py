@@ -1,4 +1,96 @@
 """
+BLOQUE PARA AGREGAR A orquestador.py
+=====================================
+Reemplaza la tarea separada de Task Scheduler "ML - actualizacion diaria"
+(la que se elimino sin querer). En vez de depender de que la compu este
+prendida justo a un horario exacto, esto se apoya en el pipeline que YA
+corre solo cada 1-2 horas: cada vez que el orquestador corre, chequea si
+paso suficiente tiempo desde la ultima vez que actualizo Mercado Libre, y
+si es asi, lo corre en ese momento. Si la compu estuvo apagada durante la
+"ventana" de 20hs, lo va a correr apenas se prenda de nuevo -- no se puede
+quedar trabado indefinidamente como paso con la tarea separada.
+
+COMO INTEGRARLO:
+1. Agregar estos imports arriba del todo de orquestador.py (si no estan ya):
+     import json
+     import os
+     import subprocess
+     import sys
+     from datetime import datetime, timedelta
+
+2. Pegar las 3 funciones de abajo en cualquier parte de orquestador.py
+   (por ejemplo, antes del bloque `if __name__ == "__main__":`).
+
+3. Dentro del bloque principal donde ya llamas a sigma, digip_pedidos, etc,
+   agregar UNA linea mas, en el orden que prefieras (sugerido: al final):
+
+     actualizar_mercadolibre_si_corresponde()
+
+   Quedaria algo asi (ejemplo, ajustar a como esta el tuyo realmente):
+
+     if __name__ == "__main__":
+         extraer_sigma()
+         extraer_digip_pedidos()
+         extraer_digip_preparaciones()
+         actualizar_costos()
+         correr_modelo()
+         prorratear_flete()
+         clasificar_clientes()
+         actualizar_mercadolibre_si_corresponde()   # <-- NUEVA LINEA
+
+4. Listo. La primera vez que corra el pipeline (cada 1-2hs), como no existe
+   todavia el archivo estado_ml.json, va a correr mercadolibre.py de una,
+   y de ahi en mas solo cuando pasen 20+ horas desde la ultima corrida OK.
+"""
+
+ESTADO_ML_PATH = "estado_ml.json"
+HORAS_MINIMAS_ENTRE_CORRIDAS_ML = 20
+
+
+def necesita_actualizar_ml():
+    """True si nunca corrio, o si paso mas tiempo del minimo desde la ultima vez OK."""
+    if not os.path.exists(ESTADO_ML_PATH):
+        return True
+    try:
+        with open(ESTADO_ML_PATH) as f:
+            estado = json.load(f)
+        ultima = datetime.fromisoformat(estado["ultima_corrida_ok"])
+    except (ValueError, KeyError, json.JSONDecodeError):
+        # archivo corrupto o con formato viejo -> forzar actualizacion para curarlo
+        return True
+    return datetime.now() - ultima >= timedelta(hours=HORAS_MINIMAS_ENTRE_CORRIDAS_ML)
+
+
+def marcar_ml_actualizado_ok():
+    with open(ESTADO_ML_PATH, "w") as f:
+        json.dump({"ultima_corrida_ok": datetime.now().isoformat()}, f, indent=2)
+
+
+def actualizar_mercadolibre_si_corresponde():
+    print("\n=== Chequeo de actualizacion Mercado Libre ===")
+    if not necesita_actualizar_ml():
+        print(f"  Todavia no pasaron {HORAS_MINIMAS_ENTRE_CORRIDAS_ML}hs desde la ultima corrida OK. Se saltea.")
+        return
+
+    print("  Corriendo mercadolibre.py...")
+    # sys.executable = el mismo interprete de Python (venv) que esta corriendo el orquestador ahora mismo
+    resultado = subprocess.run(
+        [sys.executable, "mercadolibre.py"],
+        capture_output=True,
+        text=True,
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+    )
+    print(resultado.stdout)
+
+    if resultado.returncode != 0:
+        print("  ERROR corriendo mercadolibre.py, NO se marca como actualizado (se reintenta en la proxima corrida del pipeline):")
+        print(resultado.stderr)
+        return
+
+    marcar_ml_actualizado_ok()
+    print("  mercadolibre.py OK. Proxima corrida programada en ~" + str(HORAS_MINIMAS_ENTRE_CORRIDAS_ML) + "hs.")
+
+"""
 Orquestador del pipeline de datos.
 Corre cada script en orden, con reintentos automaticos si falla por
 problemas transitorios (conexion, timeouts de Supabase, etc.).

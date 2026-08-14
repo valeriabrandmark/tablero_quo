@@ -1,7 +1,7 @@
 import os
 import json
 import pandas as pd
-from datetime import date
+from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
@@ -13,8 +13,13 @@ engine = create_engine(
     connect_args={"client_encoding": "utf8"}
 )
 
-# Fecha de corte: solo ventas del 6 de mayo 2026 en adelante
+# Fecha de corte ABSOLUTA: nunca se procesa nada anterior a esto (piso historico)
 FECHA_CORTE = date(2026, 5, 6)
+
+# Ventana movil: en cada corrida, se re-procesan y reemplazan solo los ultimos N dias.
+# Todo lo anterior a esa ventana en gold.fact_ventas queda intacto (no se vuelve a tocar).
+WINDOW_DAYS = 7
+CUTOFF = max(FECHA_CORTE, date.today() - timedelta(days=WINDOW_DAYS))
 
 
 # Mapeo de codigo de vendedor a nombre (tabla de Sigma, no se extrae por API)
@@ -82,7 +87,7 @@ def to_date(valor):
 
 
 def construir_fact_ventas():
-    print("=== Construyendo fact_ventas (desde 06-05-2026) ===")
+    print(f"=== Construyendo fact_ventas (ventana movil: {CUTOFF} en adelante) ===")
 
     # --- Catalogos auxiliares ---
     print("Leyendo costos historicos y IVA...")
@@ -137,7 +142,7 @@ def construir_fact_ventas():
 
     for _, r in sigma.iterrows():
         f = to_date(r["fecha"])
-        if f is None or f < FECHA_CORTE:
+        if f is None or f < CUTOFF:
             continue
         mc = mes_comercial(f)
         sku = r["itemArticuloId"]
@@ -187,7 +192,7 @@ def construir_fact_ventas():
 
     for _, r in tn.iterrows():
         f = to_date(r["fecha"])
-        if f is None or f < FECHA_CORTE:
+        if f is None or f < CUTOFF:
             continue
         mc = mes_comercial(f)
         sku = r["sku"]
@@ -226,7 +231,7 @@ def construir_fact_ventas():
 
         for _, r in ml.iterrows():
             f = to_date(r["date_created"])
-            if f is None or f < FECHA_CORTE:
+            if f is None or f < CUTOFF:
                 continue
             mc = mes_comercial(f)
             items = json.loads(r["order_items"]) if isinstance(r["order_items"], str) else r["order_items"]
@@ -272,12 +277,29 @@ def construir_fact_ventas():
         offset += LOTE
 
 
-    print(f"Total de lineas (desde corte): {len(filas)}")
+    print(f"Total de lineas (ventana de {WINDOW_DAYS} dias, desde {CUTOFF}): {len(filas)}")
     df = pd.DataFrame(filas)
 
     with engine.begin() as con:
         con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS gold;")
-    df.to_sql("fact_ventas", engine, schema="gold", if_exists="replace", index=False)
+
+        existe = con.exec_driver_sql("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = 'gold' AND table_name = 'fact_ventas'
+            )
+        """).scalar()
+
+        if existe:
+            # Solo se borra (y se va a re-insertar) la ventana movil. Todo lo anterior
+            # a CUTOFF en gold.fact_ventas queda intacto -- no se vuelve a tocar ni reprocesar.
+            resultado = con.exec_driver_sql(
+                "DELETE FROM gold.fact_ventas WHERE fecha >= %(cutoff)s",
+                {"cutoff": CUTOFF}
+            )
+            print(f"  Filas viejas borradas dentro de la ventana (se van a reemplazar): {resultado.rowcount}")
+
+    df.to_sql("fact_ventas", engine, schema="gold", if_exists="append", index=False)
     print("Guardado: gold.fact_ventas")
 
 

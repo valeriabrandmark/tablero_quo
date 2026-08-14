@@ -3,6 +3,7 @@ import json
 import time
 import requests
 import pandas as pd
+from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
@@ -11,6 +12,13 @@ load_dotenv()
 ARCHIVO_TOKENS = "ml_tokens.json"
 USER_ID = os.getenv("ML_USER_ID")
 PAUSA = 1.0
+
+# Fecha de corte ABSOLUTA (piso historico, nunca se pide nada anterior a esto)
+FECHA_CORTE = date(2026, 5, 6)
+
+# Ventana movil: cada corrida solo re-pide (y reemplaza) los ultimos N dias.
+# El resto del historial en bronze.ml_ventas queda intacto.
+WINDOW_DAYS = 7
 
 
 def cargar_tokens():
@@ -64,35 +72,72 @@ def llamar_ml(endpoint, access_token, params=None, max_reintentos=6):
             intento += 1
             if intento > max_reintentos:
                 r.raise_for_status()  # se rindio, que explote como antes
-            # Si ML manda Retry-After, respetarlo. Si no, backoff progresivo.
             espera = int(r.headers.get("Retry-After", 0)) or (5 * intento)
             print(f"  429: esperando {espera}s antes de reintentar (intento {intento}/{max_reintentos})...")
             time.sleep(espera)
-            continue   # vuelve a pedir el mismo request, no avanza el offset
+            continue
 
         r.raise_for_status()
         time.sleep(PAUSA)
         return r.json()
 
 
-def guardar_en_bd(df, tabla, modo="replace"):
-    if df.empty:
-        print(f"  (sin datos para {tabla})")
-        return
+def _crear_engine():
+    return create_engine(
+        f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
+        f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
+    )
+
+
+def _listas_a_texto(df):
     import json as _json
     for col in df.columns:
         if df[col].apply(lambda x: isinstance(x, (list, dict))).any():
             df[col] = df[col].apply(
                 lambda x: _json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else x
             )
-    engine = create_engine(
-        f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
-        f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
-    )
+    return df
+
+
+def guardar_en_bd(df, tabla, modo="replace"):
+    """Para CATALOGOS (publicaciones, stock full): reemplaza la tabla entera.
+       Tiene sentido acá porque representan el estado ACTUAL, no un historial que crece."""
+    if df.empty:
+        print(f"  (sin datos para {tabla})")
+        return
+    df = _listas_a_texto(df)
+    engine = _crear_engine()
     with engine.begin() as con:
         con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
     df.to_sql(tabla, engine, schema="bronze", if_exists=modo, index=False)
     print(f"  Guardado ({modo}): bronze.{tabla} ({len(df)} filas)")
+
+
+def guardar_ventana_en_bd(df, tabla, col_fecha, cutoff):
+    """Para VENTAS (crecen con el tiempo): reemplaza SOLO las filas dentro de la
+       ventana movil (col_fecha >= cutoff). Todo lo anterior a cutoff queda intacto
+       -- no se toca ni se vuelve a pedir a la API de ML."""
+    engine = _crear_engine()
+    with engine.begin() as con:
+        con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
+
+    try:
+        with engine.begin() as con:
+            resultado = con.exec_driver_sql(
+                f'DELETE FROM bronze."{tabla}" WHERE "{col_fecha}"::date >= %(cutoff)s',
+                {"cutoff": cutoff}
+            )
+            print(f"  Filas borradas dentro de la ventana (se van a reemplazar): {resultado.rowcount}")
+    except Exception:
+        print(f"  (tabla bronze.{tabla} no existe todavia, se va a crear)")
+
+    if df.empty:
+        print(f"  (sin ventas nuevas de ML en esta ventana)")
+        return
+
+    df = _listas_a_texto(df)
+    df.to_sql(tabla, engine, schema="bronze", if_exists="append", index=False)
+    print(f"  Guardado (ventana): bronze.{tabla} ({len(df)} filas)")
 
 
 # ============================================================
@@ -100,80 +145,50 @@ def guardar_en_bd(df, tabla, modo="replace"):
 # ============================================================
 
 def extraer_ventas_ml():
-    """Ordenes de ML por QUINCENAS (para no topar el limite de offset 10.000).
-       Cada tramo se cachea en un archivo local: si el script se corta,
-       al volver a correrlo salta los tramos ya descargados sin volver
-       a golpear la API. El guardado en la base se hace UNA sola vez al
-       final, con todos los tramos juntos, para que el esquema de columnas
-       sea consistente (evita el error de columnas faltantes por normalizar
-       cada tramo por separado)."""
-    from datetime import date, timedelta
-    print("\n=== VENTAS MERCADO LIBRE (por quincenas) ===")
-
-    os.makedirs("cache_ml_ventas", exist_ok=True)
+    """Ordenes de ML: SOLO la ventana movil de los ultimos WINDOW_DAYS dias, en una
+       sola pasada (con 7 dias no hace falta partir en quincenas -- no se acerca
+       al limite de offset 10.000 de la API)."""
+    print("\n=== VENTAS MERCADO LIBRE (ventana movil) ===")
 
     access_token = renovar_access_token()
 
     hoy = date.today()
-    inicio = date(2026, 5, 6)
-    todas = []
+    cutoff = max(FECHA_CORTE, hoy - timedelta(days=WINDOW_DAYS))
+    desde = f"{cutoff.isoformat()}T00:00:00.000-00:00"
+    hasta = f"{hoy.isoformat()}T23:59:59.000-00:00"
+    print(f"  Ventana: {cutoff.isoformat()} a {hoy.isoformat()}")
 
-    tramo_inicio = inicio
-    while tramo_inicio <= hoy:
-        tramo_fin = tramo_inicio + timedelta(days=14)   # 15 dias en total
-        if tramo_fin > hoy:
-            tramo_fin = hoy
+    offset = 0
+    limit = 50
+    ordenes = []
+    while True:
+        datos = llamar_ml(
+            "/orders/search",
+            access_token,
+            params={
+                "seller": USER_ID,
+                "order.date_created.from": desde,
+                "order.date_created.to": hasta,
+                "offset": offset,
+                "limit": limit,
+            },
+        )
+        resultados = datos.get("results", [])
+        if not resultados:
+            break
+        ordenes.extend(resultados)
+        total = datos.get("paging", {}).get("total", 0)
+        offset += limit
+        if offset >= total or offset >= 10000:
+            break
 
-        archivo_cache = f"cache_ml_ventas/{tramo_inicio.isoformat()}_{tramo_fin.isoformat()}.json"
+    print(f"  {len(ordenes)} ordenes en la ventana")
+    if len(ordenes) >= 9999:
+        print("  ATENCION: cerca del limite de offset 10.000. Si esto pasa seguido,")
+        print("  achicar WINDOW_DAYS o volver a partir en tramos.")
 
-        if os.path.exists(archivo_cache):
-            print(f"\n  --- {tramo_inicio} a {tramo_fin} --- (desde cache)")
-            with open(archivo_cache, encoding="utf-8") as f:
-                tramo_ordenes = json.load(f)
-            print(f"  Tramo: {len(tramo_ordenes)} ordenes (cacheadas)")
-        else:
-            desde = f"{tramo_inicio.isoformat()}T00:00:00.000-00:00"
-            hasta = f"{tramo_fin.isoformat()}T23:59:59.000-00:00"
-            print(f"\n  --- {tramo_inicio} a {tramo_fin} ---")
-
-            offset = 0
-            limit = 50
-            tramo_ordenes = []
-            while True:
-                datos = llamar_ml(
-                    "/orders/search",
-                    access_token,
-                    params={
-                        "seller": USER_ID,
-                        "order.date_created.from": desde,
-                        "order.date_created.to": hasta,
-                        "offset": offset,
-                        "limit": limit,
-                    },
-                )
-                resultados = datos.get("results", [])
-                if not resultados:
-                    break
-                tramo_ordenes.extend(resultados)
-                total = datos.get("paging", {}).get("total", 0)
-                offset += limit
-                if offset >= total or offset >= 10000:
-                    break
-
-            print(f"  Tramo: {len(tramo_ordenes)} ordenes")
-            if len(tramo_ordenes) >= 9999:
-                print(f"  ATENCION: este tramo llego al limite. Habria que partirlo mas fino.")
-
-            # Guardamos el tramo en cache ANTES de seguir, asi no se pierde si se corta despues
-            with open(archivo_cache, "w", encoding="utf-8") as f:
-                json.dump(tramo_ordenes, f, ensure_ascii=False)
-
-        todas.extend(tramo_ordenes)
-        tramo_inicio = tramo_fin + timedelta(days=1)
-
-    df = pd.json_normalize(todas)
-    print(f"\n  TOTAL ventas ML 2026: {len(df)} ordenes")
-    guardar_en_bd(df, "ml_ventas", modo="replace")
+    df = pd.json_normalize(ordenes)
+    guardar_ventana_en_bd(df, "ml_ventas", "date_created", cutoff)
 
 
 def obtener_ids_publicaciones(access_token):
@@ -198,20 +213,18 @@ def obtener_ids_publicaciones(access_token):
 
 
 def extraer_publicaciones_ml():
-    """Trae el detalle de TODAS las publicaciones de ML (activas, pausadas, cerradas)."""
+    """Trae el detalle de TODAS las publicaciones de ML (activas, pausadas, cerradas).
+       Catalogo -> se reemplaza entero cada vez que corre."""
     print("\n=== PUBLICACIONES MERCADO LIBRE ===")
     access_token = renovar_access_token()
 
     ids = obtener_ids_publicaciones(access_token)
     print(f"  Total de publicaciones: {len(ids)}")
 
-    # Traer detalle de a 20 (multiget)
     detalles = []
     for i in range(0, len(ids), 20):
         lote = ids[i:i + 20]
-        datos = llamar_ml("/items", access_token,
-                          params={"ids": ",".join(lote)})
-        # El multiget devuelve una lista de {code, body}
+        datos = llamar_ml("/items", access_token, params={"ids": ",".join(lote)})
         for item in datos:
             if item.get("code") == 200:
                 detalles.append(item["body"])
@@ -222,17 +235,14 @@ def extraer_publicaciones_ml():
     print(f"  Total con detalle: {len(df)} publicaciones")
     guardar_en_bd(df, "ml_publicaciones", modo="replace")
 
+
 def extraer_stock_full():
     """Trae el stock real en Full (fulfillment) por cada inventory_id.
-       Lee los inventory_id desde la tabla ml_publicaciones ya guardada."""
+       Catalogo (estado actual) -> se reemplaza entero cada vez que corre."""
     print("\n=== STOCK FULL (fulfillment) ===")
     access_token = renovar_access_token()
 
-    # Leer los inventory_id unicos de las publicaciones que estan en Full
-    engine = create_engine(
-        f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
-        f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
-    )
+    engine = _crear_engine()
     query = """
         SELECT DISTINCT inventory_id
         FROM bronze.ml_publicaciones
@@ -247,10 +257,9 @@ def extraer_stock_full():
     for i, inv_id in enumerate(inventory_ids):
         try:
             datos = llamar_ml(f"/inventories/{inv_id}/stock/fulfillment", access_token)
-            datos["inventory_id"] = inv_id   # aseguramos guardar el id
+            datos["inventory_id"] = inv_id
             filas.append(datos)
         except Exception as e:
-            # Si alguno falla (no disponible, etc.), lo registramos y seguimos
             filas.append({"inventory_id": inv_id, "error": str(e)})
         if i % 200 == 0:
             print(f"    Consultados: {i} de {len(inventory_ids)}")
@@ -259,6 +268,7 @@ def extraer_stock_full():
     print(f"  Total: {len(df)} registros de stock full")
     guardar_en_bd(df, "ml_stock_full", modo="replace")
 
+
 # ============================================================
 #  EJECUCION
 # ============================================================
@@ -266,6 +276,6 @@ def extraer_stock_full():
 if __name__ == "__main__":
     print("ML User ID:", USER_ID)
     extraer_ventas_ml()
-    #extraer_publicaciones_ml()
+    extraer_publicaciones_ml()
     extraer_stock_full()
     print("\n=== LISTO. Revisa la tabla ml_ventas en Supabase. ===")

@@ -1,8 +1,7 @@
 import os
-import json
 import requests
 import pandas as pd
-from datetime import date
+from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
@@ -18,20 +17,25 @@ engine = create_engine(
     connect_args={"client_encoding": "utf8"}
 )
 
-# Mismo criterio que sigma.py/mercadolibre.py: desde el 6 de mayo (FECHA_CORTE
-# del modelo) hasta hoy, siempre dinamico para no quedar viejo.
-FECHA_DESDE = date(2026, 5, 6)
+# Fecha de corte ABSOLUTA (piso historico, nunca se pide nada anterior a esto)
+FECHA_CORTE = date(2026, 5, 6)
+
+# Ventana movil: cada corrida solo re-pide (y reemplaza) los ultimos N dias.
+# El resto del historial en bronze.digip_pedidos queda intacto.
+WINDOW_DAYS = 7
 
 
 def extraer_pedidos():
     hoy = date.today()
-    print(f"=== Extrayendo pedidos RemitidoExterno ({FECHA_DESDE.isoformat()} a {hoy.isoformat()}) ===")
+    cutoff = max(FECHA_CORTE, hoy - timedelta(days=WINDOW_DAYS))
+    print(f"=== Extrayendo pedidos RemitidoExterno (ventana: {cutoff.isoformat()} a {hoy.isoformat()}) ===")
+
     todos = []
     page = 1
     while True:
         params = {
             "PedidoEstado": "RemitidoExterno",
-            "FechaPedidoDesde": f"{FECHA_DESDE.isoformat()}T00:00:00",
+            "FechaPedidoDesde": f"{cutoff.isoformat()}T00:00:00",
             "FechaPedidoHasta": f"{hoy.isoformat()}T23:59:59",
             "Page": page,
             "PerPage": 500,
@@ -71,23 +75,32 @@ def extraer_pedidos():
         page += 1
 
     df = pd.DataFrame(todos)
-    print(f"\nTotal pedidos: {len(df)}")
+    print(f"\nTotal pedidos en la ventana: {len(df)}")
     if len(df) > 0:
-        # Solo los de la distri (codigo numerico) para verificar
         distri = df[df["codigo"].astype(str).str.isdigit()]
         print(f"  De distribuidora (codigo numerico): {len(distri)}")
         print(f"  Provincias: {distri['provincia'].value_counts().to_dict()}")
-        # TRUNCATE + APPEND para no romper las vistas
-    # TRUNCATE + APPEND para no romper las vistas
+
+    # Reemplazo SOLO de la ventana movil (deja el resto de la historia intacta)
+    with engine.begin() as con:
+        con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
+
     try:
         with engine.begin() as con:
-            con.exec_driver_sql('TRUNCATE TABLE bronze.digip_pedidos;')
-        df.to_sql("digip_pedidos", engine, schema="bronze", if_exists="append", index=False)
-        print("Guardado (truncate+append) en bronze.digip_pedidos")
-    except Exception as e:
-        print(f"(truncate falló: {str(e)[:80]} -> creando tabla)")
-        df.to_sql("digip_pedidos", engine, schema="bronze", if_exists="replace", index=False)
-        print("Guardado (replace) en bronze.digip_pedidos")
+            resultado = con.exec_driver_sql(
+                'DELETE FROM bronze.digip_pedidos WHERE "fecha"::date >= %(cutoff)s',
+                {"cutoff": cutoff}
+            )
+            print(f"  Filas borradas dentro de la ventana (se van a reemplazar): {resultado.rowcount}")
+    except Exception:
+        print("  (tabla bronze.digip_pedidos no existe todavia, se va a crear)")
+
+    if df.empty:
+        print("  (sin pedidos nuevos en esta ventana)")
+        return
+
+    df.to_sql("digip_pedidos", engine, schema="bronze", if_exists="append", index=False)
+    print("Guardado (ventana) en bronze.digip_pedidos")
 
 
 if __name__ == "__main__":
