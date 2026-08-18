@@ -247,6 +247,9 @@ def construir_fact_ventas():
                 sku = (it.get("item") or {}).get("seller_sku")
                 cant = it.get("quantity") or 0
                 precio = it.get("unit_price") or 0          # ML viene CON IVA
+                # OJO: sale_fee es la comision de UNA unidad, no la del item entero.
+                # Se guarda por unidad (igual que precio_neto y costo_unitario), asi
+                # que el que la use tiene que multiplicarla por la cantidad.
                 comision_con_iva = it.get("sale_fee") or 0
                 comision = comision_con_iva / 1.21
                 iva = iva_de(sku)
@@ -260,7 +263,16 @@ def construir_fact_ventas():
                 else:
                     envio_item = 0
 
-                margen = None if costo is None else (precio_neto - costo) * cant - comision - envio_item
+                # La comision va multiplicada por la cantidad: es por unidad.
+                # Sin el * cant, una linea de 10 unidades descontaba una sola
+                # comision y la ganancia de Mercado Libre quedaba inflada
+                # (21,5 M de mas sobre el historico, un 13%).
+                # El envio NO se multiplica: envio_item ya es la parte de esta
+                # linea del envio total de la orden.
+                margen = (
+                    None if costo is None
+                    else (precio_neto - costo - comision) * cant - envio_item
+                )
                 filas.append({
                     "canal": "Mercado Libre", "unidad": "Quo", "tipo": "Fiscal", "nro_orden": r["id"],
                     "fecha": f, "mes_comercial": mc, "sku": sku,
