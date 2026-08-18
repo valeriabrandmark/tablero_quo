@@ -116,9 +116,45 @@ def construir_fact_ventas():
     def marca_de(sku):
         return marca_por_sku.get(str(sku).strip())
 
-    # Costo de envio por orden (de ml_envios)
-    env = pd.read_sql("SELECT order_id, costo_envio FROM bronze.ml_envios", engine)
-    envio_por_orden = dict(zip(env["order_id"].astype(str), env["costo_envio"]))
+    # Costo de envio, resuelto por ENVIO y no por orden.
+    #
+    # Mercado Libre cobra el envio por PAQUETE, no por orden: un carrito (pack)
+    # junta varias ordenes en un solo envio. bronze.ml_envios guarda una fila por
+    # envio, con el id de UNA sola de esas ordenes (las demas se descartan al
+    # deduplicar por shipping_id).
+    #
+    # Si ese costo se le carga entero a esa unica orden, las otras del mismo
+    # paquete quedan en cero y esa se come todo. Sobre el total general no cambia
+    # nada, pero deja lineas con una rentabilidad que no es la suya -- y son
+    # justo las que despues aparecen como "margen muy bajo" en las alertas.
+    #
+    # Por eso se trae tambien a que envio pertenece cada orden, y el costo se
+    # reparte entre TODAS las lineas de TODAS las ordenes del envio, proporcional
+    # a cuanto vale cada una. Para un envio de una sola orden da exactamente lo
+    # mismo que antes.
+    env = pd.read_sql("""
+        SELECT e.shipping_id,
+               e.costo_envio,
+               v.id::bigint::text AS order_id,
+               -- coalesce por las dudas: un total en null envenenaria la suma
+               -- del envio entero y dejaria el reparto en NaN.
+               coalesce(v.total_amount, 0) AS total_amount
+        FROM bronze.ml_envios e
+        JOIN bronze.ml_ventas v
+          ON v."shipping.id"::bigint::text = e.shipping_id
+        WHERE v.status = 'paid'
+    """, engine)
+    # ml_ventas puede traer la misma orden repetida; sin esto el total del envio
+    # se contaria dos veces y el reparto daria de menos.
+    env = env.drop_duplicates(subset=["shipping_id", "order_id"])
+
+    total_por_envio = env.groupby("shipping_id")["total_amount"].sum()
+
+    # order_id -> (costo del envio al que pertenece, valor total de ESE envio)
+    envio_por_orden = {
+        r.order_id: (r.costo_envio, total_por_envio[r.shipping_id])
+        for r in env.itertuples()
+    }
 
     def costo_de(sku, mc):
         return costo_idx.get((str(sku), mc))
@@ -238,11 +274,11 @@ def construir_fact_ventas():
             items = json.loads(r["order_items"]) if isinstance(r["order_items"], str) else r["order_items"]
             items = items or []
 
-            # Total de la orden (precio con IVA x cantidad) para repartir el envio
-            total_orden = sum((it.get("unit_price") or 0) * (it.get("quantity") or 0) for it in items)
-            # Envio de esta orden, ya NETO (le sacamos el IVA)
-            envio_bruto = envio_por_orden.get(str(r["id"]), 0) or 0
-            envio_neto = envio_bruto / 1.21
+            # Envio del paquete al que pertenece esta orden, y el valor total de
+            # ese paquete (que puede abarcar varias ordenes). Ya NETO: la API de
+            # ML devuelve el costo CON IVA.
+            envio_bruto, total_envio = envio_por_orden.get(str(r["id"]), (0, 0))
+            envio_neto = (envio_bruto or 0) / 1.21
 
             for it in items:
                 sku = (it.get("item") or {}).get("seller_sku")
@@ -257,10 +293,12 @@ def construir_fact_ventas():
                 precio_neto = precio / (1 + iva / 100)
                 costo = costo_de(sku, mc)
 
-                # Reparto del envio: proporcional al valor del item en la orden
+                # Reparto del envio: proporcional al valor de esta linea sobre el
+                # valor de TODO el paquete. Si el paquete es una sola orden, el
+                # denominador es el total de la orden y da igual que antes.
                 valor_item = precio * cant
-                if total_orden > 0:
-                    envio_item = envio_neto * (valor_item / total_orden)
+                if total_envio and total_envio > 0:
+                    envio_item = envio_neto * (valor_item / float(total_envio))
                 else:
                     envio_item = 0
 
