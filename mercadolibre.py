@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import argparse
 import requests
 import pandas as pd
 from datetime import date, timedelta
@@ -273,9 +274,39 @@ def extraer_stock_full():
 #  EJECUCION
 # ============================================================
 
-if __name__ == "__main__":
+# Las tres extracciones no cuestan lo mismo ni envejecen igual:
+#
+#   ventas     -> ventana movil de 7 dias, unos pocos cientos de llamadas.
+#                 Es barato y es lo que mas rapido queda viejo.
+#   publicaciones -> el catalogo entero.
+#   stock full -> UNA llamada por inventory_id (~3.800). Es el paso lento,
+#                 y por eso era el que hacia que "correr Mercado Libre"
+#                 pareciera algo que no se puede hacer seguido.
+#
+# Separarlas deja que el orquestador corra las ventas todo el tiempo y el
+# catalogo cada tanto, en vez de todo o nada.
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Extraccion de Mercado Libre. Sin argumentos corre todo."
+    )
+    parser.add_argument("--ventas", action="store_true",
+                        help="Solo las ventas (ventana movil, rapido)")
+    parser.add_argument("--catalogo", action="store_true",
+                        help="Solo publicaciones y stock full (lento)")
+    args = parser.parse_args()
+
+    # Sin flags = todo, para no romper a quien ya lo corre a mano asi.
+    todo = not (args.ventas or args.catalogo)
+
     print("ML User ID:", USER_ID)
-    extraer_ventas_ml()
-    extraer_publicaciones_ml()
-    extraer_stock_full()
-    print("\n=== LISTO. Revisa la tabla ml_ventas en Supabase. ===")
+    if todo or args.ventas:
+        extraer_ventas_ml()
+    if todo or args.catalogo:
+        extraer_publicaciones_ml()
+        extraer_stock_full()
+    print("\n=== LISTO ===")
+
+
+if __name__ == "__main__":
+    main()

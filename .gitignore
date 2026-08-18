@@ -3,6 +3,11 @@
 ml_tokens.json
 estado_sigma.json
 
+# Estado del orquestador: cuando corrio bien cada paso por ultima vez.
+# Es local a cada maquina, no se comparte.
+estado_pasos.json
+estado_ml.json
+
 # Python
 venv/
 __pycache__/
