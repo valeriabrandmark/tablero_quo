@@ -42,11 +42,8 @@ def extraer_envios():
         ya = pd.read_sql("SELECT shipping_id FROM bronze.ml_envios", engine)
         ya_hechos = set(ya["shipping_id"].astype(str))
         print(f"Ya guardados: {len(ya_hechos)}")
-        # Cargamos los resultados existentes para no perderlos
-        resultados = pd.read_sql("SELECT * FROM bronze.ml_envios", engine).to_dict("records")
     except Exception:
         ya_hechos = set()
-        resultados = []
 
     # 3) Filtrar los que faltan
     ordenes["shipping_id_str"] = ordenes["shipping_id"].astype(str).str.replace(r"\.0$", "", regex=True)
@@ -60,6 +57,28 @@ def extraer_envios():
     token = renovar_access_token()
     headers = {"Authorization": f"Bearer {token}"}
     errores = 0
+
+    # Se guarda AGREGANDO al final de la tabla, no reescribiendola.
+    #
+    # Antes cada checkpoint hacia to_sql(..., if_exists="replace") sobre la lista
+    # entera: eso borra la tabla y la vuelve a crear. Con 17.000 envios por pedir
+    # son ~170 reescrituras de una tabla que crece hasta 34.000 filas, y sobre
+    # todo: si el proceso se cortaba justo durante una de esas reescrituras, la
+    # tabla quedaba vacia y la corrida siguiente tenia que volver a pedirle los
+    # 34.000 a la API desde cero. En una tanda de dos horas eso es la diferencia
+    # entre poder cortarla tranquilo y no poder.
+    #
+    # Agregando, lo que ya se bajo queda guardado pase lo que pase, y cortar la
+    # corrida (Ctrl+C, se corta la luz, lo que sea) no cuesta mas que los ultimos
+    # envios del buffer.
+    nuevos = []
+
+    def guardar_pendientes():
+        if not nuevos:
+            return
+        pd.DataFrame(nuevos).to_sql("ml_envios", engine, schema="bronze",
+                                    if_exists="append", index=False)
+        nuevos.clear()
 
     for i, (_, r) in enumerate(faltan.iterrows(), 1):
         ship_id = r["shipping_id_str"]
@@ -77,7 +96,7 @@ def extraer_envios():
                     if s.get("user_id") == MI_USER_ID:
                         costo_envio = s.get("cost", 0) or 0
                         break
-                resultados.append({
+                nuevos.append({
                     "shipping_id": ship_id,
                     "order_id": str(r["id"]),
                     "costo_envio": costo_envio,
@@ -88,17 +107,18 @@ def extraer_envios():
             errores += 1
 
         if i % 100 == 0:
-            print(f"  {i}/{len(faltan)} nuevos procesados (total {len(resultados)})...")
-            pd.DataFrame(resultados).to_sql("ml_envios", engine, schema="bronze",
-                                            if_exists="replace", index=False)
+            print(f"  {i}/{len(faltan)} pedidos a la API ({errores} con error)...")
+            guardar_pendientes()
         time.sleep(0.1)
 
-    final = pd.DataFrame(resultados)
-    final.to_sql("ml_envios", engine, schema="bronze", if_exists="replace", index=False)
+    guardar_pendientes()
+
+    # El resumen se lee de la tabla y no de una lista en memoria: asi cuenta
+    # tambien lo que quedo de corridas anteriores, que es el numero que importa.
+    final = pd.read_sql("SELECT costo_envio FROM bronze.ml_envios", engine)
     print(f"\nGuardado: bronze.ml_envios ({len(final)} envios totales)")
-    print(f"Errores en esta corrida: {errores}")
-    con_costo = (final["costo_envio"] > 0).sum()
-    print(f"Envios con costo a tu cargo: {con_costo}")
+    print(f"Errores en esta corrida: {errores} (se reintentan en la proxima)")
+    print(f"Envios con costo a tu cargo: {(final['costo_envio'] > 0).sum()}")
     print(f"Costo total de envios: ${final['costo_envio'].sum():,.2f}")
 
 
