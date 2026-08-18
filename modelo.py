@@ -1,3 +1,4 @@
+import argparse
 import os
 import json
 import pandas as pd
@@ -315,6 +316,38 @@ def construir_fact_ventas():
     print("Guardado: gold.fact_ventas")
 
 
-if __name__ == "__main__":
+def main():
+    parser = argparse.ArgumentParser(
+        description="Arma gold.fact_ventas desde las tablas de bronze."
+    )
+    parser.add_argument(
+        "--dias", type=int, default=WINDOW_DAYS,
+        help=f"Cuantos dias hacia atras reconstruir (por defecto {WINDOW_DAYS})",
+    )
+    parser.add_argument(
+        "--todo", action="store_true",
+        help=f"Reconstruye TODO desde {FECHA_CORTE}. Tarda, pero es la unica forma "
+             f"de que un dato que llego tarde a bronze (por ejemplo el costo de "
+             f"envio de meses viejos) entre a gold.",
+    )
+    args = parser.parse_args()
+
+    # La ventana movil es lo correcto para la corrida de todos los dias: reprocesar
+    # cuatro meses cada hora seria tirar tiempo. Pero deja un agujero: si una tabla
+    # de bronze se rellena hacia atras -- que es exactamente lo que pasa cuando
+    # ml_envios.py se pone al dia despues de meses sin correr -- ese dato nunca
+    # entra a gold, porque gold ya no vuelve a mirar esas fechas. Para eso esta
+    # --todo, que se corre a mano una vez y despues no se toca mas.
+    global CUTOFF
+    if args.todo:
+        CUTOFF = FECHA_CORTE
+    else:
+        CUTOFF = max(FECHA_CORTE, date.today() - timedelta(days=args.dias))
+
+    print(f"Ventana a reconstruir: desde {CUTOFF} (hoy es {date.today()})")
     construir_fact_ventas()
     print("\n=== LISTO ===")
+
+
+if __name__ == "__main__":
+    main()
