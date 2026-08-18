@@ -16,6 +16,15 @@
 --
 -- COMO CORRERLO: Supabase -> SQL Editor -> pegar y ejecutar los tres bloques
 -- en orden. El 1 y el 3 solo miran; el 2 es el unico que escribe.
+--
+-- ATAJO O CAMINO LARGO
+-- Esto arregla el margen y nada mas, en dos segundos. La otra opcion es
+-- `python modelo.py --todo`, que reconstruye los cuatro meses enteros: tarda
+-- bastante mas, pero ademas mete en gold el costo de envio que ml_envios.py
+-- haya recuperado de los meses viejos, cosa que este SQL no puede hacer porque
+-- ese dato todavia no esta en fact_ventas.
+--
+-- Si vas a correr `modelo.py --todo` igual, este script no hace falta.
 
 -- ---------------------------------------------------------------------------
 -- 1) ANTES: cuanto se esta corrigiendo
