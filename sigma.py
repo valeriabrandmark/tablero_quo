@@ -8,6 +8,20 @@ from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
+# Cuanto se espera COMO MAXIMO una respuesta de la API, en segundos.
+#
+# No es una optimizacion: sin `timeout`, `requests` espera PARA SIEMPRE si el
+# servidor acepta la conexion y despues no contesta. El proceso no falla ni
+# reintenta -- se queda colgado, el orquestador se cuelga con el, y el
+# Programador de tareas de Windows saltea en silencio todas las corridas
+# siguientes porque para el la tarea "todavia esta ejecutandose".
+#
+# Con timeout, una llamada trabada tira una excepcion, el paso falla, se
+# reintenta, y si igual no anda queda marcado como FALLA en `--listar`. Un paso
+# que falla a la vista se arregla; uno que se cuelga en silencio se descubre
+# horas despues.
+TIMEOUT_HTTP = 120
+
 load_dotenv()
 
 # --- URL base de Sigma ---
@@ -36,7 +50,7 @@ def llamar_sigma(endpoint, params=None):
     url = URL_BASE + endpoint
     intentos_403 = 0
     while True:
-        r = requests.get(url, headers=HEADERS, params=params)
+        r = requests.get(url, headers=HEADERS, params=params, timeout=TIMEOUT_HTTP)
 
         if r.status_code == 429:
             espera_ms = int(r.headers.get("X-Retry-After-ms", 1000))
