@@ -206,6 +206,20 @@ a cuánto vale cada una.
 `costos.py` calcula `costo_real = costo_teorico × (1 − oferta%)` y es ese el que
 llega a `gold.fact_ventas`.
 
+**Nunca `if_exists="replace"` sobre una tabla que ya existe.** `replace` hace
+`DROP TABLE`, y el DROP **falla** si alguien creó una vista encima:
+
+```
+cannot drop table bronze.tn_pedidos_items because other objects depend on it
+DETAIL:  view bronze.tn_control_cancelaciones depends on table ...
+```
+
+Eso dejó a `tiendanube.py` sin traer nada desde el 12/06: se creó la vista y el
+script murió en cada corrida, en el último paso, después de haber bajado bien los
+pedidos. Todos los scripts usan ahora **TRUNCATE + append**, que vacía la tabla
+sin borrarla y deja las vistas en pie. Hoy hay vistas sobre `tn_pedidos_items`,
+`sigma_ventas`, `digip_pedidos`, `digip_preparaciones` y `gold.fact_ventas`.
+
 **Las ventanas móviles reprocesan, no acumulan.** `sigma.py`, `mercadolibre.py` y
 `modelo.py` borran su ventana y la vuelven a insertar. Lo anterior a la ventana
 queda intacto — por eso un dato que llega tarde a `bronze` **no entra solo** a

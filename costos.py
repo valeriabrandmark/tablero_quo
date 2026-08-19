@@ -210,8 +210,21 @@ def cargar_costos(mes=None):
         final.to_sql("costos_historicos", engine, schema="bronze",
                      if_exists="append", index=False)
     else:
+        # TRUNCATE + APPEND y no `if_exists="replace"`: replace hace DROP, y el
+        # DROP falla si alguien crea una vista encima de la tabla. Vaciar en vez
+        # de borrar deja la vista en pie. (Ver tiendanube.py, que estuvo dos
+        # meses roto exactamente por esto.)
+        with engine.begin() as con:
+            existe = con.exec_driver_sql("""
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'bronze' AND table_name = 'costos_historicos'
+                )
+            """).scalar()
+            if existe:
+                con.exec_driver_sql("TRUNCATE TABLE bronze.costos_historicos;")
         final.to_sql("costos_historicos", engine, schema="bronze",
-                     if_exists="replace", index=False)
+                     if_exists="append", index=False)
 
     print(f"\n  Guardado: bronze.costos_historicos ({len(final)} filas de esta corrida)")
     print(f"  Meses cargados ahora: {sorted(final['mes_comercial'].unique())}")

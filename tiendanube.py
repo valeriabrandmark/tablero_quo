@@ -77,6 +77,27 @@ def guardar_en_bd(df, tabla, modo="replace"):
     )
     with engine.begin() as con:
         con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
+    if modo == "replace":
+        # TRUNCATE + APPEND en vez de DROP + CREATE.
+        #
+        # `to_sql(if_exists="replace")` borra la tabla y la vuelve a crear, y eso
+        # FALLA si alguien creo una vista encima:
+        #
+        #   cannot drop table bronze.X because other objects depend on it
+        #
+        # Es lo que dejo a tiendanube.py sin traer nada desde el 12/06: se creo
+        # la vista tn_control_cancelaciones y el script murio en cada corrida.
+        # Vaciar la tabla en vez de borrarla deja la vista en pie.
+        try:
+            with engine.begin() as con:
+                con.exec_driver_sql(f'TRUNCATE TABLE bronze."{tabla}";')
+            df.to_sql(tabla, engine, schema="bronze", if_exists="append", index=False)
+            print(f"  Guardado (truncate+append): bronze.{tabla} ({len(df)} filas)")
+            return
+        except Exception as e:
+            # La tabla todavia no existe: que la cree el to_sql de abajo.
+            print(f"  (no se pudo truncate: {str(e)[:80]}... -> creando tabla)")
+
     df.to_sql(tabla, engine, schema="bronze", if_exists=modo, index=False)
     print(f"  Guardado ({modo}): bronze.{tabla} ({len(df)} filas)")
 
