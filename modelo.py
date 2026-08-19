@@ -79,12 +79,33 @@ def mes_comercial(fecha):
     return f"{anio:04d}-{mes:02d}"
 
 
+ZONA = "America/Argentina/Buenos_Aires"
+
+
 def to_date(valor):
-    """Convierte cualquier formato de fecha a date (o None)."""
-    ts = pd.to_datetime(valor, errors="coerce", utc=True)
+    """Fecha CALENDARIO argentina del dato, o None.
+
+    Antes esto hacia `pd.to_datetime(valor, utc=True).date()`, o sea que se
+    quedaba con la fecha en UTC. Para Sigma daba igual (manda "2026-08-19", sin
+    hora), pero Mercado Libre manda "2026-08-19T09:54:37.000-04:00" y Tienda
+    Nube "2026-06-11T12:52:39+0000": ahi la hora existe, y con UTC toda venta
+    hecha despues de las 21:00 hora argentina quedaba anotada al dia siguiente.
+
+    Eran 6.719 ordenes de 38.287, un 17,5%. El dia del tablero terminaba a las
+    21:00 en vez de a medianoche, y en el borde del mes comercial (del 5 al 6)
+    algunas ventas caian en el mes equivocado.
+
+    El `tzinfo is None` no es un detalle: sin el, la fecha pelada de Sigma se
+    tomaria como medianoche UTC y al pasarla a hora argentina daria las 21:00
+    del dia ANTERIOR, corriendo todas las ventas mayoristas un dia para atras.
+    Un dato sin hora ya viene en hora local y no hay nada que convertir.
+    """
+    ts = pd.to_datetime(valor, errors="coerce")
     if pd.isna(ts):
         return None
-    return ts.date()
+    if ts.tzinfo is None:
+        return ts.date()
+    return ts.tz_convert(ZONA).date()
 
 
 def construir_fact_ventas():
