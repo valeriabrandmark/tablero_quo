@@ -71,11 +71,25 @@ Solo tres scripts aceptan argumentos. El resto se corre pelado.
 | `modelo.py` | `--dias N`, `--todo` | ventana de 7 días |
 | `mercadolibre.py` | `--ventas`, `--catalogo` | corre todo |
 | `orquestador.py` | `--forzar`, `--solo`, `--listar` | respeta frecuencias |
-| `costos.py` | — | **siempre reescribe todo** |
+| `costos.py` | `AAAA-MM` (posicional), `--listar` | todos los meses |
 | `ml_envios.py` | — | **siempre incremental** (solo lo que falta) |
 
-`costos.py` y `ml_envios.py` no necesitan flags porque cada uno ya resuelve solo
-su alcance.
+`ml_envios.py` no necesita flags: ya resuelve solo su alcance, porque pide
+únicamente los envíos que todavía no tiene.
+
+En `costos.py` el mes va suelto, sin `--`:
+
+```bash
+python costos.py            # los cuatro meses, reescribe la tabla entera
+python costos.py 2026-08    # solo agosto, los otros meses quedan intactos
+python costos.py --listar   # qué meses hay en la carpeta
+```
+
+Con un mes **no** se reescribe la tabla: se borra ese mes y se vuelve a
+insertar. Reescribir todo teniendo un solo mes cargado se llevaría puestos los
+demás, que es justo lo que uno no quiere al corregir un Excel suelto. Al
+terminar imprime cuántos SKUs quedaron por mes en la tabla completa, que es la
+forma de confirmar que los otros siguen ahí.
 
 ---
 
@@ -84,7 +98,7 @@ su alcance.
 ### Cambié un `.xlsx` de costos
 
 ```bash
-python costos.py
+python costos.py 2026-08     # el mes que tocaste
 python modelo.py --dias 30
 ```
 
