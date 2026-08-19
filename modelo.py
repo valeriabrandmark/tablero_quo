@@ -108,6 +108,29 @@ def to_date(valor):
     return ts.tz_convert(ZONA).date()
 
 
+def piso_sql():
+    """El `desde` que se le pasa a las consultas de bronze, como 'YYYY-MM-DD'.
+
+    POR QUE EXISTE
+    Antes las consultas a bronze no filtraban por fecha: se traian los CUATRO
+    MESES enteros -- 38.490 ordenes de Mercado Libre, 10.453 lineas de Sigma --
+    se les parseaba el JSON a todas, y despues se descartaba el 94% con un `if`
+    en Python. Reconstruir una semana costaba procesar el historico completo, y
+    ahi se iban casi seis minutos de cada corrida.
+
+    POR QUE VA UN DIA ANTES DE CUTOFF
+    Las fechas en bronze son texto y vienen en el huso de cada origen -- Mercado
+    Libre manda -04:00, que no es el de Argentina --, asi que una orden de las
+    23 hs puede caer en el dia siguiente una vez convertida. Con un dia de
+    margen no se escapa ninguna.
+
+    El filtro EXACTO lo sigue haciendo Python con `if f < CUTOFF: continue`, que
+    ya convierte a hora argentina. Este piso no decide que entra: solo evita
+    traer de la base lo que se va a tirar igual.
+    """
+    return (CUTOFF - timedelta(days=1)).isoformat()
+
+
 def construir_fact_ventas():
     print(f"=== Construyendo fact_ventas (ventana movil: {CUTOFF} en adelante) ===")
 
@@ -196,7 +219,8 @@ def construir_fact_ventas():
                "comprobanteTipo"
         FROM bronze.sigma_ventas
         WHERE empresa IN ('0001','0002','0003','0004')
-    """, engine)
+          AND left(fecha, 10) >= '{desde}'
+    """.format(desde=piso_sql()), engine)
 
     for _, r in sigma.iterrows():
         f = to_date(r["fecha"])
@@ -280,6 +304,7 @@ def construir_fact_ventas():
                cliente_nombre, {col_envio}
         FROM bronze.tn_pedidos_items
         WHERE estado_pago = 'paid' AND estado <> 'cancelled'
+          AND left(fecha, 10) >= '{piso_sql()}'
     """, engine)
 
     # `envio_costo_tienda` es lo que paga LA TIENDA por el flete, y viene en la
@@ -337,6 +362,7 @@ def construir_fact_ventas():
             SELECT id, date_created, order_items, "buyer.nickname"
             FROM bronze.ml_ventas
             WHERE status = 'paid'
+              AND left(date_created, 10) >= '{piso_sql()}'
             ORDER BY id
             LIMIT {LOTE} OFFSET {offset}
         """, engine)
@@ -412,6 +438,20 @@ def construir_fact_ventas():
     with engine.begin() as con:
         con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS gold;")
 
+    # EL BORRADO Y LA INSERCION VAN EN LA MISMA TRANSACCION.
+    #
+    # Antes estaban en dos: se confirmaba el DELETE y recien despues se
+    # insertaba. Entre una cosa y la otra, gold.fact_ventas -- que es la tabla
+    # que lee el tablero EN VIVO -- se quedaba sin los ultimos 7 dias. Quien
+    # entrara justo en ese momento veia la semana en cero y lo leia como que no
+    # se vendio nada.
+    #
+    # Ahora quien consulta sigue viendo la version anterior COMPLETA hasta que
+    # la nueva esta entera. Nunca hay un momento con el agujero a la vista.
+    #
+    # Ojo: `df.to_sql` recibe `con` y no `engine`. Con `engine` abriria su
+    # propia transaccion y volveriamos a tener el mismo problema.
+    with engine.begin() as con:
         existe = con.exec_driver_sql("""
             SELECT EXISTS (
                 SELECT 1 FROM information_schema.tables
@@ -428,7 +468,8 @@ def construir_fact_ventas():
             )
             print(f"  Filas viejas borradas dentro de la ventana (se van a reemplazar): {resultado.rowcount}")
 
-    df.to_sql("fact_ventas", engine, schema="gold", if_exists="append", index=False)
+        df.to_sql("fact_ventas", con, schema="gold", if_exists="append", index=False)
+
     print("Guardado: gold.fact_ventas")
 
 

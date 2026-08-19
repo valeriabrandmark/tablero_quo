@@ -33,24 +33,43 @@ python orquestador.py --solo modelo.py  # un solo paso
 
 ## Los pasos, en orden
 
-El orden no es decorativo: `modelo.py` arma `gold.fact_ventas` leyendo lo que
-dejaron todas las extracciones, así que **todas van antes que él**.
+El orden **es el del camino crítico**, no el histórico. Primero va todo lo que
+`modelo.py` necesita para armar `gold.fact_ventas`, después `modelo.py`, y
+recién al final lo que nadie está esperando.
+
+Eso sale de mirar qué tabla lee cada transformación: **`modelo.py` no usa
+`ml_publicaciones`, `ml_stock_full` ni `digip_pedidos`**. Antes el catálogo de
+Mercado Libre —33 minutos— estaba en el medio, así que el tablero de ventas
+esperaba media hora por datos que no usa.
+
+#### Bloque 1 — el tablero de ventas queda al día (~2 min)
 
 | # | Paso | Cada | Escribe | Corta si falla |
 |---|---|---|---|---|
 | 1 | `sigma.py --ventas` | siempre | `bronze.sigma_ventas` | sí |
 | 2 | `sigma.py --catalogo` | 24 h | `bronze.sigma_articulos` | no |
-| 3 | `digip_pedidos.py` | siempre | `bronze.digip_pedidos` | sí |
-| 4 | `digip_preparaciones.py` | 6 h | `bronze.digip_preparaciones` | no |
-| 5 | `mercadolibre.py --ventas` | 2 h | `bronze.ml_ventas` | no |
-| 6 | `ml_envios.py` | 4 h | `bronze.ml_envios` | no |
-| 7 | `mercadolibre.py --catalogo` | 12 h | `bronze.ml_publicaciones`, `ml_stock_full` | no |
-| 8 | `digip.py` | 4 h | `bronze.digip_stock`, `digip_stock_detalle` | no |
-| 9 | `tiendanube.py` | 4 h | `bronze.tn_pedidos`, `tn_pedidos_items` | no |
-| 10 | `costos.py --si-cambio` | si cambió un Excel | `bronze.costos_historicos` | sí |
-| 11 | `modelo.py` | siempre | **`gold.fact_ventas`** | sí |
-| 12 | `prorratear_flete.py` | siempre | `gold.fact_ventas_flete` | sí |
-| 13 | `clasificar_clientes.py` | siempre | `gold.clientes_clasificados` | sí |
+| 3 | `mercadolibre.py --ventas` | siempre | `bronze.ml_ventas` | no |
+| 4 | `ml_envios.py` | 4 h | `bronze.ml_envios` | no |
+| 5 | `tiendanube.py` | 4 h | `bronze.tn_pedidos`, `tn_pedidos_items` | no |
+| 6 | `costos.py --si-cambio` | si cambió un Excel | `bronze.costos_historicos` | sí |
+| 7 | **`modelo.py`** | siempre | **`gold.fact_ventas`** | sí |
+
+#### Bloque 2 — nadie está esperando esto
+
+| # | Paso | Cada | Escribe | Corta si falla |
+|---|---|---|---|---|
+| 8 | `digip.py` | siempre | `bronze.digip_stock`, `digip_stock_detalle` | no |
+| 9 | `digip_pedidos.py` | siempre | `bronze.digip_pedidos` | no |
+| 10 | `digip_preparaciones.py` | 6 h | `bronze.digip_preparaciones` | no |
+| 11 | `prorratear_flete.py` | 12 h | `gold.fact_ventas_flete` | no |
+| 12 | `clasificar_clientes.py` | siempre | `gold.clientes_clasificados` | no |
+| 13 | `mercadolibre.py --catalogo` | **1/día** | `bronze.ml_publicaciones`, `ml_stock_full` | no |
+
+**`1/día` no es lo mismo que `cada_horas: 24`.** Con 24 horas, un paso que ayer
+corrió a las 15 hoy vuelve a las 15 — plena tarde, con gente mirando el tablero.
+`primera_del_dia` lo pone en la **primera corrida del día**, que en esta oficina
+es cuando se prende la máquina a la mañana. Y si estuvo apagada tres días, corre
+en la primera que haya: no espera un horario fijo que ya pasó.
 
 ### De dónde salen esas frecuencias
 
@@ -58,11 +77,19 @@ Del log de 24 corridas reales, midiendo cuánto tarda cada paso:
 
 | Paso | Mediana |
 |---|---|
+| `mercadolibre.py --catalogo` | 33 min |
 | `digip_preparaciones.py` | 9,8 min |
 | `sigma.py` (las dos juntas) | 6,9 min |
 | `modelo.py` | 5,9 min |
 | `costos.py` | 1,4 min |
 | el resto | menos de 30 s |
+
+`mercadolibre.py --catalogo` no estaba en esa medición porque **nunca había
+llegado a correr**: se midió el 19/08/2026, la primera vez. Son ~4.300 llamadas
+a la API — una por cada `inventory_id` para el stock Full— y con la `PAUSA` de
+1 segundo que tenía tardaba **83 minutos, de los cuales 72 eran el script
+durmiendo**. Con `PAUSA = 0.3` baja a ~33. El freno real nunca fue esa pausa
+sino el 429 de la API, que `llamar_ml` ya sabe manejar.
 
 La corrida entera daba **25 minutos**, cada dos horas, y la mayor parte era volver
 a pedir cosas que no habían cambiado. El caso más claro: `sigma_articulos` acumuló
@@ -299,6 +326,58 @@ el turno". La diferencia importa: `tiendanube.py` estuvo desde el 12/06 sin trae
 nada porque fallaba en silencio, y en la pantalla se veía igual que un paso
 esperando su turno.
 
+## Por qué modelo.py bajó de 6 minutos a menos de 1
+
+Las consultas a `bronze` **no filtraban por fecha**. Para reconstruir la ventana
+de 7 días se traían los cuatro meses enteros, se les parseaba el JSON a todas
+las órdenes, y después se descartaba el 94 % con un `if` en Python:
+
+| Tabla | Traía | Usaba (7 días) | De más |
+|---|---|---|---|
+| `bronze.ml_ventas` | 38.490 | 2.226 | **17×** |
+| `bronze.sigma_ventas` | 10.453 | 565 | **18×** |
+
+Ahí se iban casi seis minutos de cada corrida. Ahora el filtro va en el `WHERE`.
+
+**La ventana de 7 días no era el problema**, y por eso se dejó en 7: entre 7 días
+y 2 hay 1.300 filas de diferencia — segundos. Lo caro era traer el histórico. Y
+esos 7 días son la red que cubre a la máquina cuando pasa medio día apagada.
+
+`piso_sql()` le pasa a SQL **un día antes** de `CUTOFF`. Las fechas en `bronze`
+son texto y vienen en el huso de cada origen —Mercado Libre manda `-04:00`, que
+no es el de Argentina—, así que una orden de las 23 hs puede caer en el día
+siguiente al convertirla. El filtro exacto lo sigue haciendo Python. Verificado
+contra los datos: **0 filas perdidas**.
+
+---
+
+## Nadie tiene que ver una tabla a medio escribir
+
+El borrado y la inserción estaban en **transacciones separadas**:
+
+```python
+with engine.begin() as con:
+    ... DELETE FROM gold.fact_ventas WHERE fecha >= cutoff ...   # confirmado
+df.to_sql(...)                                                   # recién acá
+```
+
+Entre una cosa y la otra, `gold.fact_ventas` —que el tablero lee **en vivo**— se
+quedaba sin los últimos 7 días. Quien entrara justo ahí veía la semana en cero y
+lo leía como que no se vendió nada. No es teórico: en mitad de una corrida
+`bronze.ml_ventas` tenía 40.588 órdenes cuando un minuto antes tenía 43.207.
+
+Ahora las dos operaciones van en **una sola transacción**, en todos los scripts.
+Quien consulta sigue viendo la versión anterior completa hasta que la nueva está
+entera.
+
+**`DELETE` y no `TRUNCATE`:** los dos son transaccionales, pero `TRUNCATE` toma
+un lock exclusivo que ahora duraría toda la inserción y dejaría al tablero
+esperando. `DELETE` usa el control de versiones de Postgres y no bloquea a los
+lectores. Con estas tablas —miles de filas, no millones— la diferencia de
+velocidad no se nota.
+
+---
+
 ## Por qué la corrida tiene un reloj encima
 
 El 19/08/2026 el orquestador corrió a las 10 y **no volvió a correr en todo el
@@ -321,7 +400,7 @@ todas las siguientes**. Por eso ahora hay tres topes.
 | Tope | Dónde | Cuánto |
 |---|---|---|
 | `TIMEOUT_HTTP` | en cada script | 30 s a 120 s según la API |
-| `techo` | por paso, en `PASOS` | 15 a 45 min (3-4× la mediana medida) |
+| `techo` | por paso, en `PASOS` | 15 a 60 min (3-4× la mediana medida) |
 | `PRESUPUESTO_TOTAL` | la corrida entera | 100 min |
 
 **El presupuesto total es el que resuelve el problema de fondo.** Antes de cada
