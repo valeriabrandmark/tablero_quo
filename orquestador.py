@@ -101,9 +101,12 @@ PASOS = [
     {"comando": "digip.py",                    "intentos": 2, "espera": 30,
      "cada_horas": 4, "critico": False, "escribe": "digip_stock, digip_stock_detalle"},
 
-    # Tienda Nube: 34 lineas en dos meses. No justifica mas seguido.
+    # Tienda Nube vende poco (unos 8 pedidos por mes), pero desde que tiene
+    # tablero propio la frecuencia ya no la manda el volumen sino la espera:
+    # con 12 h, una venta de la manana recien aparecia a la noche. La bajada es
+    # una sola pagina de la API y tarda segundos, asi que sale barato.
     {"comando": "tiendanube.py",               "intentos": 2, "espera": 30,
-     "cada_horas": 12, "critico": False, "escribe": "tn_pedidos_items"},
+     "cada_horas": 4, "critico": False, "escribe": "tn_pedidos + tn_pedidos_items"},
 
     # Los Excel de costos solo cambian cuando alguien los edita: el script
     # compara una huella de los archivos y no hace nada si no se movio ninguno.
