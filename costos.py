@@ -207,13 +207,19 @@ def cargar_costos(mes=None):
                     {"mes": mes},
                 ).rowcount
                 print(f"\n  Filas viejas de {mes} borradas: {borradas}")
-        final.to_sql("costos_historicos", engine, schema="bronze",
-                     if_exists="append", index=False)
+            # Dentro del `with`: borrar y reinsertar tienen que ser una sola
+            # transaccion, o entre las dos ese mes queda sin costos y modelo.py
+            # -- si corre justo ahi -- calcula margenes sin costo.
+            final.to_sql("costos_historicos", con, schema="bronze",
+                         if_exists="append", index=False)
     else:
-        # TRUNCATE + APPEND y no `if_exists="replace"`: replace hace DROP, y el
-        # DROP falla si alguien crea una vista encima de la tabla. Vaciar en vez
-        # de borrar deja la vista en pie. (Ver tiendanube.py, que estuvo dos
-        # meses roto exactamente por esto.)
+        # DELETE + APPEND EN UNA SOLA TRANSACCION, y no `if_exists="replace"`:
+        # replace hace DROP, y el DROP falla si alguien crea una vista encima de
+        # la tabla. (Ver tiendanube.py, que estuvo dos meses roto por esto.)
+        #
+        # Y las dos operaciones juntas para que la tabla no quede vacia en el
+        # medio: modelo.py lee los costos de aca, y si corre justo en ese hueco
+        # arma gold.fact_ventas entero sin margenes.
         with engine.begin() as con:
             existe = con.exec_driver_sql("""
                 SELECT EXISTS (
@@ -222,9 +228,9 @@ def cargar_costos(mes=None):
                 )
             """).scalar()
             if existe:
-                con.exec_driver_sql("TRUNCATE TABLE bronze.costos_historicos;")
-        final.to_sql("costos_historicos", engine, schema="bronze",
-                     if_exists="append", index=False)
+                con.exec_driver_sql("DELETE FROM bronze.costos_historicos;")
+            final.to_sql("costos_historicos", con, schema="bronze",
+                         if_exists="append", index=False)
 
     print(f"\n  Guardado: bronze.costos_historicos ({len(final)} filas de esta corrida)")
     print(f"  Meses cargados ahora: {sorted(final['mes_comercial'].unique())}")

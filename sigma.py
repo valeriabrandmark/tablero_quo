@@ -107,12 +107,30 @@ def guardar_en_bd(df, tabla, modo="replace"):
         con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
 
     if modo == "replace":
-        # TRUNCATE + APPEND: vacia la tabla sin borrarla -> no rompe vistas que dependan de ella
+        # REEMPLAZO ATOMICO: vacia la tabla sin borrarla -> no rompe vistas que dependan de ella
         try:
+            # BORRAR E INSERTAR EN UNA SOLA TRANSACCION.
+            #
+            # Antes eran dos: primero se confirmaba el TRUNCATE y despues, por
+            # separado, se insertaba. En el medio la tabla quedaba VACIA para
+            # cualquiera que la consultara -- y el tablero lee estas tablas en
+            # vivo. Se vio pasando: en mitad de una corrida bronze.ml_ventas
+            # tenia 40.588 ordenes cuando un minuto antes tenia 43.207.
+            #
+            # Con las dos cosas en la misma transaccion, quien consulta sigue
+            # viendo la version ANTERIOR completa hasta que la nueva esta
+            # entera. Nunca ve un agujero.
+            #
+            # DELETE y no TRUNCATE: los dos son transaccionales, pero TRUNCATE
+            # toma un lock exclusivo que ahora duraria toda la insercion y
+            # dejaria al tablero esperando. DELETE usa el control de versiones
+            # de Postgres, asi que los lectores no se bloquean nunca. Con estas
+            # tablas (miles de filas, no millones) la diferencia de velocidad no
+            # se nota.
             with engine.begin() as con:
-                con.exec_driver_sql(f'TRUNCATE TABLE bronze."{tabla}";')
-            df.to_sql(tabla, engine, schema="bronze", if_exists="append", index=False)
-            print(f"  Guardado (truncate+append): bronze.{tabla} ({len(df)} filas)")
+                con.exec_driver_sql(f'DELETE FROM bronze."{tabla}";')
+                df.to_sql(tabla, con, schema="bronze", if_exists="append", index=False)
+            print(f"  Guardado (reemplazo atomico): bronze.{tabla} ({len(df)} filas)")
             return
         except Exception as e:
             print(f"  (no se pudo truncate: {str(e)[:80]}... -> creando tabla)")

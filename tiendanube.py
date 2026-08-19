@@ -90,7 +90,7 @@ def tipo_sql(serie):
 def agregar_columnas_nuevas(engine, tabla, df):
     """Le agrega a la tabla las columnas que trae el DataFrame y ella todavia no.
 
-    Hace falta porque guardamos con TRUNCATE + append en vez de DROP + CREATE
+    Hace falta porque guardamos con DELETE + append en vez de DROP + CREATE
     (ver abajo): el append inserta contra las columnas que YA existen, asi que
     el dia que se empieza a traer un campo nuevo -- por ejemplo el costo de
     envio -- el INSERT falla con `column "envio_costo_tienda" does not exist`.
@@ -136,7 +136,7 @@ def guardar_en_bd(df, tabla, modo="replace"):
         con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
     agregar_columnas_nuevas(engine, tabla, df)
     if modo == "replace":
-        # TRUNCATE + APPEND en vez de DROP + CREATE.
+        # REEMPLAZO ATOMICO (borrar + insertar juntos) en vez de DROP + CREATE.
         #
         # `to_sql(if_exists="replace")` borra la tabla y la vuelve a crear, y eso
         # FALLA si alguien creo una vista encima:
@@ -147,10 +147,28 @@ def guardar_en_bd(df, tabla, modo="replace"):
         # la vista tn_control_cancelaciones y el script murio en cada corrida.
         # Vaciar la tabla en vez de borrarla deja la vista en pie.
         try:
+            # BORRAR E INSERTAR EN UNA SOLA TRANSACCION.
+            #
+            # Antes eran dos: primero se confirmaba el TRUNCATE y despues, por
+            # separado, se insertaba. En el medio la tabla quedaba VACIA para
+            # cualquiera que la consultara -- y el tablero lee estas tablas en
+            # vivo. Se vio pasando: en mitad de una corrida bronze.ml_ventas
+            # tenia 40.588 ordenes cuando un minuto antes tenia 43.207.
+            #
+            # Con las dos cosas en la misma transaccion, quien consulta sigue
+            # viendo la version ANTERIOR completa hasta que la nueva esta
+            # entera. Nunca ve un agujero.
+            #
+            # DELETE y no TRUNCATE: los dos son transaccionales, pero TRUNCATE
+            # toma un lock exclusivo que ahora duraria toda la insercion y
+            # dejaria al tablero esperando. DELETE usa el control de versiones
+            # de Postgres, asi que los lectores no se bloquean nunca. Con estas
+            # tablas (miles de filas, no millones) la diferencia de velocidad no
+            # se nota.
             with engine.begin() as con:
-                con.exec_driver_sql(f'TRUNCATE TABLE bronze."{tabla}";')
-            df.to_sql(tabla, engine, schema="bronze", if_exists="append", index=False)
-            print(f"  Guardado (truncate+append): bronze.{tabla} ({len(df)} filas)")
+                con.exec_driver_sql(f'DELETE FROM bronze."{tabla}";')
+                df.to_sql(tabla, con, schema="bronze", if_exists="append", index=False)
+            print(f"  Guardado (reemplazo atomico): bronze.{tabla} ({len(df)} filas)")
             return
         except Exception as e:
             # La tabla todavia no existe: que la cree el to_sql de abajo.

@@ -172,16 +172,20 @@ def construir_fact_ventas_flete():
             );
         """)
 
-    # TRUNCATE + APPEND (mismo patron que tus otros scripts, no rompe vistas si algo la referencia)
+    # DELETE + APPEND en una sola transaccion (no `replace`, que hace DROP y
+    # rompe si alguien crea una vista encima).
+    #
+    # Las dos juntas para que gold.fact_ventas_flete no quede vacia en el medio:
+    # la lee el tablero de Logistica en vivo.
     with engine.begin() as con:
         try:
-            con.exec_driver_sql("TRUNCATE TABLE gold.fact_ventas_flete;")
+            con.exec_driver_sql("DELETE FROM gold.fact_ventas_flete;")
         except Exception as e:
-            print(f"  No se pudo truncar (¿tabla recien creada?): {e}")
+            print(f"  No se pudo vaciar (¿tabla recien creada?): {e}")
 
-    df_resultado.to_sql(
-        "fact_ventas_flete", engine, schema="gold", if_exists="append", index=False
-    )
+        df_resultado.to_sql(
+            "fact_ventas_flete", con, schema="gold", if_exists="append", index=False
+        )
     print("Guardado: gold.fact_ventas_flete")
 
 
