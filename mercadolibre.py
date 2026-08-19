@@ -26,7 +26,21 @@ load_dotenv()
 
 ARCHIVO_TOKENS = "ml_tokens.json"
 USER_ID = os.getenv("ML_USER_ID")
-PAUSA = 1.0
+# Segundos de espera entre llamada y llamada a la API de Mercado Libre.
+#
+# Estaba en 1.0, y eso no era una precaucion sino un costo escondido: el paso
+# `--catalogo` hace ~4.300 llamadas (una por cada inventory_id para el stock
+# Full), asi que UNA HORA Y CUARTO de ese paso era el script durmiendo. Medido
+# el 19/08/2026, la primera vez que ese paso llego a correr.
+#
+# Bajarlo es seguro porque el limite de Mercado Libre esta MUY por encima de
+# esto, y sobre todo porque `llamar_ml` ya maneja el 429: si alguna vez se pasa,
+# espera lo que le pidan y reintenta. O sea que el freno real no es esta pausa,
+# es la respuesta de la API -- esta pausa solo evita ir a golpear la puerta al
+# pedo.
+#
+# Si algun dia aparecen 429 seguidos en el log, subirlo es el primer ajuste.
+PAUSA = 0.3
 
 # Fecha de corte ABSOLUTA (piso historico, nunca se pide nada anterior a esto)
 FECHA_CORTE = date(2026, 5, 6)
