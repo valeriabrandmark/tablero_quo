@@ -1,3 +1,4 @@
+import argparse
 import os
 import time
 import json
@@ -222,18 +223,48 @@ def extraer_compras():
 #  EJECUCION
 # ============================================================
 
-if __name__ == "__main__":
+# Las dos extracciones activas no envejecen igual ni cuestan lo mismo:
+#
+#   ventas   -> ventana movil de 7 dias. Es el corazon del tablero y hay que
+#               pedirlo seguido.
+#   catalogo -> los ~8.200 articulos, reescritos enteros. Un articulo nuevo o un
+#               cambio de descripcion no pasa cada dos horas.
+#
+# Estaban juntos, asi que el catalogo se recargaba entero en cada corrida:
+# 335.816 inserciones acumuladas para tener 8.194 filas vivas, o sea unas 41
+# recargas del mismo catalogo. Separarlas deja pedir las ventas seguido y el
+# catalogo una vez por dia.
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Extraccion de SIGMA. Sin argumentos corre todo."
+    )
+    parser.add_argument("--ventas", action="store_true",
+                        help="Solo las ventas (ventana movil)")
+    parser.add_argument("--catalogo", action="store_true",
+                        help="Solo el catalogo de articulos")
+    args = parser.parse_args()
+
+    # Sin flags = todo, para no romper a quien ya lo corre a mano asi.
+    todo = not (args.ventas or args.catalogo)
+
     print("URL base:", URL_BASE)
     print("Token cargado:", "SI" if TOKEN else "NO")
 
-    # --- Catalogos (comentados; activar cuando corresponda, no hace falta cada corrida) ---
+    if todo or args.ventas:
+        extraer_ventas()
+    if todo or args.catalogo:
+        extraer_articulos()
+
+    # Estos siguen apagados; se activan cuando haga falta, no cada corrida.
     #extraer_clientes()
     #extraer_cuentas_corrientes()
     #extraer_ofertas()
-
-    extraer_ventas()
     #extraer_compras()
-    extraer_articulos()
     # extraer_stock()  -> el stock ahora viene de DIGIP, no de Sigma
 
     print("\n=== LISTO. Revisa las tablas en Supabase (esquema bronze). ===")
+
+
+if __name__ == "__main__":
+    main()

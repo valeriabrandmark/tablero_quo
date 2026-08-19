@@ -1,4 +1,6 @@
 import argparse
+import hashlib
+import json
 import os
 import glob
 import re
@@ -78,6 +80,36 @@ def leer_hoja_flexible(archivo, hoja, columnas_necesarias, max_filas_prueba=5):
     # Si no encontro, lee normal y deja que falle con mensaje claro
     raise ValueError(f"No se encontraron las columnas {columnas_necesarias} "
                      f"en la hoja '{hoja}' de {archivo}")
+
+
+ARCHIVO_HUELLA = "estado_costos.json"
+
+
+def huella_de_los_excel():
+    """Una firma de los .xlsx: cambia si cambia cualquiera de ellos.
+
+    Se usan tamano + fecha de modificacion y no el contenido entero porque los
+    cuatro archivos pesan 11 MB juntos: leerlos para hashearlos costaria casi lo
+    mismo que procesarlos, que es lo que se quiere evitar.
+    """
+    h = hashlib.sha256()
+    for archivo in sorted(glob.glob(os.path.join(CARPETA_COSTOS, "*.xlsx"))):
+        st = os.stat(archivo)
+        h.update(f"{os.path.basename(archivo)}:{st.st_size}:{int(st.st_mtime)}|".encode())
+    return h.hexdigest()
+
+
+def huella_guardada():
+    try:
+        with open(ARCHIVO_HUELLA, encoding="utf-8") as f:
+            return json.load(f).get("huella")
+    except (OSError, ValueError):
+        return None
+
+
+def guardar_huella(huella):
+    with open(ARCHIVO_HUELLA, "w", encoding="utf-8") as f:
+        json.dump({"huella": huella}, f, indent=2)
 
 
 def meses_disponibles():
@@ -209,6 +241,8 @@ def main():
                         help="Mes comercial AAAA-MM. Sin esto carga todos.")
     parser.add_argument("--listar", action="store_true",
                         help="Muestra los meses que hay en la carpeta y sale")
+    parser.add_argument("--si-cambio", action="store_true",
+                        help="No hace nada si ningun .xlsx cambio desde la ultima vez")
     args = parser.parse_args()
 
     if args.listar:
@@ -222,7 +256,24 @@ def main():
     if args.mes and not re.fullmatch(r"\d{4}-\d{2}", args.mes):
         parser.error(f"'{args.mes}' no tiene el formato AAAA-MM (ej: 2026-08)")
 
+    # Los Excel viven en el disco y solo cambian cuando alguien los edita, asi
+    # que reprocesarlos en cada corrida del orquestador es trabajo al pedo: son
+    # 31.446 filas reescritas cada dos horas para que quede exactamente lo
+    # mismo. Con --si-cambio el orquestador lo llama siempre y el script decide.
+    if args.si_cambio:
+        huella = huella_de_los_excel()
+        if huella == huella_guardada():
+            print("Ningun Excel de costos cambio desde la ultima carga. No hay nada que hacer.")
+            return
+        print("Cambio algun Excel de costos: se recarga.")
+
     cargar_costos(args.mes)
+
+    # La huella se guarda DESPUES de cargar bien: si la carga falla, la proxima
+    # corrida tiene que volver a intentarlo y no darlo por hecho.
+    if args.si_cambio:
+        guardar_huella(huella_de_los_excel())
+
     print("\n=== LISTO ===")
 
 
