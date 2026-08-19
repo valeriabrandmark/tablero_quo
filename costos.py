@@ -1,5 +1,7 @@
+import argparse
 import os
 import glob
+import re
 import pandas as pd
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
@@ -78,9 +80,35 @@ def leer_hoja_flexible(archivo, hoja, columnas_necesarias, max_filas_prueba=5):
                      f"en la hoja '{hoja}' de {archivo}")
 
 
-def cargar_costos():
+def meses_disponibles():
+    """Los meses que hay en la carpeta, por nombre de archivo."""
+    return sorted(
+        os.path.splitext(os.path.basename(a))[0]
+        for a in glob.glob(os.path.join(CARPETA_COSTOS, "*.xlsx"))
+    )
+
+
+def cargar_costos(mes=None):
+    """Carga los costos de todos los meses, o de uno solo si se pasa `mes`.
+
+    Con `mes` NO se reescribe la tabla entera: se borra unicamente ese mes y se
+    vuelve a insertar. Reescribir todo con un solo mes cargado se llevaria
+    puestos los demas, que es justo lo que uno NO quiere cuando corrige el
+    Excel de un mes suelto.
+    """
     print("=== Cargando costos historicos con ofertas ===")
-    archivos = glob.glob(os.path.join(CARPETA_COSTOS, "*.xlsx"))
+
+    if mes:
+        archivo = os.path.join(CARPETA_COSTOS, f"{mes}.xlsx")
+        if not os.path.exists(archivo):
+            print(f"  No existe {archivo}")
+            print(f"  Meses disponibles: {', '.join(meses_disponibles()) or '(ninguno)'}")
+            return
+        archivos = [archivo]
+        print(f"  Solo el mes {mes} (los demas quedan como estan)")
+    else:
+        archivos = glob.glob(os.path.join(CARPETA_COSTOS, "*.xlsx"))
+
     if not archivos:
         print(f"  No hay archivos .xlsx en {CARPETA_COSTOS}/")
         return
@@ -131,15 +159,72 @@ def cargar_costos():
     final = final.drop_duplicates(subset=["sku", "mes_comercial"], keep="last")
     final = final[["sku", "mes_comercial", "costo_teorico", "oferta_pct", "costo_real"]]
 
-    final.to_sql("costos_historicos", engine, schema="bronze",
-                 if_exists="replace", index=False)
-    print(f"\n  Guardado: bronze.costos_historicos ({len(final)} filas)")
-    print(f"  Meses: {sorted(final['mes_comercial'].unique())}")
+    if mes:
+        # Borrar + agregar, para no tocar los otros meses. Si la tabla todavia
+        # no existe, el borrado no aplica y el append la crea.
+        with engine.begin() as con:
+            existe = con.exec_driver_sql("""
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'bronze' AND table_name = 'costos_historicos'
+                )
+            """).scalar()
+            if existe:
+                borradas = con.exec_driver_sql(
+                    "DELETE FROM bronze.costos_historicos WHERE mes_comercial = %(mes)s",
+                    {"mes": mes},
+                ).rowcount
+                print(f"\n  Filas viejas de {mes} borradas: {borradas}")
+        final.to_sql("costos_historicos", engine, schema="bronze",
+                     if_exists="append", index=False)
+    else:
+        final.to_sql("costos_historicos", engine, schema="bronze",
+                     if_exists="replace", index=False)
+
+    print(f"\n  Guardado: bronze.costos_historicos ({len(final)} filas de esta corrida)")
+    print(f"  Meses cargados ahora: {sorted(final['mes_comercial'].unique())}")
+
+    # Estado de la tabla entera, no solo de lo que se acaba de escribir: con
+    # --mes es el unico numero que dice si los otros meses siguen ahi.
+    resumen = pd.read_sql(
+        "SELECT mes_comercial, count(*) AS skus FROM bronze.costos_historicos "
+        "GROUP BY 1 ORDER BY 1", engine)
+    print("\n  Tabla completa:")
+    print(resumen.to_string(index=False))
     # Muestra de control
     print("\n  Ejemplo (primeras 5 con oferta > 0):")
     print(final[final['oferta_pct'] > 0].head(5).to_string(index=False))
 
 
-if __name__ == "__main__":
-    cargar_costos()
+def main():
+    parser = argparse.ArgumentParser(
+        description="Carga los costos de costos_mensuales/*.xlsx a bronze.costos_historicos.",
+        epilog="Ejemplos:\n"
+               "  python costos.py            todos los meses\n"
+               "  python costos.py 2026-08    solo agosto\n"
+               "  python costos.py --listar   que meses hay en la carpeta",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("mes", nargs="?",
+                        help="Mes comercial AAAA-MM. Sin esto carga todos.")
+    parser.add_argument("--listar", action="store_true",
+                        help="Muestra los meses que hay en la carpeta y sale")
+    args = parser.parse_args()
+
+    if args.listar:
+        disponibles = meses_disponibles()
+        print("Meses en " + CARPETA_COSTOS + "/: " + (", ".join(disponibles) or "(ninguno)"))
+        return
+
+    # Se valida el formato antes de tocar nada: un mes mal escrito no encuentra
+    # el archivo y sin este chequeo el mensaje seria "no existe", que hace
+    # pensar que falta el Excel cuando lo que esta mal es lo que se tipeo.
+    if args.mes and not re.fullmatch(r"\d{4}-\d{2}", args.mes):
+        parser.error(f"'{args.mes}' no tiene el formato AAAA-MM (ej: 2026-08)")
+
+    cargar_costos(args.mes)
     print("\n=== LISTO ===")
+
+
+if __name__ == "__main__":
+    main()
