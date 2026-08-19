@@ -246,3 +246,4 @@ Dependencias: `pip install -r requirements.txt`.
 | `ml_tokens.json` | tokens de ML | hay que re-autorizar la app |
 | `estado_pasos.json` | última corrida OK de cada paso | todos los pasos corren una vez de más |
 | `cache_ml_ventas/` | caché de descargas viejas de ML | se vuelve a bajar |
+| `orquestador_log.txt` | historial de corridas | se crea de nuevo en la siguiente |

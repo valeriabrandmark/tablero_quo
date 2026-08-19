@@ -8,6 +8,10 @@ estado_sigma.json
 estado_pasos.json
 estado_ml.json
 
+# Log del orquestador: le escribe una linea por corrida, asi que cambia en cada
+# maquina al mismo tiempo. Versionarlo garantiza un conflicto en cada git pull.
+orquestador_log.txt
+
 # Python
 venv/
 __pycache__/
