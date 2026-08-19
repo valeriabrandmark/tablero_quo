@@ -249,6 +249,12 @@ así se puede ir de "este número del tablero se ve viejo" al paso que lo llena.
 Un paso puede aparecer al día y el dato igual verse raro: eso significa que el
 problema no es la frecuencia sino el contenido, y ahí hay que mirar la tabla.
 
+**Un paso que viene fallando aparece como `FALLA xN`**, con las últimas líneas del
+error. Eso es distinto de `PENDIENTE`, que solo quiere decir "todavía no le tocó
+el turno". La diferencia importa: `tiendanube.py` estuvo desde el 12/06 sin traer
+nada porque fallaba en silencio, y en la pantalla se veía igual que un paso
+esperando su turno.
+
 ## Cuando algo falla
 
 1. `python orquestador.py --listar` — ver qué paso está pendiente.
