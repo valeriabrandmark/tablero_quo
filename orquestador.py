@@ -88,70 +88,104 @@ TECHO_POR_DEFECTO = 10 * 60
 #   techo       segundos como maximo que se le dan al paso. Si no esta, se usa
 #               TECHO_POR_DEFECTO. Pasado ese tiempo se lo mata y cuenta como
 #               falla.
+#   primera_del_dia  True = corre una vez por dia, en la PRIMERA corrida del
+#               dia. Reemplaza a cada_horas. Para los pasos caros: asi caen a la
+#               manana temprano y no en el medio de la tarde.
 #
 # El orden importa: modelo.py arma gold.fact_ventas leyendo lo que dejaron
 # todas las extracciones, asi que TODAS van antes que el.
 PASOS = [
-    # --- Extracciones ---------------------------------------------------
-    # Las ventas mayoristas son el corazon del tablero: van en cada corrida.
+    # ============================================================
+    #  BLOQUE 1 - CAMINO CRITICO DEL TABLERO DE VENTAS
+    # ============================================================
+    # Todo lo que modelo.py necesita para armar gold.fact_ventas, y nada mas.
+    # El orden no es historico: es el que hace que el tablero de ventas quede al
+    # dia lo antes posible. Antes las extracciones caras estaban en el medio y
+    # el tablero esperaba media hora por datos que no usa.
+    #
+    # Este bloque entero tarda ~2 min.
+
     {"comando": "sigma.py --ventas",           "intentos": 3, "espera": 60,
      "cada_horas": None, "critico": True,  "escribe": "sigma_ventas", "techo": 30 * 60},
 
-    # El catalogo se reescribe entero (8.200 articulos) y un alta o un cambio de
-    # descripcion no pasa cada dos horas. Estaba pegado a las ventas, y asi
-    # acumulo 335.816 inserciones para tener 8.194 filas vivas: 41 recargas del
-    # mismo catalogo.
+    # El catalogo lo lee modelo.py (para proveedor, marca e IVA de cada SKU), asi
+    # que tiene que ir antes. Pero un alta o un cambio de descripcion no pasa
+    # cada dos horas: estaba pegado a las ventas y acumulo 335.816 inserciones
+    # para tener 8.194 filas vivas -- 41 recargas del mismo catalogo.
     {"comando": "sigma.py --catalogo",         "intentos": 2, "espera": 60,
      "cada_horas": 24, "critico": False, "escribe": "sigma_articulos", "techo": 30 * 60},
 
-    {"comando": "digip_pedidos.py",            "intentos": 3, "espera": 60,
-     "cada_horas": None, "critico": True,  "escribe": "digip_pedidos", "techo": 20 * 60},
-
-    # El paso mas caro de todos: 9,8 min de mediana, una llamada por pedido de
-    # la ventana. Alimenta Logistica, que se mira por semana y no por hora.
-    {"comando": "digip_preparaciones.py",      "intentos": 2, "espera": 60,
-     "cada_horas": 6, "critico": False, "escribe": "digip_preparaciones", "techo": 40 * 60},
-
-    # Ventas de ML: ventana movil de 7 dias, es barato. Va seguido porque es
-    # lo que mas rapido queda viejo.
+    # Ventas de ML: ventana movil, es barato. `cada_horas: None` y no 2: el
+    # pipeline YA corre cada 2 horas, y poner 2 hacia que un arranque unos
+    # minutos temprano lo saltara hasta la vuelta siguiente.
     {"comando": "mercadolibre.py --ventas",    "intentos": 2, "espera": 60,
-     "cada_horas": 2, "critico": False, "escribe": "ml_ventas", "techo": 20 * 60},
+     "cada_horas": None, "critico": False, "escribe": "ml_ventas", "techo": 20 * 60},
 
     # Costo de envio: incremental (solo pide las ordenes que todavia no tiene).
     # Va DESPUES de las ventas: lee bronze.ml_ventas para saber que le falta.
     {"comando": "ml_envios.py",                "intentos": 2, "espera": 60,
      "cada_horas": 4, "critico": False, "escribe": "ml_envios", "techo": 45 * 60},
 
-    # Catalogo y stock Full de ML: ~3.800 llamadas a la API, es EL paso lento.
-    {"comando": "mercadolibre.py --catalogo",  "intentos": 2, "espera": 60,
-     "cada_horas": 12, "critico": False, "escribe": "ml_publicaciones, ml_stock_full", "techo": 60 * 60},
-
-    # Stock de DIGIP: dos llamadas y el stock si se mueve durante el dia.
-    {"comando": "digip.py",                    "intentos": 2, "espera": 30,
-     "cada_horas": 4, "critico": False, "escribe": "digip_stock, digip_stock_detalle", "techo": 20 * 60},
-
-    # Tienda Nube vende poco (unos 8 pedidos por mes), pero desde que tiene
-    # tablero propio la frecuencia ya no la manda el volumen sino la espera:
-    # con 12 h, una venta de la manana recien aparecia a la noche. La bajada es
-    # una sola pagina de la API y tarda segundos, asi que sale barato.
+    # Tienda Nube: una sola pagina de la API, tarda segundos.
     {"comando": "tiendanube.py",               "intentos": 2, "espera": 30,
      "cada_horas": 4, "critico": False, "escribe": "tn_pedidos + tn_pedidos_items", "techo": 15 * 60},
 
     # Los Excel de costos solo cambian cuando alguien los edita: el script
     # compara una huella de los archivos y no hace nada si no se movio ninguno.
     # Se lo llama en cada corrida a proposito -- el que decide es el script, asi
-    # que un Excel corregido entra en la corrida siguiente y no hay que
-    # acordarse de nada.
+    # que un Excel corregido entra en la corrida siguiente sin acordarse de nada.
     {"comando": "costos.py --si-cambio",       "intentos": 2, "espera": 30,
      "cada_horas": None, "critico": True,  "escribe": "costos_historicos", "techo": 20 * 60},
 
-    # --- Transformaciones -----------------------------------------------
+    # <<< ACA EL TABLERO DE VENTAS YA ESTA AL DIA >>>
     {"comando": "modelo.py",                   "intentos": 3, "espera": 60,
      "cada_horas": None, "critico": True,  "escribe": "gold.fact_ventas", "techo": 30 * 60},
+
+    # ============================================================
+    #  BLOQUE 2 - NADIE ESTA ESPERANDO ESTO
+    # ============================================================
+    # De aca para abajo nada alimenta gold.fact_ventas. Se comprobo mirando que
+    # tabla lee cada transformacion: modelo.py NO usa ml_publicaciones,
+    # ml_stock_full ni digip_pedidos.
+    #
+    # Por eso van al final. Si el catalogo de ML tarda media hora, la tarda con
+    # el tablero de ventas ya actualizado, no antes.
+
+    # Stock de DIGIP: dos llamadas, segundos. El stock se mueve durante el dia,
+    # asi que va en cada corrida.
+    {"comando": "digip.py",                    "intentos": 2, "espera": 30,
+     "cada_horas": None, "critico": False, "escribe": "digip_stock, digip_stock_detalle", "techo": 20 * 60},
+
+    # Alimenta la vista de Logistica, no el modelo de ventas.
+    {"comando": "digip_pedidos.py",            "intentos": 3, "espera": 60,
+     "cada_horas": None, "critico": False, "escribe": "digip_pedidos", "techo": 20 * 60},
+
+    # Una llamada por pedido de la ventana: 9,8 min de mediana. Alimenta
+    # Logistica, que se mira por semana y no por hora. Va antes de
+    # prorratear_flete, que lo lee.
+    {"comando": "digip_preparaciones.py",      "intentos": 2, "espera": 60,
+     "cada_horas": 6, "critico": False, "escribe": "digip_preparaciones", "techo": 40 * 60},
+
+    # Los fletes se miran por semana: dos veces por dia alcanza y sobra.
     {"comando": "prorratear_flete.py",         "intentos": 2, "espera": 30,
-     "cada_horas": None, "critico": True,  "escribe": "gold.fact_ventas_flete", "techo": 20 * 60},
+     "cada_horas": 12, "critico": False, "escribe": "gold.fact_ventas_flete", "techo": 20 * 60},
+
     {"comando": "clasificar_clientes.py",      "intentos": 2, "espera": 30,
-     "cada_horas": None, "critico": True,  "escribe": "gold.clientes_clasificados", "techo": 20 * 60},
+     "cada_horas": None, "critico": False, "escribe": "gold.clientes_clasificados", "techo": 20 * 60},
+
+    # EL PASO LENTO, ULTIMO DE TODOS: ~4.300 llamadas a la API, unos 33 min.
+    #
+    # Va una vez por dia y en la PRIMERA corrida del dia, no cada 24 h. La
+    # diferencia importa: con 24 h iria cayendo cada dia a la misma hora que
+    # ayer -- si un dia toco a las 15, todos los dias a las 15, con gente
+    # mirando el tablero. "Primera del dia" lo pone a la manana, cuando se
+    # prende la maquina y nadie esta mirando todavia.
+    #
+    # Ademas nadie lo espera: alimenta ml_publicaciones y ml_stock_full, que hoy
+    # solo van a servir para la pestana de Stock Full cuando se arme.
+    {"comando": "mercadolibre.py --catalogo",  "intentos": 2, "espera": 60,
+     "cada_horas": None, "primera_del_dia": True, "critico": False,
+     "escribe": "ml_publicaciones, ml_stock_full", "techo": 60 * 60},
 ]
 
 CARPETA = os.path.dirname(os.path.abspath(__file__))
@@ -222,6 +256,26 @@ def ultima_corrida(estado, comando):
 
 def toca_correr(paso, estado):
     """(corre_si_o_no, motivo_para_el_log)"""
+
+    # "Una vez por dia, en la primera corrida" -- para los pasos caros.
+    #
+    # No es lo mismo que `cada_horas: 24`. Con 24 horas, un paso que ayer corrio
+    # a las 15 hoy vuelve a las 15, que es plena tarde y con gente mirando el
+    # tablero. Con esto corre en la PRIMERA corrida del dia, que en esta oficina
+    # es a la manana temprano cuando se prende la maquina: la unica franja en la
+    # que a nadie le molesta que la corrida dure media hora.
+    #
+    # Se apoya en la fecha de la ultima corrida buena, asi que si la maquina
+    # estuvo apagada tres dias, corre en la primera que haya. No espera un
+    # horario fijo que ya paso.
+    if paso.get("primera_del_dia"):
+        ultima = ultima_corrida(estado, paso["comando"])
+        if ultima is None:
+            return True, "nunca corrio"
+        if ultima.date() == datetime.date.today():
+            return False, f"ya corrio hoy ({ultima.strftime('%H:%M')})"
+        return True, f"primera corrida del dia (la ultima fue el {ultima.strftime('%d/%m')})"
+
     if paso["cada_horas"] is None:
         return True, ""
 
@@ -295,9 +349,21 @@ def listar():
     for paso in PASOS:
         reg = registro(estado, paso["comando"])
         ultima = ultima_corrida(estado, paso["comando"])
-        cada = "siempre" if paso["cada_horas"] is None else f"{paso['cada_horas']}hs"
+        if paso.get("primera_del_dia"):
+            cada = "1/dia"
+        elif paso["cada_horas"] is None:
+            cada = "siempre"
+        else:
+            cada = f"{paso['cada_horas']}hs"
 
-        if paso["cada_horas"] is None:
+        # El estado se calcula con la MISMA funcion que decide en la corrida
+        # real, y no repitiendo la cuenta aca. Cuando se repite, tarde o
+        # temprano las dos versiones dicen cosas distintas y la pantalla miente.
+        if paso.get("primera_del_dia"):
+            corre, motivo = toca_correr(paso, estado)
+            texto_ultima = ultima.strftime("%Y-%m-%d %H:%M") if ultima else "nunca"
+            estado_txt = "PENDIENTE" if corre else motivo
+        elif paso["cada_horas"] is None:
             texto_ultima, estado_txt = "-", "corre siempre"
         elif ultima is None:
             texto_ultima, estado_txt = "nunca", "PENDIENTE"
@@ -316,7 +382,8 @@ def listar():
 
         print(f"{paso['comando']:<28} {cada:>8}  {texto_ultima:<18} {estado_txt:<26} {paso['escribe']}")
     print("Los pasos que dicen \"corre siempre\" no cortan por frecuencia; los demas")
-    print("esperan su turno. Ninguno se saltea si se usa --forzar.")
+    print("esperan su turno. \"1/dia\" corre en la primera corrida de cada dia.")
+    print("Ninguno se saltea si se usa --forzar.")
 
     for comando in con_fallos:
         reg = registro(estado, comando)
