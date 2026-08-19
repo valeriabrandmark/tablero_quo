@@ -19,6 +19,19 @@ HEADERS = {
 
 PAUSA = 0.6
 
+# Desde cuando se piden los pedidos, y con que estados.
+#
+# El `status: any` NO es decorativo: en bronze.tn_pedidos_items no habia UNA
+# SOLA orden `closed` -- solo `open` y `cancelled`. En una tienda con ventas,
+# las ventas concretadas terminan cerradas, asi que si no aparece ninguna es
+# que la consulta no las estaba trayendo. Con `any` se piden los tres estados
+# y despues se filtra en el tablero, que es donde hay que decidir que cuenta
+# como venta.
+PARAMS_PEDIDOS = {
+    "created_at_min": "2026-01-01T00:00:00+00:00",
+    "status": "any",
+}
+
 
 def llamar_tn_paginado(endpoint, params=None):
     """Trae todos los registros de un endpoint paginando.
@@ -64,6 +77,27 @@ def guardar_en_bd(df, tabla, modo="replace"):
     )
     with engine.begin() as con:
         con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
+    if modo == "replace":
+        # TRUNCATE + APPEND en vez de DROP + CREATE.
+        #
+        # `to_sql(if_exists="replace")` borra la tabla y la vuelve a crear, y eso
+        # FALLA si alguien creo una vista encima:
+        #
+        #   cannot drop table bronze.X because other objects depend on it
+        #
+        # Es lo que dejo a tiendanube.py sin traer nada desde el 12/06: se creo
+        # la vista tn_control_cancelaciones y el script murio en cada corrida.
+        # Vaciar la tabla en vez de borrarla deja la vista en pie.
+        try:
+            with engine.begin() as con:
+                con.exec_driver_sql(f'TRUNCATE TABLE bronze."{tabla}";')
+            df.to_sql(tabla, engine, schema="bronze", if_exists="append", index=False)
+            print(f"  Guardado (truncate+append): bronze.{tabla} ({len(df)} filas)")
+            return
+        except Exception as e:
+            # La tabla todavia no existe: que la cree el to_sql de abajo.
+            print(f"  (no se pudo truncate: {str(e)[:80]}... -> creando tabla)")
+
     df.to_sql(tabla, engine, schema="bronze", if_exists=modo, index=False)
     print(f"  Guardado ({modo}): bronze.{tabla} ({len(df)} filas)")
 
@@ -75,7 +109,7 @@ def guardar_en_bd(df, tabla, modo="replace"):
 def extraer_pedidos():
     """Pedidos = ventas del ecommerce Tienda Nube. Desde inicio de 2026."""
     print("\n=== PEDIDOS TIENDA NUBE (ventas) ===")
-    datos = llamar_tn_paginado("orders", {"created_at_min": "2026-01-01T00:00:00+00:00"})
+    datos = llamar_tn_paginado("orders", dict(PARAMS_PEDIDOS))
     df = pd.json_normalize(datos)
     print(f"  Total: {len(df)} pedidos")
     guardar_en_bd(df, "tn_pedidos", modo="replace")
@@ -84,7 +118,7 @@ def extraer_pedidos_items():
     """Desglosa los pedidos: una fila por cada producto de cada pedido.
        Esto deja las ventas de Tienda Nube en formato analizable (como sigma_ventas)."""
     print("\n=== PEDIDOS ITEMS (una fila por producto vendido) ===")
-    pedidos = llamar_tn_paginado("orders", {"created_at_min": "2026-01-01T00:00:00+00:00"})
+    pedidos = llamar_tn_paginado("orders", dict(PARAMS_PEDIDOS))
     print(f"  {len(pedidos)} pedidos a desglosar")
 
     filas = []

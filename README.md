@@ -38,24 +38,54 @@ dejaron todas las extracciones, así que **todas van antes que él**.
 
 | # | Paso | Cada | Escribe | Corta si falla |
 |---|---|---|---|---|
-| 1 | `sigma.py` | siempre | `bronze.sigma_ventas`, `sigma_articulos` | sí |
-| 2 | `digip_pedidos.py` | siempre | `bronze.digip_pedidos` | sí |
-| 3 | `digip_preparaciones.py` | siempre | `bronze.digip_preparaciones` | sí |
-| 4 | `mercadolibre.py --ventas` | 2 h | `bronze.ml_ventas` | no |
-| 5 | `ml_envios.py` | 4 h | `bronze.ml_envios` | no |
-| 6 | `mercadolibre.py --catalogo` | 12 h | `bronze.ml_publicaciones`, `ml_stock_full` | no |
-| 7 | `digip.py` | 4 h | `bronze.digip_stock`, `digip_stock_detalle` | no |
-| 8 | `tiendanube.py` | 4 h | `bronze.tn_pedidos_items` | no |
-| 9 | `costos.py` | siempre | `bronze.costos_historicos` | sí |
-| 10 | `modelo.py` | siempre | **`gold.fact_ventas`** | sí |
-| 11 | `prorratear_flete.py` | siempre | `gold.fact_ventas_flete` | sí |
-| 12 | `clasificar_clientes.py` | siempre | `gold.clientes_clasificados` | sí |
+| 1 | `sigma.py --ventas` | siempre | `bronze.sigma_ventas` | sí |
+| 2 | `sigma.py --catalogo` | 24 h | `bronze.sigma_articulos` | no |
+| 3 | `digip_pedidos.py` | siempre | `bronze.digip_pedidos` | sí |
+| 4 | `digip_preparaciones.py` | 6 h | `bronze.digip_preparaciones` | no |
+| 5 | `mercadolibre.py --ventas` | 2 h | `bronze.ml_ventas` | no |
+| 6 | `ml_envios.py` | 4 h | `bronze.ml_envios` | no |
+| 7 | `mercadolibre.py --catalogo` | 12 h | `bronze.ml_publicaciones`, `ml_stock_full` | no |
+| 8 | `digip.py` | 4 h | `bronze.digip_stock`, `digip_stock_detalle` | no |
+| 9 | `tiendanube.py` | 12 h | `bronze.tn_pedidos_items` | no |
+| 10 | `costos.py --si-cambio` | si cambió un Excel | `bronze.costos_historicos` | sí |
+| 11 | `modelo.py` | siempre | **`gold.fact_ventas`** | sí |
+| 12 | `prorratear_flete.py` | siempre | `gold.fact_ventas_flete` | sí |
+| 13 | `clasificar_clientes.py` | siempre | `gold.clientes_clasificados` | sí |
 
-Las frecuencias existen porque los pasos no cuestan lo mismo: el catálogo de
-Mercado Libre son ~3.800 llamadas a la API y no se puede pedir cada hora. El
-orquestador se acuerda en `estado_pasos.json` (local, no se sube) de cuándo
-terminó bien cada uno. Si la computadora estuvo apagada tres días, el paso
+### De dónde salen esas frecuencias
+
+Del log de 24 corridas reales, midiendo cuánto tarda cada paso:
+
+| Paso | Mediana |
+|---|---|
+| `digip_preparaciones.py` | 9,8 min |
+| `sigma.py` (las dos juntas) | 6,9 min |
+| `modelo.py` | 5,9 min |
+| `costos.py` | 1,4 min |
+| el resto | menos de 30 s |
+
+La corrida entera daba **25 minutos**, cada dos horas, y la mayor parte era volver
+a pedir cosas que no habían cambiado. El caso más claro: `sigma_articulos` acumuló
+**335.816 inserciones para tener 8.194 filas vivas** — unas 41 recargas del mismo
+catálogo.
+
+Los tres criterios para decidir cada frecuencia:
+
+1. **Cuánto tarda.** `digip_preparaciones` hace una llamada por pedido de la
+   ventana; es el más caro de todos.
+2. **Cada cuánto cambia de verdad.** Un alta de artículo o un cambio de
+   descripción no pasa cada dos horas. Las ventas sí.
+3. **Con qué urgencia se mira.** Logística se mira por semana; las ventas de hoy,
+   hoy.
+
+El orquestador se acuerda en `estado_pasos.json` (local, no se sube) de cuándo
+terminó bien cada paso. Si la computadora estuvo apagada tres días, el paso
 vencido corre en la primera pasada — no espera un horario fijo que ya pasó.
+
+`costos.py --si-cambio` es la excepción: se lo llama en **cada** corrida y el que
+decide es el script, comparando una huella (nombre + tamaño + fecha) de los
+`.xlsx`. Si ninguno se movió, no hace nada y termina en un segundo. Así un Excel
+corregido entra en la corrida siguiente sin que haya que acordarse de nada.
 
 Los pasos que no cortan el pipeline son extracciones sueltas: que se quede vieja
 una parte es mejor que no actualizar nada.
@@ -70,8 +100,9 @@ Solo tres scripts aceptan argumentos. El resto se corre pelado.
 |---|---|---|
 | `modelo.py` | `--dias N`, `--todo` | ventana de 7 días |
 | `mercadolibre.py` | `--ventas`, `--catalogo` | corre todo |
+| `sigma.py` | `--ventas`, `--catalogo` | corre todo |
 | `orquestador.py` | `--forzar`, `--solo`, `--listar` | respeta frecuencias |
-| `costos.py` | `AAAA-MM` (posicional), `--listar` | todos los meses |
+| `costos.py` | `AAAA-MM` (posicional), `--listar`, `--si-cambio` | todos los meses |
 | `ml_envios.py` | — | **siempre incremental** (solo lo que falta) |
 
 `ml_envios.py` no necesita flags: ya resuelve solo su alcance, porque pide
@@ -175,6 +206,20 @@ a cuánto vale cada una.
 `costos.py` calcula `costo_real = costo_teorico × (1 − oferta%)` y es ese el que
 llega a `gold.fact_ventas`.
 
+**Nunca `if_exists="replace"` sobre una tabla que ya existe.** `replace` hace
+`DROP TABLE`, y el DROP **falla** si alguien creó una vista encima:
+
+```
+cannot drop table bronze.tn_pedidos_items because other objects depend on it
+DETAIL:  view bronze.tn_control_cancelaciones depends on table ...
+```
+
+Eso dejó a `tiendanube.py` sin traer nada desde el 12/06: se creó la vista y el
+script murió en cada corrida, en el último paso, después de haber bajado bien los
+pedidos. Todos los scripts usan ahora **TRUNCATE + append**, que vacía la tabla
+sin borrarla y deja las vistas en pie. Hoy hay vistas sobre `tn_pedidos_items`,
+`sigma_ventas`, `digip_pedidos`, `digip_preparaciones` y `gold.fact_ventas`.
+
 **Las ventanas móviles reprocesan, no acumulan.** `sigma.py`, `mercadolibre.py` y
 `modelo.py` borran su ventana y la vuelven a insertar. Lo anterior a la ventana
 queda intacto — por eso un dato que llega tarde a `bronze` **no entra solo** a
@@ -204,6 +249,25 @@ tenga un número parecido al anterior; si bajó mucho, algo se movió de lugar e
 Excel.
 
 ---
+
+## Qué se está actualizando y qué no
+
+```bash
+python orquestador.py --listar
+```
+
+Es la respuesta a "¿esto está fresco?". Para cada paso muestra cada cuánto corre,
+cuándo terminó bien por última vez, si está pendiente, y **qué tabla escribe** —
+así se puede ir de "este número del tablero se ve viejo" al paso que lo llena.
+
+Un paso puede aparecer al día y el dato igual verse raro: eso significa que el
+problema no es la frecuencia sino el contenido, y ahí hay que mirar la tabla.
+
+**Un paso que viene fallando aparece como `FALLA xN`**, con las últimas líneas del
+error. Eso es distinto de `PENDIENTE`, que solo quiere decir "todavía no le tocó
+el turno". La diferencia importa: `tiendanube.py` estuvo desde el 12/06 sin traer
+nada porque fallaba en silencio, y en la pantalla se veía igual que un paso
+esperando su turno.
 
 ## Cuando algo falla
 

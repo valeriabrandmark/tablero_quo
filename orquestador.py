@@ -64,45 +64,62 @@ ARCHIVO_ESTADO = "estado_pasos.json"
 # todas las extracciones, asi que TODAS van antes que el.
 PASOS = [
     # --- Extracciones ---------------------------------------------------
-    {"comando": "sigma.py",                    "intentos": 3, "espera": 60,
-     "cada_horas": None, "critico": True},
+    # Las ventas mayoristas son el corazon del tablero: van en cada corrida.
+    {"comando": "sigma.py --ventas",           "intentos": 3, "espera": 60,
+     "cada_horas": None, "critico": True,  "escribe": "sigma_ventas"},
+
+    # El catalogo se reescribe entero (8.200 articulos) y un alta o un cambio de
+    # descripcion no pasa cada dos horas. Estaba pegado a las ventas, y asi
+    # acumulo 335.816 inserciones para tener 8.194 filas vivas: 41 recargas del
+    # mismo catalogo.
+    {"comando": "sigma.py --catalogo",         "intentos": 2, "espera": 60,
+     "cada_horas": 24, "critico": False, "escribe": "sigma_articulos"},
+
     {"comando": "digip_pedidos.py",            "intentos": 3, "espera": 60,
-     "cada_horas": None, "critico": True},
-    {"comando": "digip_preparaciones.py",      "intentos": 3, "espera": 60,
-     "cada_horas": None, "critico": True},
+     "cada_horas": None, "critico": True,  "escribe": "digip_pedidos"},
+
+    # El paso mas caro de todos: 9,8 min de mediana, una llamada por pedido de
+    # la ventana. Alimenta Logistica, que se mira por semana y no por hora.
+    {"comando": "digip_preparaciones.py",      "intentos": 2, "espera": 60,
+     "cada_horas": 6, "critico": False, "escribe": "digip_preparaciones"},
 
     # Ventas de ML: ventana movil de 7 dias, es barato. Va seguido porque es
     # lo que mas rapido queda viejo.
     {"comando": "mercadolibre.py --ventas",    "intentos": 2, "espera": 60,
-     "cada_horas": 2, "critico": False},
+     "cada_horas": 2, "critico": False, "escribe": "ml_ventas"},
 
-    # Costo de envio: incremental (solo pide las ordenes que todavia no tiene),
-    # asi que despues de la primera puesta al dia cada corrida es corta.
+    # Costo de envio: incremental (solo pide las ordenes que todavia no tiene).
     # Va DESPUES de las ventas: lee bronze.ml_ventas para saber que le falta.
     {"comando": "ml_envios.py",                "intentos": 2, "espera": 60,
-     "cada_horas": 4, "critico": False},
+     "cada_horas": 4, "critico": False, "escribe": "ml_envios"},
 
-    # Catalogo y stock Full: ~3.800 llamadas a la API, es EL paso lento.
+    # Catalogo y stock Full de ML: ~3.800 llamadas a la API, es EL paso lento.
     {"comando": "mercadolibre.py --catalogo",  "intentos": 2, "espera": 60,
-     "cada_horas": 12, "critico": False},
+     "cada_horas": 12, "critico": False, "escribe": "ml_publicaciones, ml_stock_full"},
 
-    # Stock de DIGIP: dos llamadas, pero el stock no cambia cada hora.
+    # Stock de DIGIP: dos llamadas y el stock si se mueve durante el dia.
     {"comando": "digip.py",                    "intentos": 2, "espera": 30,
-     "cada_horas": 4, "critico": False},
+     "cada_horas": 4, "critico": False, "escribe": "digip_stock, digip_stock_detalle"},
 
+    # Tienda Nube: 34 lineas en dos meses. No justifica mas seguido.
     {"comando": "tiendanube.py",               "intentos": 2, "espera": 30,
-     "cada_horas": 4, "critico": False},
+     "cada_horas": 12, "critico": False, "escribe": "tn_pedidos_items"},
 
-    {"comando": "costos.py",                   "intentos": 2, "espera": 30,
-     "cada_horas": None, "critico": True},
+    # Los Excel de costos solo cambian cuando alguien los edita: el script
+    # compara una huella de los archivos y no hace nada si no se movio ninguno.
+    # Se lo llama en cada corrida a proposito -- el que decide es el script, asi
+    # que un Excel corregido entra en la corrida siguiente y no hay que
+    # acordarse de nada.
+    {"comando": "costos.py --si-cambio",       "intentos": 2, "espera": 30,
+     "cada_horas": None, "critico": True,  "escribe": "costos_historicos"},
 
     # --- Transformaciones -----------------------------------------------
     {"comando": "modelo.py",                   "intentos": 3, "espera": 60,
-     "cada_horas": None, "critico": True},
+     "cada_horas": None, "critico": True,  "escribe": "gold.fact_ventas"},
     {"comando": "prorratear_flete.py",         "intentos": 2, "espera": 30,
-     "cada_horas": None, "critico": True},
+     "cada_horas": None, "critico": True,  "escribe": "gold.fact_ventas_flete"},
     {"comando": "clasificar_clientes.py",      "intentos": 2, "espera": 30,
-     "cada_horas": None, "critico": True},
+     "cada_horas": None, "critico": True,  "escribe": "gold.clientes_clasificados"},
 ]
 
 CARPETA = os.path.dirname(os.path.abspath(__file__))
@@ -142,8 +159,27 @@ def guardar_estado(estado):
         json.dump(estado, f, indent=2, ensure_ascii=False)
 
 
-def ultima_corrida(estado, comando):
+def registro(estado, comando):
+    """El estado de un paso, normalizado.
+
+    Las versiones viejas guardaban solo la fecha del ultimo OK como texto; se
+    acepta ese formato para no perder el estado al actualizar.
+    """
     valor = estado.get(comando)
+    if isinstance(valor, str):
+        return {"ok": valor, "fallos": 0, "ultimo_fallo": None, "error": None}
+    if isinstance(valor, dict):
+        return {
+            "ok": valor.get("ok"),
+            "fallos": valor.get("fallos", 0),
+            "ultimo_fallo": valor.get("ultimo_fallo"),
+            "error": valor.get("error"),
+        }
+    return {"ok": None, "fallos": 0, "ultimo_fallo": None, "error": None}
+
+
+def ultima_corrida(estado, comando):
+    valor = registro(estado, comando).get("ok")
     if not valor:
         return None
     try:
@@ -172,6 +208,7 @@ def correr_paso(comando, intentos, espera):
     # Lista partida y no `shell=True`: el comando puede traer argumentos
     # ("mercadolibre.py --ventas") y asi no hay que meter una shell en el medio.
     partes = comando.split()
+    ultimo_error = None
     for intento in range(1, intentos + 1):
         log(f"Ejecutando {comando} (intento {intento}/{intentos})...")
         resultado = subprocess.run(
@@ -182,27 +219,31 @@ def correr_paso(comando, intentos, espera):
         )
         if resultado.returncode == 0:
             log(f"OK: {comando} termino sin errores.")
-            return True
+            return True, None
 
+        ultimo_error = (resultado.stderr or "").strip() or "(sin salida de error)"
         log(f"ERROR en {comando} (intento {intento}/{intentos}):")
-        log(resultado.stderr[-1500:] if resultado.stderr else "(sin salida de error)")
+        log(ultimo_error[-1500:])
 
         if intento < intentos:
             log(f"Esperando {espera}s antes de reintentar {comando}...")
             time.sleep(espera)
 
     log(f"FALLO DEFINITIVO: {comando} no pudo completarse tras {intentos} intentos.")
-    return False
+    return False, ultimo_error
 
 
 def listar():
     estado = cargar_estado()
     ahora = datetime.datetime.now()
-    print(f"\n{'PASO':<32} {'CADA':>8}  {'ULTIMA CORRIDA OK':<20} ESTADO")
-    print("-" * 92)
+    print(f"\n{'PASO':<28} {'CADA':>8}  {'ULTIMA CORRIDA OK':<18} {'ESTADO':<26} ESCRIBE")
+    print("-" * 124)
+    con_fallos = []
     for paso in PASOS:
+        reg = registro(estado, paso["comando"])
         ultima = ultima_corrida(estado, paso["comando"])
         cada = "siempre" if paso["cada_horas"] is None else f"{paso['cada_horas']}hs"
+
         if paso["cada_horas"] is None:
             texto_ultima, estado_txt = "-", "corre siempre"
         elif ultima is None:
@@ -212,8 +253,25 @@ def listar():
             texto_ultima = ultima.strftime("%Y-%m-%d %H:%M")
             estado_txt = ("PENDIENTE" if horas >= paso["cada_horas"]
                           else f"al dia (hace {horas:.1f}hs)")
-        marca = "" if paso["critico"] else "  (no corta el pipeline)"
-        print(f"{paso['comando']:<32} {cada:>8}  {texto_ultima:<20} {estado_txt}{marca}")
+
+        # Un paso que viene fallando NO se puede ver igual que uno al que
+        # todavia no le toco el turno. Es la diferencia entre "esperá" y
+        # "esto esta roto y nadie se dio cuenta".
+        if reg["fallos"]:
+            estado_txt = f"FALLA x{reg['fallos']}"
+            con_fallos.append(paso["comando"])
+
+        print(f"{paso['comando']:<28} {cada:>8}  {texto_ultima:<18} {estado_txt:<26} {paso['escribe']}")
+    print("Los pasos que dicen \"corre siempre\" no cortan por frecuencia; los demas")
+    print("esperan su turno. Ninguno se saltea si se usa --forzar.")
+
+    for comando in con_fallos:
+        reg = registro(estado, comando)
+        print(f"\n  {comando} viene fallando ({reg['fallos']} veces, la ultima "
+              f"{reg['ultimo_fallo'][:16] if reg['ultimo_fallo'] else '?'}):")
+        for linea in (reg["error"] or "").strip().splitlines()[-3:]:
+            print(f"      {linea}")
+        print(f"      Para verlo entero: python orquestador.py --solo {comando.split()[0]}")
     print()
 
 
@@ -273,14 +331,30 @@ def main():
             if motivo:
                 log(f"Toca {comando}: {motivo}.")
 
-        exito = correr_paso(comando, paso["intentos"], paso["espera"])
+        exito, ultimo_error = correr_paso(comando, paso["intentos"], paso["espera"])
+
+        ahora = datetime.datetime.now().isoformat()
+        reg = registro(estado, comando)
 
         if exito:
             # El estado se guarda paso por paso y no al final: si la corrida se
             # corta a la mitad, lo que ya salio bien no se vuelve a hacer.
-            estado[comando] = datetime.datetime.now().isoformat()
+            estado[comando] = {"ok": ahora, "fallos": 0, "ultimo_fallo": None, "error": None}
             guardar_estado(estado)
             continue
+
+        # Un paso que falla tiene que DEJAR RASTRO. Antes solo se anotaba el
+        # exito, asi que un paso no critico que fallaba una y otra vez se veia
+        # en --listar exactamente igual que uno al que todavia no le habia
+        # tocado el turno: "PENDIENTE". Fue lo que hizo que tiendanube.py
+        # estuviera meses sin traer nada sin que nadie se enterara.
+        estado[comando] = {
+            "ok": reg["ok"],
+            "fallos": reg["fallos"] + 1,
+            "ultimo_fallo": ahora,
+            "error": (ultimo_error or "")[-300:] or None,
+        }
+        guardar_estado(estado)
 
         fallados.append(comando)
         if paso["critico"]:
