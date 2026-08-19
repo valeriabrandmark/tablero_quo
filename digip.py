@@ -5,6 +5,20 @@ import pandas as pd
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
+# Cuanto se espera COMO MAXIMO una respuesta de la API, en segundos.
+#
+# No es una optimizacion: sin `timeout`, `requests` espera PARA SIEMPRE si el
+# servidor acepta la conexion y despues no contesta. El proceso no falla ni
+# reintenta -- se queda colgado, el orquestador se cuelga con el, y el
+# Programador de tareas de Windows saltea en silencio todas las corridas
+# siguientes porque para el la tarea "todavia esta ejecutandose".
+#
+# Con timeout, una llamada trabada tira una excepcion, el paso falla, se
+# reintenta, y si igual no anda queda marcado como FALLA en `--listar`. Un paso
+# que falla a la vista se arregla; uno que se cuelga en silencio se descubre
+# horas despues.
+TIMEOUT_HTTP = 60
+
 load_dotenv()
 
 URL_BASE = os.getenv("DIGIP_URL_BASE", "https://api.v2.digipwms.com/api/v2/")
@@ -17,7 +31,7 @@ PAUSA = 1.0
 def llamar_digip(endpoint, params=None):
     """Llama a un endpoint de DIGIP."""
     url = URL_BASE + endpoint
-    r = requests.get(url, headers=HEADERS, params=params)
+    r = requests.get(url, headers=HEADERS, params=params, timeout=TIMEOUT_HTTP)
     if r.status_code == 204:        # No Content = sin datos
         return []
     r.raise_for_status()

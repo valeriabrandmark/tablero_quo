@@ -8,6 +8,20 @@ from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
+# Cuanto se espera COMO MAXIMO una respuesta de la API, en segundos.
+#
+# No es una optimizacion: sin `timeout`, `requests` espera PARA SIEMPRE si el
+# servidor acepta la conexion y despues no contesta. El proceso no falla ni
+# reintenta -- se queda colgado, el orquestador se cuelga con el, y el
+# Programador de tareas de Windows saltea en silencio todas las corridas
+# siguientes porque para el la tarea "todavia esta ejecutandose".
+#
+# Con timeout, una llamada trabada tira una excepcion, el paso falla, se
+# reintenta, y si igual no anda queda marcado como FALLA en `--listar`. Un paso
+# que falla a la vista se arregla; uno que se cuelga en silencio se descubre
+# horas despues.
+TIMEOUT_HTTP = 60
+
 load_dotenv()
 
 ARCHIVO_TOKENS = "ml_tokens.json"
@@ -46,6 +60,7 @@ def renovar_access_token():
             "client_secret": os.getenv("ML_CLIENT_SECRET"),
             "refresh_token": tokens["refresh_token"],
         },
+        timeout=TIMEOUT_HTTP,
     )
     r.raise_for_status()
     nuevos = r.json()
@@ -61,13 +76,13 @@ def llamar_ml(endpoint, access_token, params=None, max_reintentos=6):
 
     intento = 0
     while True:
-        r = requests.get(url, headers=headers, params=params)
+        r = requests.get(url, headers=headers, params=params, timeout=TIMEOUT_HTTP)
 
         if r.status_code == 401:      # token vencido: renovar y reintentar
             print("  401: renovando token...")
             access_token = renovar_access_token()
             headers = {"Authorization": f"Bearer {access_token}"}
-            r = requests.get(url, headers=headers, params=params)
+            r = requests.get(url, headers=headers, params=params, timeout=TIMEOUT_HTTP)
 
         if r.status_code == 429:
             intento += 1

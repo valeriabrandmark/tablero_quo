@@ -299,6 +299,73 @@ el turno". La diferencia importa: `tiendanube.py` estuvo desde el 12/06 sin trae
 nada porque fallaba en silencio, y en la pantalla se veía igual que un paso
 esperando su turno.
 
+## Por qué la corrida tiene un reloj encima
+
+El 19/08/2026 el orquestador corrió a las 10 y **no volvió a correr en todo el
+día**, sin dejar ni un error. La causa es una cadena de tres eslabones, y ninguno
+avisa:
+
+1. **Once llamadas HTTP no tenían `timeout`.** Sin él, `requests` espera *para
+   siempre* si el servidor acepta la conexión y después no contesta. No falla, no
+   reintenta: se queda.
+2. **`subprocess.run` tampoco lo tenía**, así que un paso colgado colgaba al
+   orquestador entero.
+3. **El Programador de tareas de Windows** viene por defecto con *"si la tarea ya
+   se está ejecutando, no iniciar una nueva instancia"*. Con el proceso de las 10
+   todavía vivo, las 12 y las 14 se saltearon **en silencio** — ni siquiera
+   quedaron como error.
+
+Lo peligroso no es que un paso falle: es que una corrida colgada **arrastra a
+todas las siguientes**. Por eso ahora hay tres topes.
+
+| Tope | Dónde | Cuánto |
+|---|---|---|
+| `TIMEOUT_HTTP` | en cada script | 30 s a 120 s según la API |
+| `techo` | por paso, en `PASOS` | 15 a 45 min (3-4× la mediana medida) |
+| `PRESUPUESTO_TOTAL` | la corrida entera | 100 min |
+
+**El presupuesto total es el que resuelve el problema de fondo.** Antes de cada
+paso se mira si todavía entra: si quedan 5 minutos y el paso puede tardar 30, se
+saltea y la corrida termina. Con 100 minutos contra un intervalo de 120, la
+corrida **siempre** libera la máquina antes del disparo siguiente.
+
+Lo que se saltea no se pierde: al no quedar registrado como "corrió bien", entra
+primero en la corrida de después.
+
+**Un paso cortado por tiempo NO se reintenta**, aunque le queden intentos.
+Reintentar costaría otro techo entero, y dos techos seguidos se comen la ventana
+—que es justo lo que el tope viene a evitar—. Además un cuelgue rara vez es
+transitorio: es un socket esperando una respuesta que no llega, y el reintento se
+cuelga igual.
+
+Si en el log aparece seguido `NO ENTRARON en los 100 min`, algún paso se volvió
+lento o el presupuesto quedó corto. Es una señal para mirar, no para ignorar.
+
+### Cómo tiene que estar el Programador de tareas
+
+Si el orquestador deja de correr solo, mirar esto antes que el código. En
+PowerShell (la carpeta da igual, estos comandos le preguntan a Windows):
+
+```powershell
+Get-ScheduledTask -TaskName "*orquestador*" | Get-ScheduledTaskInfo
+```
+
+`LastTaskResult` en **`267009`** (`0x41301`) significa "la tarea sigue
+ejecutándose": hay una corrida colgada y por eso no arranca ninguna nueva.
+
+Tres cosas que conviene tener puestas en la tarea:
+
+- **Disparador → "Repetir cada 2 horas durante: Indefinidamente".** Si dice una
+  duración corta, la repetición se corta sola cuando esa duración se cumple.
+- **Configuración → "Detener la tarea si se ejecuta más de: 2 horas"**, y
+  **"Si la tarea ya se está ejecutando: Detener la instancia existente"**. Es el
+  cinturón por si algún día algo se cuelga fuera de los topes de Python.
+- **Condiciones → destildar "Iniciar la tarea solo si el equipo está con
+  alimentación de CA"**, y tildar **"Reactivar el equipo para ejecutar esta
+  tarea"** si la máquina se suspende.
+
+---
+
 ## Cuando algo falla
 
 1. `python orquestador.py --listar` — ver qué paso está pendiente.

@@ -51,6 +51,32 @@ import time
 ARCHIVO_LOG = "orquestador_log.txt"
 ARCHIVO_ESTADO = "estado_pasos.json"
 
+# TECHOS DE TIEMPO
+# ----------------
+# La corrida TIENE que terminar antes del proximo disparo del Programador de
+# tareas de Windows, que por defecto viene con "si la tarea ya se esta
+# ejecutando, no iniciar una nueva instancia". Una corrida que se cuelga no
+# molesta solo a si misma: hace que TODAS las siguientes se salteen en silencio,
+# sin quedar ni como error. Asi es como el pipeline puede pasar medio dia sin
+# actualizar sin que nada avise.
+#
+# Por eso hay dos topes, y son distintos:
+#
+#   PRESUPUESTO_TOTAL  el tope de la corrida ENTERA. Antes de arrancar cada
+#                      paso se mira cuanto se lleva gastado; si ya no entra, los
+#                      que quedan se saltean y la corrida termina. Lo que se
+#                      saltea no se pierde: al no quedar registrado como "corrio
+#                      bien", entra en la corrida siguiente.
+#
+#   techo (por paso)   el tope de UN paso. Sale de multiplicar por 3 o 4 la
+#                      mediana medida en 24 corridas reales (ver README), asi
+#                      que un dia lento no lo corta: corta un cuelgue.
+#
+# El total es de 100 minutos contra un intervalo de 120: deja 20 de colchon.
+# Si algun dia el pipeline se corre cada hora, este numero hay que bajarlo.
+PRESUPUESTO_TOTAL = 100 * 60
+TECHO_POR_DEFECTO = 10 * 60
+
 # Cada paso es:
 #   comando     lo que se ejecuta (script + argumentos)
 #   intentos    cuantas veces se reintenta si falla
@@ -59,6 +85,9 @@ ARCHIVO_ESTADO = "estado_pasos.json"
 #               desde la ultima vez que TERMINO BIEN.
 #   critico     True = si falla definitivamente, se corta el pipeline porque
 #               los pasos de abajo dependen de este.
+#   techo       segundos como maximo que se le dan al paso. Si no esta, se usa
+#               TECHO_POR_DEFECTO. Pasado ese tiempo se lo mata y cuenta como
+#               falla.
 #
 # El orden importa: modelo.py arma gold.fact_ventas leyendo lo que dejaron
 # todas las extracciones, asi que TODAS van antes que el.
@@ -66,47 +95,47 @@ PASOS = [
     # --- Extracciones ---------------------------------------------------
     # Las ventas mayoristas son el corazon del tablero: van en cada corrida.
     {"comando": "sigma.py --ventas",           "intentos": 3, "espera": 60,
-     "cada_horas": None, "critico": True,  "escribe": "sigma_ventas"},
+     "cada_horas": None, "critico": True,  "escribe": "sigma_ventas", "techo": 30 * 60},
 
     # El catalogo se reescribe entero (8.200 articulos) y un alta o un cambio de
     # descripcion no pasa cada dos horas. Estaba pegado a las ventas, y asi
     # acumulo 335.816 inserciones para tener 8.194 filas vivas: 41 recargas del
     # mismo catalogo.
     {"comando": "sigma.py --catalogo",         "intentos": 2, "espera": 60,
-     "cada_horas": 24, "critico": False, "escribe": "sigma_articulos"},
+     "cada_horas": 24, "critico": False, "escribe": "sigma_articulos", "techo": 30 * 60},
 
     {"comando": "digip_pedidos.py",            "intentos": 3, "espera": 60,
-     "cada_horas": None, "critico": True,  "escribe": "digip_pedidos"},
+     "cada_horas": None, "critico": True,  "escribe": "digip_pedidos", "techo": 20 * 60},
 
     # El paso mas caro de todos: 9,8 min de mediana, una llamada por pedido de
     # la ventana. Alimenta Logistica, que se mira por semana y no por hora.
     {"comando": "digip_preparaciones.py",      "intentos": 2, "espera": 60,
-     "cada_horas": 6, "critico": False, "escribe": "digip_preparaciones"},
+     "cada_horas": 6, "critico": False, "escribe": "digip_preparaciones", "techo": 40 * 60},
 
     # Ventas de ML: ventana movil de 7 dias, es barato. Va seguido porque es
     # lo que mas rapido queda viejo.
     {"comando": "mercadolibre.py --ventas",    "intentos": 2, "espera": 60,
-     "cada_horas": 2, "critico": False, "escribe": "ml_ventas"},
+     "cada_horas": 2, "critico": False, "escribe": "ml_ventas", "techo": 20 * 60},
 
     # Costo de envio: incremental (solo pide las ordenes que todavia no tiene).
     # Va DESPUES de las ventas: lee bronze.ml_ventas para saber que le falta.
     {"comando": "ml_envios.py",                "intentos": 2, "espera": 60,
-     "cada_horas": 4, "critico": False, "escribe": "ml_envios"},
+     "cada_horas": 4, "critico": False, "escribe": "ml_envios", "techo": 45 * 60},
 
     # Catalogo y stock Full de ML: ~3.800 llamadas a la API, es EL paso lento.
     {"comando": "mercadolibre.py --catalogo",  "intentos": 2, "espera": 60,
-     "cada_horas": 12, "critico": False, "escribe": "ml_publicaciones, ml_stock_full"},
+     "cada_horas": 12, "critico": False, "escribe": "ml_publicaciones, ml_stock_full", "techo": 30 * 60},
 
     # Stock de DIGIP: dos llamadas y el stock si se mueve durante el dia.
     {"comando": "digip.py",                    "intentos": 2, "espera": 30,
-     "cada_horas": 4, "critico": False, "escribe": "digip_stock, digip_stock_detalle"},
+     "cada_horas": 4, "critico": False, "escribe": "digip_stock, digip_stock_detalle", "techo": 20 * 60},
 
     # Tienda Nube vende poco (unos 8 pedidos por mes), pero desde que tiene
     # tablero propio la frecuencia ya no la manda el volumen sino la espera:
     # con 12 h, una venta de la manana recien aparecia a la noche. La bajada es
     # una sola pagina de la API y tarda segundos, asi que sale barato.
     {"comando": "tiendanube.py",               "intentos": 2, "espera": 30,
-     "cada_horas": 4, "critico": False, "escribe": "tn_pedidos + tn_pedidos_items"},
+     "cada_horas": 4, "critico": False, "escribe": "tn_pedidos + tn_pedidos_items", "techo": 15 * 60},
 
     # Los Excel de costos solo cambian cuando alguien los edita: el script
     # compara una huella de los archivos y no hace nada si no se movio ninguno.
@@ -114,15 +143,15 @@ PASOS = [
     # que un Excel corregido entra en la corrida siguiente y no hay que
     # acordarse de nada.
     {"comando": "costos.py --si-cambio",       "intentos": 2, "espera": 30,
-     "cada_horas": None, "critico": True,  "escribe": "costos_historicos"},
+     "cada_horas": None, "critico": True,  "escribe": "costos_historicos", "techo": 20 * 60},
 
     # --- Transformaciones -----------------------------------------------
     {"comando": "modelo.py",                   "intentos": 3, "espera": 60,
-     "cada_horas": None, "critico": True,  "escribe": "gold.fact_ventas"},
+     "cada_horas": None, "critico": True,  "escribe": "gold.fact_ventas", "techo": 30 * 60},
     {"comando": "prorratear_flete.py",         "intentos": 2, "espera": 30,
-     "cada_horas": None, "critico": True,  "escribe": "gold.fact_ventas_flete"},
+     "cada_horas": None, "critico": True,  "escribe": "gold.fact_ventas_flete", "techo": 20 * 60},
     {"comando": "clasificar_clientes.py",      "intentos": 2, "espera": 30,
-     "cada_horas": None, "critico": True,  "escribe": "gold.clientes_clasificados"},
+     "cada_horas": None, "critico": True,  "escribe": "gold.clientes_clasificados", "techo": 20 * 60},
 ]
 
 CARPETA = os.path.dirname(os.path.abspath(__file__))
@@ -207,19 +236,40 @@ def toca_correr(paso, estado):
     return False, f"corrio hace {pasadas:.1f}hs, faltan {faltan:.1f}hs"
 
 
-def correr_paso(comando, intentos, espera):
+def correr_paso(comando, intentos, espera, techo):
+    """Corre un paso con reintentos y un tope de tiempo. Devuelve (exito, error).
+
+    `techo` son los segundos que se le dan como maximo. Si se pasa, se lo mata.
+    """
     # Lista partida y no `shell=True`: el comando puede traer argumentos
     # ("mercadolibre.py --ventas") y asi no hay que meter una shell en el medio.
     partes = comando.split()
     ultimo_error = None
     for intento in range(1, intentos + 1):
-        log(f"Ejecutando {comando} (intento {intento}/{intentos})...")
-        resultado = subprocess.run(
-            [sys.executable] + partes,
-            capture_output=True,
-            text=True,
-            cwd=CARPETA,
-        )
+        log(f"Ejecutando {comando} (intento {intento}/{intentos}, techo {techo // 60} min)...")
+        try:
+            resultado = subprocess.run(
+                [sys.executable] + partes,
+                capture_output=True,
+                text=True,
+                cwd=CARPETA,
+                timeout=techo,
+            )
+        except subprocess.TimeoutExpired:
+            # UN paso colgado NO se reintenta, aunque le queden intentos.
+            #
+            # Reintentar costaria otro techo entero, y dos techos seguidos se
+            # pueden comer la ventana de dos horas hasta el disparo siguiente --
+            # que es exactamente el problema que este tope viene a evitar. Un
+            # cuelgue ademas no suele ser transitorio: es un socket esperando una
+            # respuesta que no llega, y el reintento se cuelga igual.
+            ultimo_error = (
+                f"Se paso de {techo // 60} minutos y se lo corto. "
+                f"Suele ser una llamada a una API que quedo esperando respuesta."
+            )
+            log(f"CORTADO POR TIEMPO: {comando} — {ultimo_error}")
+            return False, ultimo_error
+
         if resultado.returncode == 0:
             log(f"OK: {comando} termino sin errores.")
             return True, None
@@ -319,10 +369,33 @@ def main():
 
     log("========== INICIO DEL ORQUESTADOR ==========")
     inicio = time.time()
-    salteados, fallados = [], []
+    salteados, fallados, sin_tiempo = [], [], []
+
+    # Con --solo el pedido es explicito y de un paso solo: no se le pone tope a
+    # la corrida. Es el modo en que uno se sienta a mirar como termina, no el
+    # automatico que tiene que devolver la maquina a horario.
+    presupuesto = None if args.solo else PRESUPUESTO_TOTAL
 
     for paso in elegidos:
         comando = paso["comando"]
+        techo = paso.get("techo", TECHO_POR_DEFECTO)
+
+        # Antes de arrancar el paso: ¿todavia entra en la corrida?
+        #
+        # Se compara contra el techo del paso y no contra un minuto suelto: si
+        # quedan 5 minutos y el paso puede tardar 30, arrancarlo es firmar que la
+        # corrida se va a pasar. Mejor saltearlo -- al no quedar registrado como
+        # "corrio bien", entra primero en la corrida siguiente.
+        if presupuesto is not None:
+            gastado = time.time() - inicio
+            if gastado + techo > presupuesto:
+                log(
+                    f"Se saltea {comando}: quedan {(presupuesto - gastado) / 60:.0f} min "
+                    f"de la corrida y el paso puede tardar {techo // 60}. "
+                    f"Va a correr en la proxima."
+                )
+                sin_tiempo.append(comando)
+                continue
 
         # Con --solo o --forzar el pedido es explicito: no se saltea nada.
         if not args.forzar and not args.solo:
@@ -334,7 +407,7 @@ def main():
             if motivo:
                 log(f"Toca {comando}: {motivo}.")
 
-        exito, ultimo_error = correr_paso(comando, paso["intentos"], paso["espera"])
+        exito, ultimo_error = correr_paso(comando, paso["intentos"], paso["espera"], techo)
 
         ahora = datetime.datetime.now().isoformat()
         reg = registro(estado, comando)
@@ -372,6 +445,16 @@ def main():
     duracion = round((time.time() - inicio) / 60, 1)
     if salteados:
         log(f"Salteados por frecuencia: {', '.join(salteados)}")
+
+    # Los que no entraron en el presupuesto se avisan APARTE de los salteados
+    # por frecuencia, aunque los dos sean "no corrio". Son cosas distintas: uno
+    # es el pipeline funcionando como se lo penso, el otro es la corrida
+    # quedandose sin tiempo. Si este aparece seguido, o algun paso se volvio
+    # lento o el presupuesto quedo corto -- y eso hay que mirarlo.
+    if sin_tiempo:
+        log(f"NO ENTRARON en los {PRESUPUESTO_TOTAL // 60} min de la corrida: {', '.join(sin_tiempo)}")
+        log("Van a correr primero en la proxima. Si se repite, revisar los techos.")
+
     if fallados:
         log(f"TERMINADO CON AVISOS ({duracion} min). Fallaron: {', '.join(fallados)}")
     else:
