@@ -46,7 +46,7 @@ dejaron todas las extracciones, así que **todas van antes que él**.
 | 6 | `ml_envios.py` | 4 h | `bronze.ml_envios` | no |
 | 7 | `mercadolibre.py --catalogo` | 12 h | `bronze.ml_publicaciones`, `ml_stock_full` | no |
 | 8 | `digip.py` | 4 h | `bronze.digip_stock`, `digip_stock_detalle` | no |
-| 9 | `tiendanube.py` | 12 h | `bronze.tn_pedidos_items` | no |
+| 9 | `tiendanube.py` | 4 h | `bronze.tn_pedidos`, `tn_pedidos_items` | no |
 | 10 | `costos.py --si-cambio` | si cambió un Excel | `bronze.costos_historicos` | sí |
 | 11 | `modelo.py` | siempre | **`gold.fact_ventas`** | sí |
 | 12 | `prorratear_flete.py` | siempre | `gold.fact_ventas_flete` | sí |
@@ -224,6 +224,36 @@ sin borrarla y deja las vistas en pie. Hoy hay vistas sobre `tn_pedidos_items`,
 `modelo.py` borran su ventana y la vuelven a insertar. Lo anterior a la ventana
 queda intacto — por eso un dato que llega tarde a `bronze` **no entra solo** a
 `gold`: hay que reconstruir con `--dias` o `--todo`.
+
+**Qué cuenta como venta en Tienda Nube: que esté PAGADA.** El criterio es
+`estado_pago = 'paid'` **y** `estado <> 'cancelled'`, y no el estado del pedido,
+que sería lo intuitivo. En Tienda Nube las ventas **no pasan solas a `closed`**:
+hay que cerrarlas a mano y nadie lo hace, así que en toda la historia de la
+tienda no hay ni un pedido `closed`. Si el criterio fuera el estado, el tablero
+mostraría cero para siempre.
+
+Los dos filtros hacen falta por separado, porque las dos cosas pasan:
+
+| Estado | Pago | Pedidos | ¿Es venta? | Por qué |
+|---|---|---|---|---|
+| `open` | `paid` | 29 | **sí** | pagada y viva |
+| `cancelled` | `paid` | 12 | no | se cobró y después se canceló |
+| `cancelled` | `voided` | 6 | no | anulada |
+| `open` | `voided` | 1 | no | el pago se cayó |
+| `open` | `partially_refunded` | 1 | no | devuelta en parte |
+
+**Tienda Nube tiene dos costos de envío y no son lo mismo.**
+`shipping_cost_customer` es lo que **paga el comprador** (es ingreso);
+`shipping_cost_owner` es lo que **paga la tienda** (es costo). Suelen coincidir,
+pero no cuando hay envío gratis o bonificado — que es justo cuando el margen se
+cae y hay que poder verlo. `modelo.py` resta **`shipping_cost_owner`**, lo pasa a
+neto (viene con IVA) y lo reparte entre las líneas del pedido proporcional al
+valor de cada una, igual que en Mercado Libre.
+
+**El margen de Tienda Nube no descuenta comisión de pasarela.** Lo que cobra Pago
+Nube / Mercado Pago por procesar el cobro **no está en ningún campo de la API**,
+así que `comision` queda en 0 en vez de inventar un porcentaje. El margen de ese
+canal está por eso algo sobreestimado, y el tablero lo aclara.
 
 ---
 

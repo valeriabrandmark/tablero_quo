@@ -61,6 +61,49 @@ def llamar_tn_paginado(endpoint, params=None):
     return todos
 
 
+def tipo_sql(serie):
+    """El tipo de columna que le pondria pandas, para que ALTER y CREATE coincidan."""
+    import pandas.api.types as t
+    if t.is_bool_dtype(serie):
+        return "boolean"
+    if t.is_integer_dtype(serie):
+        return "bigint"
+    if t.is_float_dtype(serie):
+        return "double precision"
+    return "text"
+
+
+def agregar_columnas_nuevas(engine, tabla, df):
+    """Le agrega a la tabla las columnas que trae el DataFrame y ella todavia no.
+
+    Hace falta porque guardamos con TRUNCATE + append en vez de DROP + CREATE
+    (ver abajo): el append inserta contra las columnas que YA existen, asi que
+    el dia que se empieza a traer un campo nuevo -- por ejemplo el costo de
+    envio -- el INSERT falla con `column "envio_costo_tienda" does not exist`.
+
+    Solo AGREGA. Nunca borra ni cambia el tipo de una columna existente, que es
+    lo unico que romperia una vista apoyada en la tabla.
+    """
+    with engine.begin() as con:
+        existentes = {
+            f[0] for f in con.exec_driver_sql(
+                "select column_name from information_schema.columns "
+                "where table_schema = 'bronze' and table_name = %s",
+                (tabla,),
+            ).fetchall()
+        }
+    if not existentes:          # la tabla no existe: la crea el to_sql
+        return
+    faltan = [c for c in df.columns if c not in existentes]
+    for col in faltan:
+        with engine.begin() as con:
+            con.exec_driver_sql(
+                f'ALTER TABLE bronze."{tabla}" ADD COLUMN "{col}" {tipo_sql(df[col])};'
+            )
+    if faltan:
+        print(f"  columnas nuevas en {tabla}: {', '.join(faltan)}")
+
+
 def guardar_en_bd(df, tabla, modo="replace"):
     if df.empty:
         print(f"  (sin datos para {tabla})")
@@ -77,6 +120,7 @@ def guardar_en_bd(df, tabla, modo="replace"):
     )
     with engine.begin() as con:
         con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
+    agregar_columnas_nuevas(engine, tabla, df)
     if modo == "replace":
         # TRUNCATE + APPEND en vez de DROP + CREATE.
         #
@@ -106,45 +150,65 @@ def guardar_en_bd(df, tabla, modo="replace"):
 #  EXTRACCIONES
 # ============================================================
 
-def extraer_pedidos():
-    """Pedidos = ventas del ecommerce Tienda Nube. Desde inicio de 2026."""
+def extraer_pedidos_y_items():
+    """Pedidos de Tienda Nube -> las DOS tablas de bronze, con una sola bajada.
+
+    Antes eran dos funciones que llamaban al mismo endpoint por separado; se
+    unieron porque bajar los pedidos dos veces solo servia para pegarle el doble
+    a la API y para que las dos tablas pudieran quedar con fotos distintas.
+
+    - bronze.tn_pedidos       : el pedido entero como lo manda la API (206 cols).
+    - bronze.tn_pedidos_items : una fila por producto, que es lo que lee modelo.py.
+
+    A cada linea de `tn_pedidos_items` se le bajan ademas los datos de plata que
+    viven en la CABECERA del pedido y no en el producto. El que importa es
+    `shipping_cost_owner`: el envio que absorbe la tienda. Sin el, la
+    rentabilidad de Tienda Nube quedaba sin restar el flete -- el mismo agujero
+    que tuvo Mercado Libre hasta que se sumo ml_envios.py.
+
+    OJO con los dos costos de envio, que NO son lo mismo:
+      shipping_cost_customer -> lo que PAGA el comprador (es ingreso)
+      shipping_cost_owner    -> lo que PAGA la tienda    (es costo)
+    Suelen coincidir, pero no cuando hay envio gratis o bonificado, que es
+    justo cuando el margen se cae y hay que poder verlo.
+    """
     print("\n=== PEDIDOS TIENDA NUBE (ventas) ===")
-    datos = llamar_tn_paginado("orders", dict(PARAMS_PEDIDOS))
-    df = pd.json_normalize(datos)
-    print(f"  Total: {len(df)} pedidos")
-    guardar_en_bd(df, "tn_pedidos", modo="replace")
-
-def extraer_pedidos_items():
-    """Desglosa los pedidos: una fila por cada producto de cada pedido.
-       Esto deja las ventas de Tienda Nube en formato analizable (como sigma_ventas)."""
-    print("\n=== PEDIDOS ITEMS (una fila por producto vendido) ===")
     pedidos = llamar_tn_paginado("orders", dict(PARAMS_PEDIDOS))
-    print(f"  {len(pedidos)} pedidos a desglosar")
+    print(f"  {len(pedidos)} pedidos")
 
+    guardar_en_bd(pd.json_normalize(pedidos), "tn_pedidos", modo="replace")
+
+    print("\n=== PEDIDOS ITEMS (una fila por producto vendido) ===")
     filas = []
     for pedido in pedidos:
-        # Datos que queremos repetir en cada linea del pedido
-        pedido_id = pedido.get("id")
-        numero = pedido.get("number")
-        fecha = pedido.get("created_at")
-        estado = pedido.get("status")
-        estado_pago = pedido.get("payment_status")
-        total_pedido = pedido.get("total")
-        # cliente puede venir anidado
         cliente = pedido.get("customer") or {}
-        cliente_nombre = cliente.get("name")
-        cliente_id = cliente.get("id")
+        direccion = pedido.get("shipping_address") or {}
 
-        # La lista de productos del pedido
+        # Se arma una vez por pedido y se repite en cada linea: son atributos
+        # del pedido, no del producto.
+        cabecera = {
+            "pedido_id": pedido.get("id"),
+            "pedido_numero": pedido.get("number"),
+            "fecha": pedido.get("created_at"),
+            "estado": pedido.get("status"),
+            "estado_pago": pedido.get("payment_status"),
+            "pagado_en": pedido.get("paid_at"),
+            "cliente_id": cliente.get("id"),
+            "cliente_nombre": cliente.get("name"),
+            "total_pedido": pedido.get("total"),
+            "subtotal_pedido": pedido.get("subtotal"),
+            "descuento": pedido.get("discount"),
+            "envio_costo_tienda": pedido.get("shipping_cost_owner"),
+            "envio_cobrado": pedido.get("shipping_cost_customer"),
+            "envio_opcion": pedido.get("shipping_option"),
+            "medio_pago": pedido.get("gateway_name"),
+            "provincia": direccion.get("province"),
+            "ciudad": direccion.get("city"),
+        }
+
         for prod in pedido.get("products", []):
             filas.append({
-                "pedido_id": pedido_id,
-                "pedido_numero": numero,
-                "fecha": fecha,
-                "estado": estado,
-                "estado_pago": estado_pago,
-                "cliente_id": cliente_id,
-                "cliente_nombre": cliente_nombre,
+                **cabecera,
                 "producto_id": prod.get("product_id"),
                 "variant_id": prod.get("variant_id"),
                 "sku": prod.get("sku"),
@@ -153,7 +217,6 @@ def extraer_pedidos_items():
                 "precio": prod.get("price"),
                 "costo": prod.get("cost"),
                 "total_linea": prod.get("total"),
-                "total_pedido": total_pedido,
             })
 
     df = pd.DataFrame(filas)
@@ -185,9 +248,7 @@ if __name__ == "__main__":
     print("URL base:", URL_BASE)
     print("Token cargado:", "SI" if TOKEN else "NO")
 
-    # PRUEBA: empezamos solo por pedidos (las ventas)
-    #extraer_pedidos()
-    extraer_pedidos_items()
+    extraer_pedidos_y_items()
     #extraer_productos()   # activar despues
     #extraer_clientes()    # activar despues
 

@@ -241,12 +241,55 @@ def construir_fact_ventas():
         })
 
     # --- 2) TIENDA NUBE ---
+    #
+    # QUE CUENTA COMO VENTA: que este PAGADA (`estado_pago = 'paid'`) y que el
+    # pedido no este cancelado.
+    #
+    # No se usa el estado del pedido para decidirlo, que seria lo intuitivo: en
+    # Tienda Nube las ventas NO pasan solas a `closed` -- hay que cerrarlas a
+    # mano y nadie lo hace. De hecho en toda la historia de la tienda no hay ni
+    # un solo pedido `closed`. Si el criterio fuera el estado, el tablero
+    # mostraria cero para siempre.
+    #
+    # Los dos filtros hacen falta por separado: hay pedidos `paid` que despues
+    # se cancelaron (12 pedidos, $403.571) y son plata que no entro, y hay
+    # pedidos `open` con el pago anulado o devuelto (`voided`,
+    # `partially_refunded`) que tampoco son venta.
     print("Procesando Tienda Nube...")
-    tn = pd.read_sql("""
-        SELECT fecha, sku, nombre, cantidad, precio, cliente_nombre
+
+    # `envio_costo_tienda` lo empezo a traer tiendanube.py despues, asi que puede
+    # no estar todavia: el orquestador corre Tienda Nube cada 12 h pero modelo.py
+    # en todas las corridas, y sin este chequeo la primera corrida despues de un
+    # git pull moriria con `column "envio_costo_tienda" does not exist`.
+    # Si falta, se sigue sin envio -- que es exactamente como estaba antes --
+    # en vez de dejar el modelo entero sin actualizar.
+    with engine.begin() as con:
+        hay_envio = con.exec_driver_sql("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'bronze' AND table_name = 'tn_pedidos_items'
+                  AND column_name = 'envio_costo_tienda'
+            )
+        """).scalar()
+    if not hay_envio:
+        print("  (bronze.tn_pedidos_items todavia no trae envio: corre tiendanube.py)")
+
+    col_envio = "envio_costo_tienda" if hay_envio else "NULL AS envio_costo_tienda"
+    tn = pd.read_sql(f"""
+        SELECT pedido_id, pedido_numero, fecha, sku, nombre, cantidad, precio,
+               cliente_nombre, {col_envio}
         FROM bronze.tn_pedidos_items
-        WHERE estado != 'cancelled'
+        WHERE estado_pago = 'paid' AND estado <> 'cancelled'
     """, engine)
+
+    # `envio_costo_tienda` es lo que paga LA TIENDA por el flete, y viene en la
+    # cabecera del pedido: esta repetido igual en todas sus lineas. Se reparte
+    # entre ellas proporcional al valor de cada una, igual que en Mercado Libre,
+    # para que un pedido de tres productos no cargue el flete entero a uno.
+    valor_pedido = {}
+    for _, r in tn.iterrows():
+        precio = float(r["precio"]) if r["precio"] else 0
+        valor_pedido[r["pedido_id"]] = valor_pedido.get(r["pedido_id"], 0) + precio * (r["cantidad"] or 0)
 
     for _, r in tn.iterrows():
         f = to_date(r["fecha"])
@@ -259,12 +302,26 @@ def construir_fact_ventas():
         iva = iva_de(sku)
         precio_neto = precio / (1 + iva / 100)
         costo = costo_de(sku, mc)
-        margen = None if costo is None else (precio_neto - costo) * cant
+
+        # El envio viene CON IVA, como el de Mercado Libre: se pasa a neto para
+        # poder restarlo de una venta neta.
+        envio_bruto = float(r["envio_costo_tienda"] or 0)
+        valor_item = precio * cant
+        total = valor_pedido.get(r["pedido_id"], 0)
+        envio_item = (envio_bruto / 1.21) * (valor_item / total) if total > 0 else 0
+
+        # Sin comision: Tienda Nube no la informa en el pedido. Lo que cobra la
+        # pasarela de pago NO esta en ningun campo de la API, asi que se deja en
+        # 0 en vez de inventar un porcentaje. El margen de este canal queda por
+        # eso un poco optimista, y el tablero lo dice.
+        margen = None if costo is None else (precio_neto - costo) * cant - envio_item
         filas.append({
-            "canal": "Tienda Nube", "unidad": "Quo", "tipo": "Fiscal", "nro_orden": None,
+            "canal": "Tienda Nube", "unidad": "Quo", "tipo": "Fiscal",
+            "nro_orden": r["pedido_numero"],
             "fecha": f, "mes_comercial": mc, "sku": sku, "producto": r["nombre"],
             "cantidad": cant, "precio_unitario": precio, "precio_neto": precio_neto,
             "iva_pct": iva, "costo_unitario": costo, "comision": 0,
+            "envio": round(envio_item, 2),
             "total_linea": cant * precio, "margen_total": margen,
             "proveedor": proveedor_de(sku),
             "marca": marca_de(sku),
