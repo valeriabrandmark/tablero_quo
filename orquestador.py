@@ -124,7 +124,7 @@ PASOS = [
 
     # Catalogo y stock Full de ML: ~3.800 llamadas a la API, es EL paso lento.
     {"comando": "mercadolibre.py --catalogo",  "intentos": 2, "espera": 60,
-     "cada_horas": 12, "critico": False, "escribe": "ml_publicaciones, ml_stock_full", "techo": 30 * 60},
+     "cada_horas": 12, "critico": False, "escribe": "ml_publicaciones, ml_stock_full", "techo": 60 * 60},
 
     # Stock de DIGIP: dos llamadas y el stock si se mueve durante el dia.
     {"comando": "digip.py",                    "intentos": 2, "espera": 30,

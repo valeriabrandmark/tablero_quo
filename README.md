@@ -58,11 +58,19 @@ Del log de 24 corridas reales, midiendo cuánto tarda cada paso:
 
 | Paso | Mediana |
 |---|---|
+| `mercadolibre.py --catalogo` | 33 min |
 | `digip_preparaciones.py` | 9,8 min |
 | `sigma.py` (las dos juntas) | 6,9 min |
 | `modelo.py` | 5,9 min |
 | `costos.py` | 1,4 min |
 | el resto | menos de 30 s |
+
+`mercadolibre.py --catalogo` no estaba en esa medición porque **nunca había
+llegado a correr**: se midió el 19/08/2026, la primera vez. Son ~4.300 llamadas
+a la API — una por cada `inventory_id` para el stock Full— y con la `PAUSA` de
+1 segundo que tenía tardaba **83 minutos, de los cuales 72 eran el script
+durmiendo**. Con `PAUSA = 0.3` baja a ~33. El freno real nunca fue esa pausa
+sino el 429 de la API, que `llamar_ml` ya sabe manejar.
 
 La corrida entera daba **25 minutos**, cada dos horas, y la mayor parte era volver
 a pedir cosas que no habían cambiado. El caso más claro: `sigma_articulos` acumuló
@@ -321,7 +329,7 @@ todas las siguientes**. Por eso ahora hay tres topes.
 | Tope | Dónde | Cuánto |
 |---|---|---|
 | `TIMEOUT_HTTP` | en cada script | 30 s a 120 s según la API |
-| `techo` | por paso, en `PASOS` | 15 a 45 min (3-4× la mediana medida) |
+| `techo` | por paso, en `PASOS` | 15 a 60 min (3-4× la mediana medida) |
 | `PRESUPUESTO_TOTAL` | la corrida entera | 100 min |
 
 **El presupuesto total es el que resuelve el problema de fondo.** Antes de cada
