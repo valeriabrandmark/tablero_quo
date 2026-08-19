@@ -143,6 +143,13 @@ ya bajado queda, y los envíos que dieron error se reintentan en la corrida
 siguiente. Al final imprime cuántos hay en total; ese número tiene que acercarse
 a la cantidad de envíos distintos que haya en `ml_ventas`.
 
+**No corras dos a la vez.** Antes de saltear un envío, el script mira qué hay en
+la tabla; dos procesos leen la misma foto y escriben lo mismo. Pasó una vez al
+quedar corriendo la versión vieja mientras arrancaba la nueva después de un
+`git pull`: quedaron 7.800 filas duplicadas. `gold.fact_ventas` no se vio
+afectada porque `modelo.py` descarta duplicados, pero para limpiar la tabla está
+`limpiar_duplicados_ml_envios.sql`.
+
 ---
 
 ## Reglas de negocio que no se deducen del código
