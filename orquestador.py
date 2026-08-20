@@ -104,6 +104,9 @@ TECHO_POR_DEFECTO = 10 * 60
 #   primera_del_dia  True = corre una vez por dia, en la PRIMERA corrida del
 #               dia. Reemplaza a cada_horas. Para los pasos caros: asi caen a la
 #               manana temprano y no en el medio de la tarde.
+#   depende_de  el comando de otro paso. Corre solo si ESE corrio bien en esta
+#               misma pasada. Reemplaza a cada_horas. Para los pasos que van de
+#               la mano y no significan nada por separado.
 #
 # El orden importa: modelo.py arma gold.fact_ventas leyendo lo que dejaron
 # todas las extracciones, asi que TODAS van antes que el.
@@ -141,9 +144,15 @@ PASOS = [
      "cada_horas": None, "critico": False, "escribe": "ml_ventas", "techo": 20 * 60},
 
     # Costo de envio: incremental (solo pide las ordenes que todavia no tiene).
-    # Va DESPUES de las ventas: lee bronze.ml_ventas para saber que le falta.
+    #
+    # VA PEGADO A LAS VENTAS, no cada 4 h. Lee bronze.ml_ventas para saber que
+    # le falta, asi que cada vez que entran ordenes nuevas hay envios nuevos que
+    # pedir. Si no corre, modelo.py arma gold en el medio y esas lineas quedan
+    # con envio en CERO -- con el margen inflado -- hasta la corrida siguiente.
+    # Es el mismo agujero que en julio dejo la rentabilidad de ML inflada.
     {"comando": "ml_envios.py",                "intentos": 2, "espera": 60,
-     "cada_horas": 4, "critico": False, "escribe": "ml_envios", "techo": 45 * 60},
+     "cada_horas": None, "depende_de": "mercadolibre.py --ventas",
+     "critico": False, "escribe": "ml_envios", "techo": 45 * 60},
 
     # Tienda Nube: una sola pagina de la API, tarda segundos.
     {"comando": "tiendanube.py",               "intentos": 2, "espera": 30,
@@ -283,8 +292,32 @@ def ultima_corrida(estado, comando):
         return None
 
 
-def toca_correr(paso, estado):
-    """(corre_si_o_no, motivo_para_el_log)"""
+def toca_correr(paso, estado, corrieron=()):
+    """(corre_si_o_no, motivo_para_el_log)
+
+    `corrieron` son los comandos que YA corrieron bien en esta pasada. Lo usa
+    `depende_de`.
+    """
+
+    # "Corre siempre que haya corrido tal otro" -- para los pasos que van de la
+    # mano y no tienen sentido por separado.
+    #
+    # Es mas fuerte que ponerles la misma frecuencia: si manana alguien cambia
+    # la del paso del que depende, este lo sigue solo. Con dos numeros iguales
+    # escritos aparte, tarde o temprano uno se mueve y el otro no.
+    #
+    # El caso real: ml_envios.py va DESPUES de mercadolibre.py --ventas y le
+    # pide a la API el costo de las ordenes que todavia no tiene. Si ventas
+    # trae ordenes nuevas y envios no corre, modelo.py arma gold en el medio y
+    # esas lineas quedan con envio en CERO -- o sea con el margen inflado --
+    # hasta la corrida siguiente. Medido el 20/08: 479 ordenes de agosto sin su
+    # envio, con envios corriendo cada 4 h y ventas en cada pasada.
+    dependencia = paso.get("depende_de")
+    if dependencia:
+        if dependencia in corrieron:
+            return True, f"corrio {dependencia}, van juntos"
+        return False, f"no corrio {dependencia}"
+
 
     # "Una vez por dia, en la primera corrida" -- para los pasos caros.
     #
@@ -378,7 +411,10 @@ def listar():
     for paso in PASOS:
         reg = registro(estado, paso["comando"])
         ultima = ultima_corrida(estado, paso["comando"])
-        if paso.get("primera_del_dia"):
+        if paso.get("depende_de"):
+            # Corto para que entre en la columna, que es de 8.
+            cada = "atado"
+        elif paso.get("primera_del_dia"):
             cada = "1/dia"
         elif paso["cada_horas"] is None:
             cada = "siempre"
@@ -388,7 +424,10 @@ def listar():
         # El estado se calcula con la MISMA funcion que decide en la corrida
         # real, y no repitiendo la cuenta aca. Cuando se repite, tarde o
         # temprano las dos versiones dicen cosas distintas y la pantalla miente.
-        if paso.get("primera_del_dia"):
+        if paso.get("depende_de"):
+            texto_ultima = ultima.strftime("%Y-%m-%d %H:%M") if ultima else "nunca"
+            estado_txt = f"va con {paso['depende_de'].split()[0]}"
+        elif paso.get("primera_del_dia"):
             corre, motivo = toca_correr(paso, estado)
             texto_ultima = ultima.strftime("%Y-%m-%d %H:%M") if ultima else "nunca"
             estado_txt = "PENDIENTE" if corre else motivo
@@ -466,6 +505,10 @@ def main():
     log("========== INICIO DEL ORQUESTADOR ==========")
     inicio = time.time()
     salteados, fallados, sin_tiempo = [], [], []
+    # Los que ya terminaron BIEN en esta pasada. Lo mira `depende_de`: un paso
+    # atado a otro corre solo si ese otro corrio -- y corrio bien, porque
+    # pedirle los envios de ventas que no se llegaron a traer no tiene sentido.
+    corrieron = []
 
     # Con --solo el pedido es explicito y de un paso solo: no se le pone tope a
     # la corrida. Es el modo en que uno se sienta a mirar como termina, no el
@@ -495,7 +538,7 @@ def main():
 
         # Con --solo o --forzar el pedido es explicito: no se saltea nada.
         if not args.forzar and not args.solo:
-            corre, motivo = toca_correr(paso, estado)
+            corre, motivo = toca_correr(paso, estado, corrieron)
             if not corre:
                 log(f"Se saltea {comando}: {motivo}.")
                 salteados.append(comando)
@@ -511,6 +554,7 @@ def main():
         if exito:
             # El estado se guarda paso por paso y no al final: si la corrida se
             # corta a la mitad, lo que ya salio bien no se vuelve a hacer.
+            corrieron.append(comando)
             estado[comando] = {"ok": ahora, "fallos": 0, "ultimo_fallo": None, "error": None}
             guardar_estado(estado)
             continue

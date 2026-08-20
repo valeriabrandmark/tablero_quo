@@ -49,7 +49,7 @@ esperaba media hora por datos que no usa.
 | 1 | `sigma.py --ventas` | siempre | `bronze.sigma_ventas` | sí |
 | 2 | `sigma.py --catalogo` | 24 h | `bronze.sigma_articulos` | no |
 | 3 | `mercadolibre.py --ventas` | siempre | `bronze.ml_ventas` | no |
-| 4 | `ml_envios.py` | 4 h | `bronze.ml_envios` | no |
+| 4 | `ml_envios.py` | **con las ventas** | `bronze.ml_envios` | no |
 | 5 | `tiendanube.py` | 4 h | `bronze.tn_pedidos`, `tn_pedidos_items` | no |
 | 6 | `costos.py --si-cambio` | si cambió un Excel | `bronze.costos_historicos` | sí |
 | 7 | **`modelo.py`** | siempre | **`gold.fact_ventas`** | sí |
@@ -64,6 +64,19 @@ esperaba media hora por datos que no usa.
 | 11 | `prorratear_flete.py` | 12 h | `gold.fact_ventas_flete` | no |
 | 12 | `clasificar_clientes.py` | siempre | `gold.clientes_clasificados` | no |
 | 13 | `mercadolibre.py --catalogo` | **1/día** | `bronze.ml_publicaciones`, `ml_stock_full`, `ml_stock_full_historico` | no |
+
+**`ml_envios.py` va pegado a las ventas, no cada N horas.** Le pide a la API el
+costo de las órdenes que todavía no tiene, así que cada vez que entran órdenes
+nuevas hay envíos nuevos que pedir. Si no corre, `modelo.py` arma `gold` en el
+medio y esas líneas quedan con **envío en cero — o sea con el margen inflado**—
+hasta la corrida siguiente. Es el mismo agujero que en julio dejó la
+rentabilidad de Mercado Libre inflada. Medido el 20/08 con envíos cada 4 h:
+**479 órdenes de agosto sin su envío**.
+
+Se resuelve con `depende_de` y no poniéndoles la misma frecuencia, que sería lo
+fácil: si mañana alguien cambia la de las ventas, los envíos la siguen solos.
+Con dos números iguales escritos aparte, tarde o temprano uno se mueve y el otro
+no.
 
 **`1/día` no es lo mismo que `cada_horas: 24`.** Con 24 horas, un paso que ayer
 corrió a las 15 hoy vuelve a las 15 — plena tarde, con gente mirando el tablero.
