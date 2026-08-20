@@ -63,7 +63,7 @@ esperaba media hora por datos que no usa.
 | 10 | `digip_preparaciones.py` | 6 h | `bronze.digip_preparaciones` | no |
 | 11 | `prorratear_flete.py` | 12 h | `gold.fact_ventas_flete` | no |
 | 12 | `clasificar_clientes.py` | siempre | `gold.clientes_clasificados` | no |
-| 13 | `mercadolibre.py --catalogo` | **1/día** | `bronze.ml_publicaciones`, `ml_stock_full` | no |
+| 13 | `mercadolibre.py --catalogo` | **1/día** | `bronze.ml_publicaciones`, `ml_stock_full`, `ml_stock_full_historico` | no |
 
 **`1/día` no es lo mismo que `cada_horas: 24`.** Con 24 horas, un paso que ayer
 corrió a las 15 hoy vuelve a las 15 — plena tarde, con gente mirando el tablero.
@@ -425,6 +425,35 @@ un lock exclusivo que ahora duraría toda la inserción y dejaría al tablero
 esperando. `DELETE` usa el control de versiones de Postgres y no bloquea a los
 lectores. Con estas tablas —miles de filas, no millones— la diferencia de
 velocidad no se nota.
+
+---
+
+## La única tabla que solo crece: la foto diaria del stock
+
+`bronze.ml_stock_full` se sobrescribe entera en cada corrida, así que sabe
+cuánto stock hay **hoy** y nada más. Con eso alcanza para "cuántas unidades
+tengo paradas", pero no para la pregunta que de verdad importa:
+
+> ¿cuántos días seguidos lleva este artículo **con stock y sin venderse**?
+
+Esa cuenta necesita saber si había stock **cada día**, y eso **no se puede
+reconstruir hacia atrás**: el dato de ayer ya se pisó. La única forma es empezar
+a guardarlo. Por eso `bronze.ml_stock_full_historico` es la única tabla del
+pipeline que solo **agrega**: una foto por día, ~3.800 filas (1,4 M al año, que
+para Postgres no es nada).
+
+Empezó a acumular el **20/08/2026**. Antes de esa fecha no hay historia y no la
+va a haber nunca — lo que se puede medir hacia atrás es "días desde la última
+venta", que sale de `gold.fact_ventas` y llega hasta mayo.
+
+**Es idempotente:** borra las filas del día antes de insertar, así correr el
+catálogo dos veces el mismo día no deja el día duplicado. Las dos cosas van en
+una transacción.
+
+**La fecha se toma en hora argentina, con huso explícito.** El catálogo corre a
+la mañana, pero si algún día corriera después de las 21, un `date.today()` en
+UTC ya sería el día siguiente y la foto quedaría fechada mal — el mismo error
+que duplicó 790 ventas.
 
 ---
 
