@@ -77,7 +77,7 @@ Del log de 24 corridas reales, midiendo cuánto tarda cada paso:
 
 | Paso | Mediana |
 |---|---|
-| `mercadolibre.py --catalogo` | 33 min |
+| `mercadolibre.py --catalogo` | ~2 min |
 | `digip_preparaciones.py` | 9,8 min |
 | `sigma.py` (las dos juntas) | 6,9 min |
 | `modelo.py` | 5,9 min |
@@ -86,10 +86,31 @@ Del log de 24 corridas reales, midiendo cuánto tarda cada paso:
 
 `mercadolibre.py --catalogo` no estaba en esa medición porque **nunca había
 llegado a correr**: se midió el 19/08/2026, la primera vez. Son ~4.300 llamadas
-a la API — una por cada `inventory_id` para el stock Full— y con la `PAUSA` de
-1 segundo que tenía tardaba **83 minutos, de los cuales 72 eran el script
-durmiendo**. Con `PAUSA = 0.3` baja a ~33. El freno real nunca fue esa pausa
-sino el 429 de la API, que `llamar_ml` ya sabe manejar.
+a la API y tardaba **83 minutos**, de los cuales 72 eran el script durmiendo en
+la `PAUSA` de 1 segundo. Bajarla a 0,3 lo dejó en 33 min; **mandar las llamadas
+en paralelo lo dejó en ~2**.
+
+### Por qué el stock Full va en paralelo
+
+La API de Mercado Libre **no deja pedir varios inventarios juntos**: hay que
+preguntar de a uno, y son ~3.800. En fila eso es media hora — el 88 % de todo lo
+que tardaba el catálogo. De a 12 a la vez tarda poco más de un minuto.
+
+La idea salió del Apps Script de la planilla de stock, que usa `fetchAll` por lo
+mismo. Pero con una diferencia importante: **ese script hace
+`if (código === 200)` y descarta todo lo demás en silencio**, incluido el 429
+("demasiadas peticiones"). Un inventario que la API no contestó desaparece del
+total sin dejar rastro, y el stock queda más bajo que la realidad sin que nada
+avise. Acá el que falla queda como una fila con su `error` —no en cero— y el log
+dice cuántos fueron.
+
+**No se puede usar el `available_quantity` de las publicaciones** para evitarse
+esas llamadas, aunque la tentación es grande: varias publicaciones comparten el
+mismo `inventory_id`, así que sumar por publicación cuenta la misma unidad
+varias veces. Verificado contra los datos: da **19.211 unidades contra las 10.577
+reales**, y 1.512 de 3.830 inventarios no coinciden. Además el desglose de "no
+disponible" (dañado, en revisión, reservado) **solo** está en ese endpoint, y son
+699 unidades que conviene ver.
 
 La corrida entera daba **25 minutos**, cada dos horas, y la mayor parte era volver
 a pedir cosas que no habían cambiado. El caso más claro: `sigma_articulos` acumuló

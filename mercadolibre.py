@@ -1,6 +1,9 @@
+import itertools
 import os
 import json
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 import argparse
 import requests
 import pandas as pd
@@ -26,6 +29,23 @@ from sqlalchemy import create_engine
 # El de conexion es corto a proposito: un servidor sano acepta la conexion en
 # milisegundos. Si tarda diez segundos, no es que este pensando -- no esta.
 TIMEOUT_HTTP = (10, 60)
+
+# Cuantas consultas de stock Full van a la vez.
+#
+# La API no deja pedir varios inventarios juntos, asi que son ~3.800 llamadas de
+# a una. En fila tardan casi 30 minutos; de a 12 tardan poco mas de uno.
+#
+# Mas hilos es mas rapido pero mas 429. Doce es el punto donde el paso deja de
+# molestar sin acercarse al limite. Si algun dia aparecen 429 seguidos en el
+# log, bajarlo es el primer ajuste.
+HILOS_STOCK = 12
+
+# `renovar_access_token` ESCRIBE el archivo de tokens, y Mercado Libre entrega
+# un refresh_token nuevo cada vez. Con varios hilos, dos renovaciones a la vez
+# pisarian ese archivo y podrian dejar guardado un refresh_token que ya no vale
+# -- y ahi hay que rehacer la autorizacion a mano. El candado hace que renueve
+# uno solo por vez.
+_CANDADO_TOKEN = threading.Lock()
 
 load_dotenv()
 
@@ -88,8 +108,13 @@ def renovar_access_token():
     return nuevos["access_token"]
 
 
-def llamar_ml(endpoint, access_token, params=None, max_reintentos=6):
-    """Llama a la API de ML con el access_token. Reintenta automaticamente en 429."""
+def llamar_ml(endpoint, access_token, params=None, max_reintentos=6, pausa=True):
+    """Llama a la API de ML con el access_token. Reintenta automaticamente en 429.
+
+    `pausa=False` saltea la espera del final. Se usa cuando las llamadas van en
+    PARALELO: ahi el freno lo pone la cantidad de hilos, y dormir ademas dentro
+    de cada uno seria frenar dos veces.
+    """
     url = "https://api.mercadolibre.com" + endpoint
     headers = {"Authorization": f"Bearer {access_token}"}
 
@@ -99,7 +124,8 @@ def llamar_ml(endpoint, access_token, params=None, max_reintentos=6):
 
         if r.status_code == 401:      # token vencido: renovar y reintentar
             print("  401: renovando token...")
-            access_token = renovar_access_token()
+            with _CANDADO_TOKEN:
+                access_token = renovar_access_token()
             headers = {"Authorization": f"Bearer {access_token}"}
             r = requests.get(url, headers=headers, params=params, timeout=TIMEOUT_HTTP)
 
@@ -113,7 +139,8 @@ def llamar_ml(endpoint, access_token, params=None, max_reintentos=6):
             continue
 
         r.raise_for_status()
-        time.sleep(PAUSA)
+        if pausa:
+            time.sleep(PAUSA)
         return r.json()
 
 
@@ -295,15 +322,35 @@ def extraer_publicaciones_ml():
     ids = obtener_ids_publicaciones(access_token)
     print(f"  Total de publicaciones: {len(ids)}")
 
-    detalles = []
-    for i in range(0, len(ids), 20):
-        lote = ids[i:i + 20]
-        datos = llamar_ml("/items", access_token, params={"ids": ",".join(lote)})
+    # De a 20 por llamada (lo maximo que acepta el multiget) y varias llamadas a
+    # la vez, por lo mismo que el stock: son ~430 llamadas y en fila son minutos.
+    lotes = [ids[i:i + 20] for i in range(0, len(ids), 20)]
+    print(f"  {len(lotes)} lotes de hasta 20 (de a {HILOS_STOCK})")
+
+    def pedir_lote(lote):
+        try:
+            return llamar_ml("/items", access_token,
+                             params={"ids": ",".join(lote)}, pausa=False)
+        except Exception as e:
+            print(f"    lote fallado: {str(e)[:90]}")
+            return []
+
+    with ThreadPoolExecutor(max_workers=HILOS_STOCK) as pool:
+        respuestas = list(pool.map(pedir_lote, lotes))
+
+    detalles, sin_detalle = [], 0
+    for datos in respuestas:
         for item in datos:
             if item.get("code") == 200:
                 detalles.append(item["body"])
-        if i % 200 == 0:
-            print(f"    Detalles traidos: {len(detalles)} de {len(ids)}")
+            else:
+                sin_detalle += 1
+
+    # Se cuenta lo que la API no devolvio en vez de descartarlo en silencio: si
+    # un dia faltan mil publicaciones, tiene que verse en el log y no
+    # descubrirse por un total que no cierra.
+    if sin_detalle:
+        print(f"  ATENCION: {sin_detalle} publicaciones sin detalle (la API no las devolvio)")
 
     df = pd.json_normalize(detalles)
     print(f"  Total con detalle: {len(df)} publicaciones")
@@ -311,8 +358,31 @@ def extraer_publicaciones_ml():
 
 
 def extraer_stock_full():
-    """Trae el stock real en Full (fulfillment) por cada inventory_id.
-       Catalogo (estado actual) -> se reemplaza entero cada vez que corre."""
+    """Stock real en Full (fulfillment) por cada inventory_id.
+
+    POR QUE VA EN PARALELO
+    La API de Mercado Libre no tiene forma de pedir varios inventarios juntos:
+    hay que preguntar de a uno, y son ~3.800. En fila, con la pausa entre
+    llamadas, eso son casi 30 minutos -- el 88% de todo lo que tarda el
+    catalogo. Mandandolas de a tandas baja a poco mas de un minuto.
+    (La idea salio del Apps Script de la planilla de stock, que usa `fetchAll`
+    por lo mismo y con el mismo resultado.)
+
+    POR QUE NO SE PUEDE USAR EL DATO DE LAS PUBLICACIONES
+    `ml_publicaciones` ya trae `available_quantity`, asi que la tentacion es
+    evitarse las 3.800 llamadas. No sirve: varias publicaciones comparten el
+    mismo `inventory_id`, asi que sumar por publicacion cuenta la misma unidad
+    varias veces. Verificado contra los datos: da 19.211 unidades contra las
+    10.577 reales, y 1.512 de 3.830 inventarios no coinciden. Ademas el desglose
+    de "no disponible" (dañado, en revision, reservado) SOLO esta en este
+    endpoint, y son 699 unidades que conviene ver.
+
+    POR QUE 12 HILOS Y NO 50
+    Cuantos mas, mas rapido, pero mas 429 (demasiadas peticiones). Con 12 el
+    paso tarda ~1,5 min y se mantiene lejos del limite. `llamar_ml` ademas
+    reintenta el 429 esperando lo que la API pida, asi que un pico se corrige
+    solo en vez de perderse.
+    """
     print("\n=== STOCK FULL (fulfillment) ===")
     access_token = renovar_access_token()
 
@@ -325,22 +395,44 @@ def extraer_stock_full():
     """
     df_inv = pd.read_sql(query, engine)
     inventory_ids = df_inv["inventory_id"].tolist()
-    print(f"  {len(inventory_ids)} inventory_id unicos a consultar")
+    print(f"  {len(inventory_ids)} inventory_id unicos a consultar (de a {HILOS_STOCK})")
 
-    filas = []
-    for i, inv_id in enumerate(inventory_ids):
+    hechos = itertools.count(1)
+
+    def pedir(inv_id):
+        """Un inventario. NUNCA levanta: un error se guarda como fila.
+
+        Es la diferencia con el Apps Script de la planilla, que hace
+        `if (código === 200)` y descarta todo lo demas en silencio -- incluido
+        el 429. Ahi un inventario que la API no contesto desaparece del total
+        sin dejar rastro, y el stock queda mas bajo que la realidad sin que nada
+        lo avise. Aca queda la fila con su `error` y se puede contar.
+        """
         try:
-            datos = llamar_ml(f"/inventories/{inv_id}/stock/fulfillment", access_token)
+            datos = llamar_ml(
+                f"/inventories/{inv_id}/stock/fulfillment", access_token, pausa=False
+            )
             datos["inventory_id"] = inv_id
-            filas.append(datos)
         except Exception as e:
-            filas.append({"inventory_id": inv_id, "error": str(e)})
-        if i % 200 == 0:
-            print(f"    Consultados: {i} de {len(inventory_ids)}")
+            datos = {"inventory_id": inv_id, "error": str(e)}
+        n = next(hechos)
+        if n % 500 == 0:
+            print(f"    Consultados: {n} de {len(inventory_ids)}")
+        return datos
+
+    with ThreadPoolExecutor(max_workers=HILOS_STOCK) as pool:
+        filas = list(pool.map(pedir, inventory_ids))
 
     df = pd.json_normalize(filas)
+    fallados = sum(1 for f in filas if "error" in f)
     print(f"  Total: {len(df)} registros de stock full")
+    if fallados:
+        # Se avisa aunque no corte: un stock que baja porque la API no contesto
+        # se parece demasiado a un stock que bajo porque se vendio.
+        print(f"  ATENCION: {fallados} inventarios no se pudieron consultar "
+              f"(quedan con `error` en la tabla, no en cero)")
     guardar_en_bd(df, "ml_stock_full", modo="replace")
+
 
 
 # ============================================================

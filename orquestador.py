@@ -200,7 +200,9 @@ PASOS = [
     {"comando": "clasificar_clientes.py",      "intentos": 2, "espera": 30,
      "cada_horas": None, "critico": False, "escribe": "gold.clientes_clasificados", "techo": 20 * 60},
 
-    # EL PASO LENTO, ULTIMO DE TODOS: ~4.300 llamadas a la API, unos 33 min.
+    # Ya NO es el paso lento: las ~4.300 llamadas van en paralelo y tarda un par
+    # de minutos, no 33. Se deja igual al final y una vez por dia porque sigue
+    # siendo el mas pesado en llamadas a la API y nadie lo espera.
     #
     # Va una vez por dia y en la PRIMERA corrida del dia, no cada 24 h. La
     # diferencia importa: con 24 h iria cayendo cada dia a la misma hora que
@@ -212,7 +214,7 @@ PASOS = [
     # solo van a servir para la pestana de Stock Full cuando se arme.
     {"comando": "mercadolibre.py --catalogo",  "intentos": 2, "espera": 60,
      "cada_horas": None, "primera_del_dia": True, "critico": False,
-     "escribe": "ml_publicaciones, ml_stock_full", "techo": 60 * 60},
+     "escribe": "ml_publicaciones, ml_stock_full", "techo": 20 * 60},
 ]
 
 CARPETA = os.path.dirname(os.path.abspath(__file__))
