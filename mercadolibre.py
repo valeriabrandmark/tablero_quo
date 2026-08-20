@@ -35,10 +35,19 @@ TIMEOUT_HTTP = (10, 60)
 # La API no deja pedir varios inventarios juntos, asi que son ~3.800 llamadas de
 # a una. En fila tardan casi 30 minutos; de a 12 tardan poco mas de uno.
 #
-# Mas hilos es mas rapido pero mas 429. Doce es el punto donde el paso deja de
-# molestar sin acercarse al limite. Si algun dia aparecen 429 seguidos en el
-# log, bajarlo es el primer ajuste.
-HILOS_STOCK = 12
+# Arranco en 12 y se subio a 24 despues de medirlo: con 12 el paso tardo 13,8
+# minutos y NINGUN inventario fallo (0 filas con `error` sobre 3.830). Cero
+# errores significa que el limite de la API no se estaba tocando -- lo que
+# frenaba era la latencia de la red, no Mercado Libre.
+#
+# Con 24 deberia quedar cerca de 7 minutos. Si aparecen 429 seguidos en el log,
+# o si la corrida empieza a dejar filas con `error`, bajarlo a 12 es el primer
+# ajuste y ahi ya sabemos que ese es el techo real.
+#
+# COMO DARSE CUENTA de que hay que bajarlo, sin leer el log entero:
+#     select count(*) filter (where error is not null) from bronze.ml_stock_full;
+# Tiene que dar 0. Si da otra cosa, la API empezo a rechazar.
+HILOS_STOCK = 24
 
 # `renovar_access_token` ESCRIBE el archivo de tokens, y Mercado Libre entrega
 # un refresh_token nuevo cada vez. Con varios hilos, dos renovaciones a la vez
@@ -215,29 +224,61 @@ def guardar_en_bd(df, tabla, modo="replace"):
 
 
 def guardar_ventana_en_bd(df, tabla, col_fecha, cutoff):
-    """Para VENTAS (crecen con el tiempo): reemplaza SOLO las filas dentro de la
-       ventana movil (col_fecha >= cutoff). Todo lo anterior a cutoff queda intacto
-       -- no se toca ni se vuelve a pedir a la API de ML."""
+    """Para VENTAS (crecen con el tiempo): reemplaza las filas de la ventana
+    movil. Todo lo anterior a cutoff queda intacto -- no se toca ni se vuelve a
+    pedir a la API de ML.
+
+    POR QUE BORRA POR ID Y NO SOLO POR FECHA
+    Antes borraba unicamente con `col_fecha::date >= cutoff`, y eso DUPLICABA
+    ordenes. `date_created` es texto con offset (-04:00) y Postgres resuelve ese
+    `::date` en la zona del SERVIDOR, que es UTC. Argentina es UTC-3, asi que
+    una venta de las 21 de aca ya es del dia siguiente en UTC: quedaba fuera del
+    borrado, la API la volvia a traer, y entraba de nuevo.
+
+    Se midio el 20/08/2026 y el patron no deja lugar a dudas: de 1.195 ordenes
+    duplicadas, 1.191 estaban entre las 21 y la medianoche. Eran 790 filas de
+    mas en bronze y $8,5 M contados dos veces en gold.fact_ventas.
+
+    El arreglo no es corregir el huso del DELETE sino dejar de depender de el:
+    se borran los ID QUE SE ESTAN POR INSERTAR. Eso es exacto por definicion --
+    la clave que se borra es la misma que se agrega -- y no hay huso, formato ni
+    borde de dia que lo pueda romper.
+
+    El borrado por ventana se mantiene ADEMAS, para que una orden que la API
+    dejo de devolver (por ejemplo si se borro alla) no quede colgada para
+    siempre. Los dos borrados y la insercion van en UNA transaccion, asi el
+    tablero nunca lee la tabla a medio reemplazar.
+    """
     engine = _crear_engine()
     with engine.begin() as con:
         con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
-
-    try:
-        with engine.begin() as con:
-            resultado = con.exec_driver_sql(
-                f'DELETE FROM bronze."{tabla}" WHERE "{col_fecha}"::date >= %(cutoff)s',
-                {"cutoff": cutoff}
-            )
-            print(f"  Filas borradas dentro de la ventana (se van a reemplazar): {resultado.rowcount}")
-    except Exception:
-        print(f"  (tabla bronze.{tabla} no existe todavia, se va a crear)")
 
     if df.empty:
         print(f"  (sin ventas nuevas de ML en esta ventana)")
         return
 
     df = _listas_a_texto(df)
-    df.to_sql(tabla, engine, schema="bronze", if_exists="append", index=False)
+    ids = [str(x) for x in df["id"].tolist()]
+
+    try:
+        with engine.begin() as con:
+            porFecha = con.exec_driver_sql(
+                f'DELETE FROM bronze."{tabla}" WHERE "{col_fecha}"::date >= %(cutoff)s',
+                {"cutoff": cutoff},
+            ).rowcount
+            # El que realmente evita los duplicados: saca las que se van a
+            # volver a insertar, sin importar en que dia las ubique el huso.
+            porId = con.exec_driver_sql(
+                f'DELETE FROM bronze."{tabla}" WHERE id::text = ANY(%(ids)s)',
+                {"ids": ids},
+            ).rowcount
+            print(f"  Borradas antes de reinsertar: {porFecha} por ventana + {porId} por id")
+            df.to_sql(tabla, con, schema="bronze", if_exists="append", index=False)
+    except Exception as e:
+        # La tabla todavia no existe: que la cree el to_sql.
+        print(f"  (no se pudo reemplazar: {str(e)[:80]}... -> creando tabla)")
+        df.to_sql(tabla, engine, schema="bronze", if_exists="append", index=False)
+
     print(f"  Guardado (ventana): bronze.{tabla} ({len(df)} filas)")
 
 
