@@ -432,7 +432,12 @@ def construir_fact_ventas():
         offset += LOTE
 
 
-    print(f"Total de lineas (ventana de {WINDOW_DAYS} dias, desde {CUTOFF}): {len(filas)}")
+    # El texto sale de CUTOFF y no de WINDOW_DAYS, que es una constante y no
+    # cambia con --todo ni con --dias. Antes decia "ventana de 7 dias" incluso
+    # corriendo --todo, que reconstruye cuatro meses: quien leia esa linea se
+    # quedaba pensando que el --todo no habia funcionado.
+    dias = (date.today() - CUTOFF).days
+    print(f"Total de lineas (desde {CUTOFF}, {dias} dias): {len(filas)}")
     df = pd.DataFrame(filas)
 
     with engine.begin() as con:
