@@ -8,7 +8,7 @@ from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
-# Cuanto se espera COMO MAXIMO una respuesta de la API, en segundos.
+# Cuanto se espera una respuesta de la API: (CONECTAR, LEER), en segundos.
 #
 # No es una optimizacion: sin `timeout`, `requests` espera PARA SIEMPRE si el
 # servidor acepta la conexion y despues no contesta. El proceso no falla ni
@@ -16,11 +16,16 @@ from sqlalchemy import create_engine
 # Programador de tareas de Windows saltea en silencio todas las corridas
 # siguientes porque para el la tarea "todavia esta ejecutandose".
 #
-# Con timeout, una llamada trabada tira una excepcion, el paso falla, se
-# reintenta, y si igual no anda queda marcado como FALLA en `--listar`. Un paso
-# que falla a la vista se arregla; uno que se cuelga en silencio se descubre
-# horas despues.
-TIMEOUT_HTTP = 60
+# SON DOS NUMEROS Y NO UNO, y la diferencia se nota cuando el servidor del otro
+# lado esta caido. Con un solo valor, `timeout=120` es tambien el de conexion:
+# tres intentos contra un host que no contesta se van SEIS MINUTOS antes de
+# rendirse. Separados, el intento muere en 10 segundos si no hay con quien
+# hablar, y sigue teniendo su tiempo largo para una consulta pesada que si
+# arranco.
+#
+# El de conexion es corto a proposito: un servidor sano acepta la conexion en
+# milisegundos. Si tarda diez segundos, no es que este pensando -- no esta.
+TIMEOUT_HTTP = (10, 60)
 
 load_dotenv()
 

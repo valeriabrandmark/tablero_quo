@@ -83,8 +83,21 @@ TECHO_POR_DEFECTO = 10 * 60
 #   espera      segundos entre reintentos
 #   cada_horas  None = en cada corrida. Un numero = solo si paso ese tiempo
 #               desde la ultima vez que TERMINO BIEN.
-#   critico     True = si falla definitivamente, se corta el pipeline porque
-#               los pasos de abajo dependen de este.
+#   critico     True = si falla definitivamente, se corta el pipeline.
+#
+#               EL CRITERIO ES "LOS DE ABAJO DARIAN RESULTADOS MAL", no "este
+#               dato es importante". No es lo mismo, y confundirlo sale caro:
+#               el 20/08 el servidor de SIGMA no contestaba y, como
+#               `sigma.py --ventas` estaba marcado critico, se abortaron
+#               tambien Mercado Libre, Tienda Nube y los stocks -- que no
+#               tienen NADA que ver con SIGMA. Una caida de un proveedor dejo
+#               el tablero entero sin actualizar.
+#
+#               Que una extraccion falle NO hace que lo de abajo este mal: su
+#               tabla en bronze conserva la ultima foto buena y modelo.py la
+#               usa igual. El dato queda viejo de una corrida, no roto. Y eso
+#               es seguro justamente porque las escrituras son atomicas: una
+#               tabla nunca queda a medio escribir ni vacia.
 #   techo       segundos como maximo que se le dan al paso. Si no esta, se usa
 #               TECHO_POR_DEFECTO. Pasado ese tiempo se lo mata y cuenta como
 #               falla.
@@ -105,8 +118,14 @@ PASOS = [
     #
     # Este bloque entero tarda ~2 min.
 
+    # NO es critico, aunque sea el dato mas importante del tablero. Si el
+    # servidor de SIGMA no contesta, bronze.sigma_ventas conserva la foto
+    # anterior completa y modelo.py arma gold con ella: las ventas mayoristas
+    # quedan viejas de una corrida, no rotas. Abortar ademas Mercado Libre y
+    # Tienda Nube por una caida de SIGMA seria cambiar un dato viejo por cinco.
+    # Queda como FALLA en `--listar`, que es donde tiene que verse.
     {"comando": "sigma.py --ventas",           "intentos": 3, "espera": 60,
-     "cada_horas": None, "critico": True,  "escribe": "sigma_ventas", "techo": 30 * 60},
+     "cada_horas": None, "critico": False, "escribe": "sigma_ventas", "techo": 30 * 60},
 
     # El catalogo lo lee modelo.py (para proveedor, marca e IVA de cada SKU), asi
     # que tiene que ir antes. Pero un alta o un cambio de descripcion no pasa
@@ -134,9 +153,17 @@ PASOS = [
     # compara una huella de los archivos y no hace nada si no se movio ninguno.
     # Se lo llama en cada corrida a proposito -- el que decide es el script, asi
     # que un Excel corregido entra en la corrida siguiente sin acordarse de nada.
+    # Tampoco critico, por lo mismo: si falla, costos_historicos conserva la
+    # ultima carga y los margenes se calculan con los costos de antes. Viejo,
+    # no roto.
     {"comando": "costos.py --si-cambio",       "intentos": 2, "espera": 30,
-     "cada_horas": None, "critico": True,  "escribe": "costos_historicos", "techo": 20 * 60},
+     "cada_horas": None, "critico": False, "escribe": "costos_historicos", "techo": 20 * 60},
 
+    # EL UNICO CRITICO DE VERDAD. prorratear_flete.py lee gold.fact_ventas para
+    # repartir el flete: si modelo.py no llego a reconstruir la ventana, el
+    # flete se prorratearia sobre una foto que no corresponde y ESO SI daria un
+    # numero mal, no viejo. Los demas pasos siguen datos, este sigue una cuenta.
+    #
     # <<< ACA EL TABLERO DE VENTAS YA ESTA AL DIA >>>
     {"comando": "modelo.py",                   "intentos": 3, "espera": 60,
      "cada_horas": None, "critico": True,  "escribe": "gold.fact_ventas", "techo": 30 * 60},

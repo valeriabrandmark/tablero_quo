@@ -445,6 +445,46 @@ Tres cosas que conviene tener puestas en la tarea:
 
 ---
 
+## Qué corta el pipeline y qué no
+
+`critico: True` significa **"los de abajo darían resultados MAL"**, no "este dato
+es importante". No es lo mismo, y confundirlo salió caro.
+
+El 20/08 el servidor de SIGMA no contestaba. Como `sigma.py --ventas` estaba
+marcado crítico, la corrida abortó ahí — y con ella **Mercado Libre, Tienda Nube
+y los stocks**, que no tienen nada que ver con SIGMA. Una caída de un proveedor
+dejó el tablero entero sin actualizar.
+
+Que una extracción falle **no** hace que lo de abajo esté mal: su tabla en
+`bronze` conserva la última foto buena y `modelo.py` la usa igual. El dato queda
+**viejo de una corrida, no roto**. Y eso es seguro justamente porque las
+escrituras son atómicas: una tabla nunca queda a medio escribir ni vacía.
+
+Hoy el único crítico es **`modelo.py`**, y por una razón concreta:
+`prorratear_flete.py` lee `gold.fact_ventas` para repartir el flete. Si
+`modelo.py` no reconstruyó la ventana, el flete se prorratearía sobre una foto
+que no corresponde, y eso sí da un número **mal**, no viejo. Los demás pasos
+siguen datos; ése sigue una cuenta.
+
+Un paso no crítico que falla queda como `FALLA xN` en `--listar`, con las
+últimas líneas del error. Ahí es donde tiene que verse.
+
+### Los timeouts son dos números, no uno
+
+```python
+TIMEOUT_HTTP = (10, 120)   # (conectar, leer)
+```
+
+Con un solo valor, `timeout=120` es también el de conexión: tres intentos contra
+un host que no contesta se van **seis minutos** antes de rendirse. Separados, el
+intento muere en 10 segundos si no hay con quién hablar, y sigue teniendo su
+tiempo largo para una consulta pesada que sí arrancó.
+
+El de conexión es corto a propósito: un servidor sano acepta la conexión en
+milisegundos. Si tarda diez segundos, no está pensando — no está.
+
+---
+
 ## Cuando algo falla
 
 1. `python orquestador.py --listar` — ver qué paso está pendiente.
