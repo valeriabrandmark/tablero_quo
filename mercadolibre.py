@@ -35,10 +35,19 @@ TIMEOUT_HTTP = (10, 60)
 # La API no deja pedir varios inventarios juntos, asi que son ~3.800 llamadas de
 # a una. En fila tardan casi 30 minutos; de a 12 tardan poco mas de uno.
 #
-# Mas hilos es mas rapido pero mas 429. Doce es el punto donde el paso deja de
-# molestar sin acercarse al limite. Si algun dia aparecen 429 seguidos en el
-# log, bajarlo es el primer ajuste.
-HILOS_STOCK = 12
+# Arranco en 12 y se subio a 24 despues de medirlo: con 12 el paso tardo 13,8
+# minutos y NINGUN inventario fallo (0 filas con `error` sobre 3.830). Cero
+# errores significa que el limite de la API no se estaba tocando -- lo que
+# frenaba era la latencia de la red, no Mercado Libre.
+#
+# Con 24 deberia quedar cerca de 7 minutos. Si aparecen 429 seguidos en el log,
+# o si la corrida empieza a dejar filas con `error`, bajarlo a 12 es el primer
+# ajuste y ahi ya sabemos que ese es el techo real.
+#
+# COMO DARSE CUENTA de que hay que bajarlo, sin leer el log entero:
+#     select count(*) filter (where error is not null) from bronze.ml_stock_full;
+# Tiene que dar 0. Si da otra cosa, la API empezo a rechazar.
+HILOS_STOCK = 24
 
 # `renovar_access_token` ESCRIBE el archivo de tokens, y Mercado Libre entrega
 # un refresh_token nuevo cada vez. Con varios hilos, dos renovaciones a la vez

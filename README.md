@@ -77,7 +77,7 @@ Del log de 24 corridas reales, midiendo cuánto tarda cada paso:
 
 | Paso | Mediana |
 |---|---|
-| `mercadolibre.py --catalogo` | ~2 min |
+| `mercadolibre.py --catalogo` | ~7 min |
 | `digip_preparaciones.py` | 9,8 min |
 | `sigma.py` (las dos juntas) | 6,9 min |
 | `modelo.py` | 5,9 min |
@@ -95,6 +95,20 @@ en paralelo lo dejó en ~2**.
 La API de Mercado Libre **no deja pedir varios inventarios juntos**: hay que
 preguntar de a uno, y son ~3.800. En fila eso es media hora — el 88 % de todo lo
 que tardaba el catálogo. De a 12 a la vez tarda poco más de un minuto.
+
+**Cuántos hilos:** se midió con 12 y dio **13,8 min con cero inventarios
+fallados** (0 filas con `error` sobre 3.830). Cero errores significa que el
+límite de la API no se estaba tocando — lo que frenaba era la latencia de la
+red, no Mercado Libre —, así que se subió a **24**, que debería dejarlo en ~7.
+
+Cómo darse cuenta de que hay que bajarlo, sin leer el log entero:
+
+```sql
+select count(*) filter (where error is not null) from bronze.ml_stock_full;
+```
+
+Tiene que dar **0**. Si da otra cosa, la API empezó a rechazar y hay que volver
+a 12 — y ahí ya sabemos que ése es el techo real.
 
 La idea salió del Apps Script de la planilla de stock, que usa `fetchAll` por lo
 mismo. Pero con una diferencia importante: **ese script hace
