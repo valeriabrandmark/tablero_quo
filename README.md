@@ -273,6 +273,21 @@ sin borrarla y deja las vistas en pie. Hoy hay vistas sobre `tn_pedidos_items`,
 queda intacto — por eso un dato que llega tarde a `bronze` **no entra solo** a
 `gold`: hay que reconstruir con `--dias` o `--todo`.
 
+**Qué cuenta como venta en Mercado Libre: `paid` y `partially_refunded`.**
+
+Las **canceladas** quedan afuera, y eso no se discute: no son venta. Pero son
+muchas —~5.000 órdenes, **$14,2 M solo en agosto**, el 8,3 % del monto— así que
+se miran aparte, en su propio panel del tablero, que las lee directo de `bronze`.
+
+Las **parcialmente devueltas** sí entran, y antes no entraban. Son ventas reales
+donde el cliente devolvió una parte y se quedó con el resto: dejarlas afuera
+enteras borraba plata que sí entró (9 órdenes y $220.445 en agosto).
+
+**Ojo con lo que eso no hace:** se cuentan por el importe completo, sin descontar
+lo devuelto, porque la API no informa el monto de la devolución en la orden. O
+sea que sobreestiman un poco. Es menos malo que el error anterior —contarlas en
+cero— pero no es exacto, y el tablero lo aclara.
+
 **Qué cuenta como venta en Tienda Nube: que esté PAGADA.** El criterio es
 `estado_pago = 'paid'` **y** `estado <> 'cancelled'`, y no el estado del pedido,
 que sería lo intuitivo. En Tienda Nube las ventas **no pasan solas a `closed`**:

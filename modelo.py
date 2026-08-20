@@ -354,6 +354,21 @@ def construir_fact_ventas():
         })
 
 # --- 3) MERCADO LIBRE (en lotes; reparte envio proporcional al precio) ---
+    #
+    # QUE CUENTA COMO VENTA: `paid` y `partially_refunded`.
+    #
+    # Las CANCELADAS quedan afuera y eso no se discute: no son venta. Son ~5.000
+    # ordenes ($14,2 M solo en agosto) y se miran aparte, en su propio panel del
+    # tablero, que las lee directo de bronze.
+    #
+    # Las PARCIALMENTE DEVUELTAS si entran, y antes no entraban. Son ventas
+    # reales donde el cliente devolvio una parte y se quedo con el resto: dejarlas
+    # afuera enteras borraba plata que si entro (9 ordenes y $220.445 en agosto).
+    #
+    # OJO CON LO QUE ESTO NO HACE: se cuentan por el importe COMPLETO, sin
+    # descontar lo devuelto, porque la API no informa el monto de la devolucion
+    # en la orden. O sea que sobreestiman un poco. Es menos malo que el error
+    # anterior -- contarlas en cero -- pero no es exacto, y el tablero lo aclara.
     print("Procesando Mercado Libre (puede tardar)...")
     LOTE = 5000
     offset = 0
@@ -361,7 +376,7 @@ def construir_fact_ventas():
         ml = pd.read_sql(f"""
             SELECT id, date_created, order_items, "buyer.nickname"
             FROM bronze.ml_ventas
-            WHERE status = 'paid'
+            WHERE status IN ('paid', 'partially_refunded')
               AND left(date_created, 10) >= '{piso_sql()}'
             ORDER BY id
             LIMIT {LOTE} OFFSET {offset}
