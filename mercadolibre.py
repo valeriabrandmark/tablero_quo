@@ -1,3 +1,4 @@
+import datetime
 import itertools
 import os
 import json
@@ -473,6 +474,59 @@ def extraer_stock_full():
         print(f"  ATENCION: {fallados} inventarios no se pudieron consultar "
               f"(quedan con `error` en la tabla, no en cero)")
     guardar_en_bd(df, "ml_stock_full", modo="replace")
+    guardar_foto_stock(df)
+
+
+def guardar_foto_stock(df):
+    """Guarda la foto de HOY del stock Full en bronze.ml_stock_full_historico.
+
+    POR QUE EXISTE
+    `bronze.ml_stock_full` se sobrescribe entera en cada corrida, asi que sabe
+    cuanto stock hay HOY y nada mas. Con eso alcanza para "cuantas unidades
+    tengo paradas", pero no para la pregunta que de verdad importa: "cuantos
+    dias seguidos lleva este articulo con stock y sin venderse".
+
+    Esa cuenta necesita saber si habia stock CADA DIA, y eso no se puede
+    reconstruir hacia atras: el dato de ayer ya se piso. La unica forma es
+    empezar a guardarlo. Por eso esta tabla es de las que solo CRECEN.
+
+    Son ~3.800 filas por dia (1,4 M al ano), que para Postgres no es nada.
+
+    IDEMPOTENTE: borra las filas de hoy antes de insertar, asi correr el
+    catalogo dos veces el mismo dia no deja el dia duplicado. Y las dos cosas
+    van en una transaccion, para no dejar el dia a medio escribir.
+    """
+    if df.empty or "inventory_id" not in df.columns:
+        print("  (sin stock que fotografiar)")
+        return
+
+    columnas = [c for c in ("inventory_id", "total", "available_quantity",
+                            "not_available_quantity") if c in df.columns]
+    foto = df[columnas].copy()
+
+    # La fecha se toma en hora ARGENTINA y no la del sistema: el catalogo corre
+    # a la manana, pero si algun dia corriera despues de las 21 un `date.today()`
+    # en UTC ya seria el dia siguiente y la foto quedaria fechada mal.
+    hoy = datetime.datetime.now(
+        datetime.timezone(datetime.timedelta(hours=-3))
+    ).date()
+    foto.insert(0, "fecha", hoy)
+
+    engine = _crear_engine()
+    tabla = "ml_stock_full_historico"
+    try:
+        with engine.begin() as con:
+            borradas = con.exec_driver_sql(
+                f'DELETE FROM bronze."{tabla}" WHERE fecha = %(hoy)s', {"hoy": hoy}
+            ).rowcount
+            if borradas:
+                print(f"  (foto de {hoy} ya estaba: se reemplazan {borradas} filas)")
+            foto.to_sql(tabla, con, schema="bronze", if_exists="append", index=False)
+    except Exception as e:
+        print(f"  (no se pudo reemplazar la foto: {str(e)[:80]}... -> creando tabla)")
+        foto.to_sql(tabla, engine, schema="bronze", if_exists="append", index=False)
+
+    print(f"  Foto del {hoy}: bronze.{tabla} ({len(foto)} filas)")
 
 
 
