@@ -3,6 +3,7 @@ import time
 import requests
 import pandas as pd
 from dotenv import load_dotenv
+from errores_bd import es_tabla_inexistente
 from sqlalchemy import create_engine
 
 # Cuanto se espera una respuesta de la API: (CONECTAR, LEER), en segundos.
@@ -112,8 +113,13 @@ def guardar_en_bd(df, tabla, modo="replace"):
             print(f"  Guardado (reemplazo atomico): bronze.{tabla} ({len(df)} filas)")
             return
         except Exception as e:
-            # La tabla todavia no existe: que la cree el to_sql de abajo.
-            print(f"  (no se pudo truncate: {str(e)[:80]}... -> creando tabla)")
+            # SOLO se tolera que la tabla no exista todavia (primera corrida en
+            # una base limpia). Cualquier otro error -- un timeout, un lock, la
+            # conexion cortada -- tiene que EXPLOTAR: si el borrado no se hizo,
+            # insertar igual duplica la tabla entera. Ver errores_bd.py.
+            if not es_tabla_inexistente(e):
+                raise
+            print(f"  bronze.{tabla} no existe todavia -> la crea el to_sql.")
 
     df.to_sql(tabla, engine, schema="bronze", if_exists=modo, index=False)
     print(f"  Guardado ({modo}): bronze.{tabla} ({len(df)} filas)")

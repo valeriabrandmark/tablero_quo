@@ -10,6 +10,7 @@ import requests
 import pandas as pd
 from datetime import date, timedelta
 from dotenv import load_dotenv
+from errores_bd import es_tabla_inexistente
 from sqlalchemy import create_engine
 
 # Cuanto se espera una respuesta de la API: (CONECTAR, LEER), en segundos.
@@ -247,8 +248,13 @@ def guardar_en_bd(df, tabla, modo="replace"):
             print(f"  Guardado (reemplazo atomico): bronze.{tabla} ({len(df)} filas)")
             return
         except Exception as e:
-            # La tabla todavia no existe: que la cree el to_sql de abajo.
-            print(f"  (no se pudo truncate: {str(e)[:80]}... -> creando tabla)")
+            # SOLO se tolera que la tabla no exista todavia (primera corrida en
+            # una base limpia). Cualquier otro error -- un timeout, un lock, la
+            # conexion cortada -- tiene que EXPLOTAR: si el borrado no se hizo,
+            # insertar igual duplica la tabla entera. Ver errores_bd.py.
+            if not es_tabla_inexistente(e):
+                raise
+            print(f"  bronze.{tabla} no existe todavia -> la crea el to_sql.")
 
     df.to_sql(tabla, engine, schema="bronze", if_exists=modo, index=False)
     print(f"  Guardado ({modo}): bronze.{tabla} ({len(df)} filas)")
@@ -306,8 +312,20 @@ def guardar_ventana_en_bd(df, tabla, col_fecha, cutoff):
             print(f"  Borradas antes de reinsertar: {porFecha} por ventana + {porId} por id")
             df.to_sql(tabla, con, schema="bronze", if_exists="append", index=False)
     except Exception as e:
-        # La tabla todavia no existe: que la cree el to_sql.
-        print(f"  (no se pudo reemplazar: {str(e)[:80]}... -> creando tabla)")
+        # ESTE except es el que duplico 2.548 ordenes el 21/08/2026.
+        #
+        # Atrapaba cualquier error y despues insertaba igual. Ese dia el DELETE
+        # de la ventana se paso del statement_timeout de Supabase, la
+        # transaccion hizo rollback -- los borrados se deshicieron -- y las
+        # filas entraron por segunda vez. El paso reporto OK.
+        #
+        # Ahora se tolera EXACTAMENTE un error: que la tabla no exista todavia,
+        # que es la primera corrida en una base limpia y ahi no hay nada que
+        # duplicar. Todo lo demas explota, el orquestador lo ve, lo reintenta y
+        # queda en el log. Ver errores_bd.py.
+        if not es_tabla_inexistente(e):
+            raise
+        print(f"  bronze.{tabla} no existe todavia -> la crea el to_sql.")
         df.to_sql(tabla, engine, schema="bronze", if_exists="append", index=False)
 
     print(f"  Guardado (ventana): bronze.{tabla} ({len(df)} filas)")
