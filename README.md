@@ -6,7 +6,7 @@ tres negocios. Lo que produce lo lee el tablero web
 en <https://brandmark-business.vercel.app>), que consulta Postgres en vivo en
 cada request: no hay caché intermedia, lo que está en Supabase es lo que se ve.
 
-Corre en una computadora de la oficina, con una tarea programada cada 2 horas.
+Corre en una computadora de la oficina, con una tarea programada **cada hora**.
 **Si esa máquina está apagada, el tablero no se actualiza** — no hay nada
 corriendo en la nube.
 
@@ -59,20 +59,20 @@ esperaba media hora por datos que no usa.
 | # | Paso | Cada | Escribe | Corta si falla |
 |---|---|---|---|---|
 | 8 | `ml_pulso.py` | **siempre** | `bronze.ml_estado_item`, `ml_precio_item` | no |
-| 9 | `digip.py` | siempre | `bronze.digip_stock`, `digip_stock_detalle` | no |
-| 10 | `digip_pedidos.py` | siempre | `bronze.digip_pedidos` | no |
-| 11 | `digip_preparaciones.py` | 6 h | `bronze.digip_preparaciones` | no |
-| 12 | `prorratear_flete.py` | 12 h | `gold.fact_ventas_flete` | no |
-| 13 | `clasificar_clientes.py` | siempre | `gold.clientes_clasificados` | no |
-| 14 | `mercadolibre.py --catalogo` | **1/día** | `bronze.ml_publicaciones`, `ml_stock_full`, `ml_stock_full_historico` | no |
-| 15 | `ml_pulso.py --solo-buybox` | 6 h | `bronze.ml_buybox_item` | no |
-| 16 | `experimento.py --consolidar` | 6 h | `gold.fact_experimento` | no |
+| 9 | `ml_pulso.py --solo-buybox` | 6 h | `bronze.ml_buybox_item` | no |
+| 10 | `experimento.py --consolidar` | 6 h | `gold.fact_experimento` | no |
+| 11 | `digip.py` | siempre | `bronze.digip_stock`, `digip_stock_detalle` | no |
+| 12 | `digip_pedidos.py` | siempre | `bronze.digip_pedidos` | no |
+| 13 | `digip_preparaciones.py` | 6 h | `bronze.digip_preparaciones` | no |
+| 14 | `prorratear_flete.py` | 12 h | `gold.fact_ventas_flete` | no |
+| 15 | `clasificar_clientes.py` | siempre | `gold.clientes_clasificados` | no |
+| 16 | `mercadolibre.py --catalogo` | **1/día** | `bronze.ml_publicaciones`, `ml_stock_full`, `ml_stock_full_historico` | no |
 
 **`ml_pulso.py` es el primero del bloque 2 y no el último, a propósito.** El
 resto de este bloque refresca *fotos*: si un paso se saltea, su tabla conserva
 la anterior y el dato queda viejo de una corrida, no roto. El pulso no es eso —
 guarda «cómo estaba el catálogo a las 14:00 del martes», y esa observación no se
-recupera después: la corrida siguiente ve las 16:00. **Un pulso salteado es un
+recupera después: la corrida siguiente ve las 15:00. **Un pulso salteado es un
 agujero permanente en la historia**, y los agujeros son justo lo que arruina la
 medición de elasticidad. Por eso va donde el presupuesto todavía no se gastó.
 
@@ -554,7 +554,7 @@ no lo miramos» en vez de suponer que el estado se mantuvo.
 
 ### El buy box no es un lujo, es el otro censor
 
-**2.107 de los 2.282 SKU del experimento (92 %) están en catálogo.** En catálogo,
+**3.880 de los 4.360 SKU del experimento (89 %) están en catálogo.** En catálogo,
 el que no gana la caja vende cerca de cero sin importar su precio. Y como la
 estrategia es «ponerse apenas debajo del competidor», perder la caja está
 **correlacionado con el tratamiento**: la semana de markup alto es justo la
@@ -566,7 +566,7 @@ lado: **la elasticidad medida sale exagerada**.
 
 `price_to_win` no tiene multiget —es una llamada por publicación—, así que va en
 su propio paso cada 6 h y sólo para los SKU bajo experimento. En cada pulso serían
-~25.000 llamadas por día sólo para esto.
+~35.000 llamadas por día sólo para esto.
 
 ### La banda no es la variable explicativa: el markup realizado sí
 
@@ -577,34 +577,75 @@ las **horas vendibles** (el precio que estuvo puesto con la publicación pausada
 no lo vio nadie) y descontándole el IVA, porque el precio de ML lo lleva adentro
 y el costo no.
 
+### El objetivo no es vender más: es el equilibrio
+
+El máximo de margen por día **no alcanza como criterio**, y por eso
+`mejorBanda` (en `lib/elasticidad.ts` del tablero) no devuelve el máximo pelado.
+
+Entre dos bandas que dejan lo mismo por día conviene la de **markup más alto**,
+porque vende menos unidades para ganar la misma plata. Dicho con el ejemplo del
+negocio: *vender 50 unidades marcando 10 % y vender 20 marcando 30 % no son
+equivalentes aunque den el mismo total.* Importa por dos motivos concretos:
+
+1. **El stock dura más.** Quemar la mercadería a mitad de semana deja al
+   artículo sin nada que vender hasta que se repone, y en Full reponer no es
+   inmediato.
+2. **Cada unidad movida cuesta trabajo** —preparar, despachar, atender— que no
+   depende de a cuánto se vendió.
+
+La regla que quedó: gana la banda de mayor margen por día, salvo que otra quede
+dentro de `EMPATE_TECNICO` (10 %) y tenga markup más alto. Ese 10 % **no es un
+número estadístico, es una preferencia del negocio**, y está declarado como
+constante justamente para que se pueda discutir y mover.
+
+> **Un sesgo que hay que tener presente.** Medir por día a la venta corrige los
+> quiebres que no dependen del precio, pero cuando el quiebre lo *causa* el
+> precio bajo —se vendió todo el martes— la banda barata queda medida sobre
+> menos horas y sale **mejor** de lo que fue. Por eso el tablero muestra
+> "Perdido por quiebre" al lado de la tasa: si una banda quema stock, ahí se ve.
+
+### Entran TODOS los artículos
+
+El experimento cubre los **4.360 SKU** con publicación en ML, no una selección.
+
+Al principio se pedía haber vendido algo en los últimos 60 días, y estaba mal:
+dejaba afuera 2.077 artículos —casi la mitad— con el argumento de que sin ventas
+recientes no aportan señal. Pero un artículo que no vendió nada en dos meses es
+justamente uno de los que hay que revisar: **puede no estar vendiendo porque
+está caro**. Excluirlo daba por sentada la respuesta que el experimento tiene
+que dar.
+
 ### Qué se puede concluir, y qué no
 
-Los números del universo, medidos el 21/08/2026:
+Lo que sigue siendo cierto es el volumen. Medido el 21/08/2026 sobre los 2.283
+SKU que sí vendieron algo en 60 días:
 
 | | |
 |---|---|
-| SKU que entran al experimento | 2.282 |
-| Unidades en 60 días | 24.883 |
+| SKU en el experimento | 4.360 |
+| De ésos, sin ninguna venta en 60 días | 2.077 |
 | **Mediana de ventas por SKU y semana** | **0,58 unidades** |
-| SKU que venden menos de 1 por semana | 1.316 (58 %) |
-| SKU que venden 5 o más por semana | 93 (4 %) |
+| SKU que venden menos de 1 por semana | 1.316 |
+| SKU que venden 5 o más por semana | 93 |
 | Participación de los 200 más vendidos | 45,6 % de las unidades |
 
 Esto **no** invalida el experimento, pero define qué preguntas puede contestar:
 
 - **Sí puede** decir cuál es la mejor banda a nivel agregado y por segmento
-  (categoría, proveedor, rango de precio). Con ~760 SKU por grupo y siete días,
+  (proveedor, marca, rango de precio). Con ~1.450 SKU por grupo y siete días,
   ahí sobra volumen.
-- **No puede** dar «el markup exacto para cada producto» en tres semanas, que era
-  el objetivo original. Un SKU que vende 0,58 unidades por semana no distingue
-  10 % de 35 % de markup ni en tres semanas ni en diez: la diferencia entre
-  vender 0 y vender 1 es ruido. Sólo el puñado de arriba —del orden de los 93 a
-  200 SKU de mayor rotación— tiene volumen para una lectura individual.
+- **No puede** dar «el markup exacto para cada producto» en tres semanas. Un SKU
+  que vende 0,58 unidades por semana no distingue 10 % de 35 % ni en tres
+  semanas ni en diez: la diferencia entre vender 0 y vender 1 es ruido. Sólo el
+  puñado de arriba —del orden de los 93 a 200 SKU de mayor rotación— tiene
+  volumen para una lectura individual.
 
 Por eso `gold.fact_experimento` guarda el grano SKU-semana pero el tablero lo lee
 agregado, y marca explícitamente qué filas tienen volumen suficiente para leerse
 solas. La conclusión útil de tres semanas es una **política de markup por
-segmento**, más una lista corta de artículos con evidencia propia.
+segmento**, más una lista corta de artículos con evidencia propia. Para el resto,
+lo que hace falta es dejar el experimento corriendo más tiempo — y por eso los
+artículos sin ventas entran igual: adentro suman al agregado de su banda.
 
 ### Qué NO cancela el cuadrado latino
 
@@ -615,7 +656,7 @@ segmento**, más una lista corta de artículos con evidencia propia.
   precio de la semana anterior— se le atribuyen a la banda nueva.
 - **Composición de los grupos.** El reparto no es al azar: se ordena por unidades
   y se reparte en serpentina (1-2-3, 3-2-1, …), con la disponibilidad de hoy como
-  segunda clave. Con 2.282 SKU al azar los grupos quedarían parecidos *en
+  segunda clave. Con 4.360 SKU al azar los grupos quedarían parecidos *en
   promedio*, pero el experimento no se juega en el promedio: los 200 más vendidos
   son el 45,6 % de las unidades, así que un solo artículo de alta rotación mal
   repartido mueve el total de su grupo más que cien de cola. La serpentina además
@@ -664,11 +705,11 @@ todas las siguientes**. Por eso ahora hay tres topes.
 |---|---|---|
 | `TIMEOUT_HTTP` | en cada script | 30 s a 120 s según la API |
 | `techo` | por paso, en `PASOS` | 15 a 60 min (3-4× la mediana medida) |
-| `PRESUPUESTO_TOTAL` | la corrida entera | 100 min |
+| `PRESUPUESTO_TOTAL` | la corrida entera | 50 min |
 
 **El presupuesto total es el que resuelve el problema de fondo.** Antes de cada
 paso se mira si todavía entra: si quedan 5 minutos y el paso puede tardar 30, se
-saltea y la corrida termina. Con 100 minutos contra un intervalo de 120, la
+saltea y la corrida termina. Con 50 minutos contra un intervalo de 60, la
 corrida **siempre** libera la máquina antes del disparo siguiente.
 
 Lo que se saltea no se pierde: al no quedar registrado como "corrió bien", entra
@@ -680,8 +721,44 @@ Reintentar costaría otro techo entero, y dos techos seguidos se comen la ventan
 transitorio: es un socket esperando una respuesta que no llega, y el reintento se
 cuelga igual.
 
-Si en el log aparece seguido `NO ENTRARON en los 100 min`, algún paso se volvió
+Si en el log aparece seguido `NO ENTRARON en los 50 min`, algún paso se volvió
 lento o el presupuesto quedó corto. Es una señal para mirar, no para ignorar.
+
+### Qué hubo que cambiar al pasar de 2 horas a 1
+
+El intervalo se bajó a una hora el 21/08/2026, para que el pulso mida el quiebre
+de stock con el doble de resolución. Eso obligó a mover dos cosas:
+
+**El presupuesto, de 100 a 50 minutos.** Con la tarea disparando cada 60, un
+presupuesto de 100 era *más largo que el intervalo*: una corrida normal podía
+seguir viva cuando llegaba el disparo siguiente, y ahí vuelve el problema que
+todo esto viene a evitar — la corrida nueva no arranca y el pipeline se saltea
+horas en silencio. Ahora son 50 contra 60, con 10 de colchón.
+
+**Los techos, que es la parte que no se ve.** El chequeo es
+`gastado + techo > presupuesto`: un paso se saltea cuando su **techo** no entra
+en lo que queda, no cuando su duración real no entra. Con eso, un paso cuyo
+techo sea mayor o igual al presupuesto **no corre nunca** — se saltea en todas
+las corridas, y nadie lo nota porque se saltea "por presupuesto", que es un
+mensaje que suena normal. `ml_envios.py`, con techo de 45, caía justo ahí.
+
+Pero el problema de fondo estaba en *todos* los techos: se habían puesto como
+valores absolutos generosos y no según la mediana de cada paso. Había pasos de
+**medio minuto con techos de 20**, o sea reservando 40 veces lo que tardan. Con
+un intervalo de 120 sobraba lugar y no molestaba; con 60, esas reservas se comen
+el presupuesto y hacen que se saltee lo que va abajo. Ahora se aplica la regla
+que este README ya decía —3 o 4 veces la mediana medida— con un piso de 10 min.
+
+Simulando la corrida más pesada del día (cuando disparan también los pasos de
+24 h y de 6 h) con las medianas reales, da **35 minutos** y el único que queda
+afuera es `mercadolibre.py --catalogo`, que al ser `primera_del_dia` reintenta y
+entra en la vuelta siguiente. En una corrida normal son ~22 minutos y no se
+saltea nada.
+
+**Los dos pasos del experimento se movieron junto al pulso**, en vez de ir
+últimos. Leen justo lo que el pulso acaba de escribir, y así le ceden el lugar a
+los pasos pesados que corren una vez por día, que son los que se pueden permitir
+esperar una hora.
 
 ### Cómo tiene que estar el Programador de tareas
 
@@ -697,9 +774,9 @@ ejecutándose": hay una corrida colgada y por eso no arranca ninguna nueva.
 
 Tres cosas que conviene tener puestas en la tarea:
 
-- **Disparador → "Repetir cada 2 horas durante: Indefinidamente".** Si dice una
+- **Disparador → "Repetir cada 1 hora durante: Indefinidamente".** Si dice una
   duración corta, la repetición se corta sola cuando esa duración se cumple.
-- **Configuración → "Detener la tarea si se ejecuta más de: 2 horas"**, y
+- **Configuración → "Detener la tarea si se ejecuta más de: 1 hora"**, y
   **"Si la tarea ya se está ejecutando: Detener la instancia existente"**. Es el
   cinturón por si algún día algo se cuelga fuera de los topes de Python.
 - **Condiciones → destildar "Iniciar la tarea solo si el equipo está con
