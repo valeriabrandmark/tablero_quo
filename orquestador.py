@@ -72,9 +72,36 @@ ARCHIVO_ESTADO = "estado_pasos.json"
 #                      mediana medida en 24 corridas reales (ver README), asi
 #                      que un dia lento no lo corta: corta un cuelgue.
 #
-# El total es de 100 minutos contra un intervalo de 120: deja 20 de colchon.
-# Si algun dia el pipeline se corre cada hora, este numero hay que bajarlo.
-PRESUPUESTO_TOTAL = 100 * 60
+# EL INTERVALO PASO DE 2 HORAS A 1, ASI QUE ESTOS DOS NUMEROS CAMBIARON.
+#
+# Antes el total era de 100 minutos contra un intervalo de 120. Con la tarea
+# disparando cada 60, ese presupuesto era MAS LARGO que el intervalo: una
+# corrida normal podia seguir viva cuando llegaba el disparo siguiente, y ahi
+# vuelve el problema que todo esto viene a evitar -- la corrida nueva no arranca
+# y el pipeline se saltea horas en silencio.
+#
+# Ahora son 50 contra 60: 10 minutos de colchon.
+#
+# Y OJO CON LOS TECHOS, QUE ES LA PARTE QUE NO SE VE.
+#
+# El chequeo es `gastado + techo > presupuesto`, o sea que un paso se saltea
+# cuando su TECHO no entra en lo que queda, no cuando su duracion real no entra.
+# Con eso, un paso cuyo techo sea mayor o igual al presupuesto NO CORRE NUNCA:
+# se saltea en todas las corridas y nadie lo nota, porque se saltea "por
+# presupuesto", que es un mensaje que suena normal.
+#
+# Con el presupuesto en 50, el techo de 45 de ml_envios caia justo en esa
+# trampa. Pero el problema de fondo era otro y estaba en TODOS los techos: se
+# habian puesto como valores absolutos generosos y no segun la mediana de cada
+# paso. Habia pasos de MEDIO MINUTO con techos de 20, o sea reservando 40 veces
+# lo que tardan. Con un intervalo de 120 sobraba lugar y no molestaba; con 60,
+# esas reservas se comen el presupuesto y hacen que se saltee lo que va abajo.
+#
+# Ahora se aplica la regla que el README ya decia -- 3 o 4 veces la mediana
+# medida en corridas reales -- con un piso de 10 minutos. El techo sigue
+# cortando un cuelgue y no un dia lento, que es para lo que esta, pero deja de
+# reservar tiempo que el paso no va a usar.
+PRESUPUESTO_TOTAL = 50 * 60
 TECHO_POR_DEFECTO = 10 * 60
 
 # Cada paso es:
@@ -128,20 +155,20 @@ PASOS = [
     # Tienda Nube por una caida de SIGMA seria cambiar un dato viejo por cinco.
     # Queda como FALLA en `--listar`, que es donde tiene que verse.
     {"comando": "sigma.py --ventas",           "intentos": 3, "espera": 60,
-     "cada_horas": None, "critico": False, "escribe": "sigma_ventas", "techo": 30 * 60},
+     "cada_horas": None, "critico": False, "escribe": "sigma_ventas", "techo": 15 * 60},
 
     # El catalogo lo lee modelo.py (para proveedor, marca e IVA de cada SKU), asi
     # que tiene que ir antes. Pero un alta o un cambio de descripcion no pasa
     # cada dos horas: estaba pegado a las ventas y acumulo 335.816 inserciones
     # para tener 8.194 filas vivas -- 41 recargas del mismo catalogo.
     {"comando": "sigma.py --catalogo",         "intentos": 2, "espera": 60,
-     "cada_horas": 24, "critico": False, "escribe": "sigma_articulos", "techo": 30 * 60},
+     "cada_horas": 24, "critico": False, "escribe": "sigma_articulos", "techo": 15 * 60},
 
     # Ventas de ML: ventana movil, es barato. `cada_horas: None` y no 2: el
     # pipeline YA corre cada 2 horas, y poner 2 hacia que un arranque unos
     # minutos temprano lo saltara hasta la vuelta siguiente.
     {"comando": "mercadolibre.py --ventas",    "intentos": 2, "espera": 60,
-     "cada_horas": None, "critico": False, "escribe": "ml_ventas", "techo": 20 * 60},
+     "cada_horas": None, "critico": False, "escribe": "ml_ventas", "techo": 10 * 60},
 
     # Costo de envio: incremental (solo pide las ordenes que todavia no tiene).
     #
@@ -152,11 +179,11 @@ PASOS = [
     # Es el mismo agujero que en julio dejo la rentabilidad de ML inflada.
     {"comando": "ml_envios.py",                "intentos": 2, "espera": 60,
      "cada_horas": None, "depende_de": "mercadolibre.py --ventas",
-     "critico": False, "escribe": "ml_envios", "techo": 45 * 60},
+     "critico": False, "escribe": "ml_envios", "techo": 15 * 60},
 
     # Tienda Nube: una sola pagina de la API, tarda segundos.
     {"comando": "tiendanube.py",               "intentos": 2, "espera": 30,
-     "cada_horas": 4, "critico": False, "escribe": "tn_pedidos + tn_pedidos_items", "techo": 15 * 60},
+     "cada_horas": 4, "critico": False, "escribe": "tn_pedidos + tn_pedidos_items", "techo": 10 * 60},
 
     # Los Excel de costos solo cambian cuando alguien los edita: el script
     # compara una huella de los archivos y no hace nada si no se movio ninguno.
@@ -166,7 +193,7 @@ PASOS = [
     # ultima carga y los margenes se calculan con los costos de antes. Viejo,
     # no roto.
     {"comando": "costos.py --si-cambio",       "intentos": 2, "espera": 30,
-     "cada_horas": None, "critico": False, "escribe": "costos_historicos", "techo": 20 * 60},
+     "cada_horas": None, "critico": False, "escribe": "costos_historicos", "techo": 10 * 60},
 
     # EL UNICO CRITICO DE VERDAD. prorratear_flete.py lee gold.fact_ventas para
     # repartir el flete: si modelo.py no llego a reconstruir la ventana, el
@@ -175,7 +202,7 @@ PASOS = [
     #
     # <<< ACA EL TABLERO DE VENTAS YA ESTA AL DIA >>>
     {"comando": "modelo.py",                   "intentos": 3, "espera": 60,
-     "cada_horas": None, "critico": True,  "escribe": "gold.fact_ventas", "techo": 30 * 60},
+     "cada_horas": None, "critico": True,  "escribe": "gold.fact_ventas", "techo": 20 * 60},
 
     # ============================================================
     #  BLOQUE 2 - NADIE ESTA ESPERANDO ESTO
@@ -204,29 +231,58 @@ PASOS = [
     # usa el catalogo para las publicaciones.
     {"comando": "ml_pulso.py",                 "intentos": 2, "espera": 30,
      "cada_horas": None, "critico": False,
-     "escribe": "ml_estado_item, ml_precio_item", "techo": 15 * 60},
+     "escribe": "ml_estado_item, ml_precio_item", "techo": 10 * 60},
+
+    # LOS DOS PASOS DEL EXPERIMENTO VAN PEGADOS AL PULSO, Y NO AL FINAL.
+    #
+    # Estaban ultimos y se salteaban en la primera corrida del dia -- la unica
+    # en la que disparan tambien el catalogo de Sigma, digip_preparaciones y el
+    # catalogo de ML. Simulando esa corrida contra el presupuesto de 50 min, los
+    # dos quedaban afuera por unos pocos minutos.
+    #
+    # No se perdian (los saltea sin marcarlos como OK, asi que entran en la
+    # corrida siguiente), pero ponerlos aca es mejor por dos motivos: leen
+    # justo lo que el pulso acaba de escribir, y le ceden el lugar a los pasos
+    # pesados que corren UNA vez por dia, que son los que se pueden permitir
+    # esperar una hora.
+
+    # La caja de compra: una llamada por publicacion, sin multiget. Cada 6 h y
+    # no en cada corrida porque son ~3.900 llamadas por pasada (de los 4.360 SKU
+    # del experimento, 3.880 estan en catalogo), y es una covariable que se lee
+    # por semana, no el dato principal. Ver ml_pulso.py.
+    {"comando": "ml_pulso.py --solo-buybox",   "intentos": 2, "espera": 60,
+     "cada_horas": 6, "critico": False, "escribe": "ml_buybox_item",
+     "techo": 15 * 60},
+
+    # El consolidado del experimento. Al reves que el pulso, este SI puede
+    # saltearse sin costo: no observa nada, solo vuelve a calcular
+    # gold.fact_experimento a partir de los tramos ya guardados. Si una corrida
+    # se lo saltea, la siguiente lo recalcula igual y con mas datos.
+    {"comando": "experimento.py --consolidar", "intentos": 2, "espera": 30,
+     "cada_horas": 6, "critico": False, "escribe": "gold.fact_experimento",
+     "techo": 10 * 60},
 
     # Stock de DIGIP: dos llamadas, segundos. El stock se mueve durante el dia,
     # asi que va en cada corrida.
     {"comando": "digip.py",                    "intentos": 2, "espera": 30,
-     "cada_horas": None, "critico": False, "escribe": "digip_stock, digip_stock_detalle", "techo": 20 * 60},
+     "cada_horas": None, "critico": False, "escribe": "digip_stock, digip_stock_detalle", "techo": 10 * 60},
 
     # Alimenta la vista de Logistica, no el modelo de ventas.
     {"comando": "digip_pedidos.py",            "intentos": 3, "espera": 60,
-     "cada_horas": None, "critico": False, "escribe": "digip_pedidos", "techo": 20 * 60},
+     "cada_horas": None, "critico": False, "escribe": "digip_pedidos", "techo": 10 * 60},
 
     # Una llamada por pedido de la ventana: 9,8 min de mediana. Alimenta
     # Logistica, que se mira por semana y no por hora. Va antes de
     # prorratear_flete, que lo lee.
     {"comando": "digip_preparaciones.py",      "intentos": 2, "espera": 60,
-     "cada_horas": 6, "critico": False, "escribe": "digip_preparaciones", "techo": 40 * 60},
+     "cada_horas": 6, "critico": False, "escribe": "digip_preparaciones", "techo": 25 * 60},
 
     # Los fletes se miran por semana: dos veces por dia alcanza y sobra.
     {"comando": "prorratear_flete.py",         "intentos": 2, "espera": 30,
-     "cada_horas": 12, "critico": False, "escribe": "gold.fact_ventas_flete", "techo": 20 * 60},
+     "cada_horas": 12, "critico": False, "escribe": "gold.fact_ventas_flete", "techo": 10 * 60},
 
     {"comando": "clasificar_clientes.py",      "intentos": 2, "espera": 30,
-     "cada_horas": None, "critico": False, "escribe": "gold.clientes_clasificados", "techo": 20 * 60},
+     "cada_horas": None, "critico": False, "escribe": "gold.clientes_clasificados", "techo": 10 * 60},
 
     # Ya NO es el paso lento: las ~4.300 llamadas van en paralelo y tarda un par
     # de minutos, no 33. Se deja igual al final y una vez por dia porque sigue
@@ -243,25 +299,6 @@ PASOS = [
     {"comando": "mercadolibre.py --catalogo",  "intentos": 2, "espera": 60,
      "cada_horas": None, "primera_del_dia": True, "critico": False,
      "escribe": "ml_publicaciones, ml_stock_full, ml_stock_full_historico",
-     "techo": 20 * 60},
-
-    # La caja de compra del experimento: una llamada por publicacion, sin
-    # multiget. Cada 6 h y no en cada corrida porque son ~2.100 llamadas por
-    # pasada (el 92% de los SKU del experimento estan en catalogo), y es una
-    # covariable que se lee por semana, no el dato principal. Ver ml_pulso.py.
-    {"comando": "ml_pulso.py --solo-buybox",   "intentos": 2, "espera": 60,
-     "cada_horas": 6, "critico": False, "escribe": "ml_buybox_item",
-     "techo": 20 * 60},
-
-    # El consolidado del experimento de elasticidad. Al reves que el pulso, este
-    # SI puede saltearse sin costo: no observa nada, solo vuelve a calcular
-    # gold.fact_experimento a partir de los tramos que ya estan guardados. Si
-    # una corrida se lo saltea, la siguiente lo recalcula igual y con mas datos.
-    #
-    # Cada 6 h y no en cada corrida porque nadie mira este tablero cada dos
-    # horas: la unidad de analisis del experimento es la semana.
-    {"comando": "experimento.py --consolidar", "intentos": 2, "espera": 30,
-     "cada_horas": 6, "critico": False, "escribe": "gold.fact_experimento",
      "techo": 20 * 60},
 ]
 

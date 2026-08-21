@@ -24,6 +24,7 @@ Todo es `if not exists`: se puede correr las veces que haga falta.
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
@@ -243,6 +244,20 @@ create table if not exists gold.fact_experimento (
     -- competidor, asi que dentro de la banda 25-35% el markup real se mueve.
     markup_realizado  double precision,
 
+    -- Margen por unidad vendida. Es el criterio de DESEMPATE, y sale de una
+    -- preferencia del negocio que no es obvia leyendo solo los totales.
+    --
+    -- Entre dos bandas que dejan lo mismo por dia conviene la de markup mas
+    -- alto, porque vende menos unidades para ganar la misma plata. Y eso
+    -- importa por dos motivos concretos. El stock dura mas, asi que el articulo
+    -- no se queda sin mercaderia a mitad de semana. Y cada unidad movida cuesta
+    -- trabajo -- preparar, despachar, atender-- que no depende de a cuanto se
+    -- vendio. Vender 50 unidades marcando 10 por ciento y vender 20 marcando 30
+    -- no son equivalentes aunque den el mismo total.
+    --
+    -- Null cuando no se vendio nada, que no es lo mismo que cero.
+    margen_por_unidad double precision,
+
     -- unidades / (horas_vendible / 24). Null si no hubo horas vendibles: cero
     -- ventas sin exposicion no es un cero, es un dato que no existe, y ponerle
     -- 0 lo mete en los promedios como si el articulo hubiera fracasado.
@@ -259,6 +274,27 @@ def crear_engine():
         f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}",
         connect_args={"client_encoding": "utf8"},
     )
+
+
+# La misma regex con la que SQLAlchemy detecta un parametro en `text()`.
+_PARAMETRO = re.compile(r"(?<![:\w\$]):(\w+)")
+
+
+def _verificar_sin_parametros(ddl):
+    """Explota si el DDL tiene algo que `text()` tomaria como parametro.
+
+    Sin esto, agregar un `:algo` en un comentario del DDL hace fallar la
+    creacion del esquema entera con un error que no menciona ni el comentario ni
+    el archivo. Es el mismo tipo de trampa que ya costo una corrida con los `%`.
+    """
+    encontrados = _PARAMETRO.findall(ddl)
+    if encontrados:
+        raise ValueError(
+            f"El DDL tiene {encontrados}, que `text()` va a tomar como parametros "
+            "y hacen fallar la creacion del esquema. Ojo que agregarle un espacio "
+            "adelante NO alcanza (`( :sku)` liga igual): hay que sacar los dos "
+            "puntos, o duplicarlos si de verdad va un cast."
+        )
 
 
 def asegurar_tablas(engine=None):
@@ -284,9 +320,25 @@ def asegurar_tablas(engine=None):
         # que psycopg2 devuelve como un `%` literal. Verificado: los cuatro
         # quedan escapados y el comentario llega intacto a Postgres.
         #
-        # Es seguro aca porque `text()` interpreta `:nombre` como parametro y
-        # este DDL no tiene NI UN `:`. Si algun dia se le agrega un cast `::` o
-        # un literal con dos puntos, hay que volver a mirar esto.
+        # OJO CON LA OTRA MITAD DE `text()`, QUE ES LO QUE PUEDE ROMPERLO.
+        #
+        # `text()` interpreta `:nombre` como parametro. El DDL tiene 16 dos
+        # puntos -- todos dentro de comentarios -- y funciona igual, asi que la
+        # regla NO es "no usar dos puntos": eso seria imposible de sostener
+        # escribiendo comentarios en castellano.
+        #
+        # Lo que liga es un `:` seguido de una palabra Y precedido por algo que
+        # no sea letra, `:` ni `$` (la regex de SQLAlchemy es
+        # `(?<![:\w\$]):(\w+)`). O sea:
+        #
+        #     "-- una fila por pulso: deja ver los huecos"  -> seguido de espacio, no liga
+        #     "-- nota:importante"                          -> precedido por letra, no liga
+        #     "select a::text"                              -> el `::` lo excluye, no liga
+        #     "-- ojo con :sku"                             -> LIGA, y rompe la corrida
+        #
+        # Como es una invariante facil de romper sin darse cuenta, se chequea en
+        # vez de confiar en que alguien lea este comentario.
+        _verificar_sin_parametros(DDL)
         con.execute(text(DDL))
     return engine
 

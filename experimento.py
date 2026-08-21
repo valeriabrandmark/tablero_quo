@@ -40,9 +40,13 @@ GRUPOS = 3
 SEMANAS = 3
 
 # Cuanto puede pasar entre dos pulsos antes de que el hueco cuente como "no
-# miramos". El orquestador corre cada 2 horas; 3 deja lugar a una corrida que se
-# atraso sin perdonar una caida de verdad.
-TOLERANCIA_HUECO = datetime.timedelta(hours=3)
+# miramos".
+#
+# El orquestador corre cada HORA (era cada 2). Dos horas deja pasar una corrida
+# que se atraso o que se salteo por presupuesto, sin perdonar una caida de
+# verdad. Si se dejara en 3 como antes, se estarian tapando dos pulsos perdidos
+# seguidos y esas horas entrarian al denominador como si las hubieramos mirado.
+TOLERANCIA_HUECO = datetime.timedelta(hours=2)
 
 # Las primeras horas de cada semana no se miden.
 #
@@ -156,12 +160,22 @@ def cobertura(engine, desde, hasta):
 # ---------------------------------------------------------------------------
 
 def universo(engine):
-    """Los SKU que entran al experimento.
+    """Los SKU que entran al experimento: TODOS los que tienen publicacion en ML.
 
-    Se pide que tengan publicacion viva en ML y alguna venta en los ultimos 60
-    dias. Lo segundo no es un capricho: un SKU que no vendio nada en dos meses
-    tampoco va a vender en una semana, asi que no aporta senal y solo agrega
-    ruido a los promedios de su grupo.
+    ANTES SE PEDIA HABER VENDIDO ALGO EN 60 DIAS, Y ESTABA MAL.
+    El filtro dejaba afuera 2.077 de 4.360 articulos -- casi la mitad -- con el
+    argumento de que sin ventas recientes no aportan senal. Pero el objetivo del
+    experimento es encontrar el markup de CADA articulo, y un articulo que no
+    vendio nada en dos meses es justamente uno de los que hay que revisar: puede
+    no estar vendiendo porque esta caro. Excluirlo daba por sentada la respuesta
+    que el experimento tiene que dar.
+
+    Lo que sigue siendo cierto es que un articulo sin ventas no va a producir una
+    conclusion propia en tres semanas. Pero eso se resuelve marcando la fila como
+    no legible en el tablero, no sacandolo de la medicion: adentro suma al
+    agregado de su banda, que es donde de verdad hay senal.
+
+    `uds60` se sigue trayendo, pero ahora solo para repartir los grupos parejos.
     """
     return pd.read_sql("""
         with pub as (
@@ -175,19 +189,20 @@ def universo(engine):
         ),
         ventas as (
           select sku,
-                 sum(cantidad)                     as uds60,
-                 count(distinct nro_orden)         as ordenes60
+                 sum(cantidad)             as uds60,
+                 count(distinct nro_orden) as ordenes60
             from gold.fact_ventas
            where canal = 'Mercado Libre'
              and fecha >= current_date - 60
            group by sku
         )
         select p.sku, p.alguna_activa, p.en_catalogo,
-               coalesce(v.uds60, 0) as uds60, coalesce(v.ordenes60, 0) as ordenes60
+               coalesce(v.uds60, 0)    as uds60,
+               coalesce(v.ordenes60, 0) as ordenes60
           from pub p
-          join ventas v on v.sku = p.sku
-         where p.sku is not null and v.uds60 > 0
-         order by v.uds60 desc, p.sku
+          left join ventas v on v.sku = p.sku
+         where p.sku is not null
+         order by coalesce(v.uds60, 0) desc, p.sku
     """, engine)
 
 
@@ -494,6 +509,14 @@ def consolidar(engine, nombre):
             "comision": com,
             "envio": env,
             "margen": fact - cos - com - env,
+            # El criterio de DESEMPATE. Entre dos bandas que dejan lo mismo por
+            # dia conviene la de markup mas alto, porque vende menos unidades
+            # para ganar la misma plata: el stock dura mas y cada unidad movida
+            # cuesta trabajo que no depende de a cuanto se vendio. Vender 50
+            # marcando 10 y vender 20 marcando 30 no son equivalentes aunque den
+            # el mismo total. Quien aplica la regla es el tablero; aca solo se
+            # guarda el numero.
+            "margen_por_unidad": None if uds <= 0 else (fact - cos - com - env) / uds,
             "precio_prom": None if vacio or uds == 0 else fact / uds,
             "precio_publicado": precio_pub,
             "markup_realizado": markup,
@@ -517,11 +540,21 @@ def consolidar(engine, nombre):
     print(f"  gold.fact_experimento: {len(df)} filas "
           f"({len(medidas)} con horas a la venta, {len(df) - len(medidas)} sin exposicion)")
     if not medidas.empty:
-        print("\n  Unidades por dia a la venta, por banda:")
+        # Se imprimen las tres cifras SIN elegir ganador. La regla de decision
+        # -- maximizar el margen por dia y desempatar hacia el markup mas alto
+        # -- vive en el tablero (lib/elasticidad.ts), y escribirla tambien aca
+        # garantizaria que algun dia las dos digan cosas distintas.
+        print("\n  Por banda (sin elegir ganador, eso lo hace el tablero):")
+        print(f"    {'banda':>6}  {'margen/dia':>12} {'margen/unidad':>14} "
+              f"{'uds/dia':>9} {'markup':>8}  SKU-semana")
         for banda, g in medidas.groupby("banda"):
-            print(f"    {banda:>6}: {g['uds_por_dia_vendible'].mean():.3f} "
-                  f"uds/dia · markup real {g['markup_realizado'].mean():.1%} "
-                  f"· {len(g)} SKU-semana")
+            dias = g["horas_vendible"].sum() / 24
+            m_dia = g["margen"].sum() / dias if dias else float("nan")
+            u = g["unidades"].sum()
+            m_uni = g["margen"].sum() / u if u else float("nan")
+            print(f"    {banda:>6}  {m_dia:>12,.0f} {m_uni:>14,.0f} "
+                  f"{u / dias if dias else 0:>9.2f} "
+                  f"{g['markup_realizado'].mean():>7.1%}  {len(g)}")
 
 
 def main():
