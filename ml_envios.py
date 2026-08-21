@@ -70,13 +70,19 @@ def extraer_envios():
           AND NOT EXISTS (SELECT 1 FROM bronze.ml_envios e
                            WHERE e.shipping_id = {ship})""" if hay_envios else ""
 
+    # El parametro va como %(piso)s y NO como :piso.
+    #
+    # `pd.read_sql` con un Engine y el SQL como STRING pelado despacha por
+    # `exec_driver_sql`, que le pasa la consulta derecho a psycopg2 -- y psycopg2
+    # usa `pyformat`. Con `:piso` la base recibe los dos puntos literales y tira
+    # "syntax error at or near :". Es el mismo estilo que usa mercadolibre.py.
     ordenes = pd.read_sql(f"""
         SELECT DISTINCT ON ({ship})
                v.id, {ship} AS shipping_id_str, v.date_created
         FROM bronze.ml_ventas v
         WHERE v.status = 'paid'
           AND v."shipping.id" IS NOT NULL
-          AND v.date_created >= :piso{filtro_ya_bajados}
+          AND v.date_created >= %(piso)s{filtro_ya_bajados}
         ORDER BY {ship}
     """, engine, params={"piso": piso})
 
