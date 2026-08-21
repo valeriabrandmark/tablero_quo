@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import estado
 import os
 import glob
 import re
@@ -82,7 +83,6 @@ def leer_hoja_flexible(archivo, hoja, columnas_necesarias, max_filas_prueba=5):
                      f"en la hoja '{hoja}' de {archivo}")
 
 
-ARCHIVO_HUELLA = "estado_costos.json"
 
 
 def huella_de_los_excel():
@@ -100,16 +100,21 @@ def huella_de_los_excel():
 
 
 def huella_guardada():
+    """La huella del Excel de costos de la ultima carga. Vive en Postgres.
+
+    Si no se pudo leer se devuelve None, que significa "recarga igual": perder
+    dos minutos recargando es mucho mejor que saltearse un cambio de costos y
+    dejar el margen mal calculado.
+    """
     try:
-        with open(ARCHIVO_HUELLA, encoding="utf-8") as f:
-            return json.load(f).get("huella")
-    except (OSError, ValueError):
+        return (estado.leer("costos", {}) or {}).get("huella")
+    except Exception as e:
+        print(f"  (aviso: no se pudo leer la huella: {str(e)[:60]}) -> recarga")
         return None
 
 
 def guardar_huella(huella):
-    with open(ARCHIVO_HUELLA, "w", encoding="utf-8") as f:
-        json.dump({"huella": huella}, f, indent=2)
+    estado.guardar("costos", {"huella": huella})
 
 
 def meses_disponibles():

@@ -1,5 +1,6 @@
 import os
 import json
+import estado
 import requests
 from dotenv import load_dotenv
 
@@ -45,10 +46,13 @@ data = r.json()
 print(json.dumps(data, indent=2))
 
 if "access_token" in data:
-    # Guardamos los tokens en un archivo para usarlos despues
-    with open("ml_tokens.json", "w") as f:
-        json.dump(data, f, indent=2)
-    print("\n=== TOKENS GUARDADOS en ml_tokens.json ===")
+    # Se guarda en la BASE y no en un archivo. ML entrega un refresh_token nuevo
+    # en cada renovacion y anula el anterior, asi que con el token en un archivo
+    # local dos maquinas se pisan: la que renueva deja a la otra afuera. Ademas
+    # es lo que permite que el orquestador corra en GitHub Actions, donde el
+    # disco arranca limpio en cada corrida. Ver estado.py.
+    estado.guardar("ml_tokens", data)
+    print("\n=== TOKENS GUARDADOS en la base (ops.estado) ===")
     print("access_token:", data["access_token"][:20], "...")
     print("refresh_token:", data["refresh_token"][:20], "...")
     print("user_id (seller):", data.get("user_id"))
