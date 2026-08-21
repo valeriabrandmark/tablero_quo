@@ -58,12 +58,23 @@ esperaba media hora por datos que no usa.
 
 | # | Paso | Cada | Escribe | Corta si falla |
 |---|---|---|---|---|
-| 8 | `digip.py` | siempre | `bronze.digip_stock`, `digip_stock_detalle` | no |
-| 9 | `digip_pedidos.py` | siempre | `bronze.digip_pedidos` | no |
-| 10 | `digip_preparaciones.py` | 6 h | `bronze.digip_preparaciones` | no |
-| 11 | `prorratear_flete.py` | 12 h | `gold.fact_ventas_flete` | no |
-| 12 | `clasificar_clientes.py` | siempre | `gold.clientes_clasificados` | no |
-| 13 | `mercadolibre.py --catalogo` | **1/día** | `bronze.ml_publicaciones`, `ml_stock_full`, `ml_stock_full_historico` | no |
+| 8 | `ml_pulso.py` | **siempre** | `bronze.ml_estado_item`, `ml_precio_item` | no |
+| 9 | `digip.py` | siempre | `bronze.digip_stock`, `digip_stock_detalle` | no |
+| 10 | `digip_pedidos.py` | siempre | `bronze.digip_pedidos` | no |
+| 11 | `digip_preparaciones.py` | 6 h | `bronze.digip_preparaciones` | no |
+| 12 | `prorratear_flete.py` | 12 h | `gold.fact_ventas_flete` | no |
+| 13 | `clasificar_clientes.py` | siempre | `gold.clientes_clasificados` | no |
+| 14 | `mercadolibre.py --catalogo` | **1/día** | `bronze.ml_publicaciones`, `ml_stock_full`, `ml_stock_full_historico` | no |
+| 15 | `ml_pulso.py --solo-buybox` | 6 h | `bronze.ml_buybox_item` | no |
+| 16 | `experimento.py --consolidar` | 6 h | `gold.fact_experimento` | no |
+
+**`ml_pulso.py` es el primero del bloque 2 y no el último, a propósito.** El
+resto de este bloque refresca *fotos*: si un paso se saltea, su tabla conserva
+la anterior y el dato queda viejo de una corrida, no roto. El pulso no es eso —
+guarda «cómo estaba el catálogo a las 14:00 del martes», y esa observación no se
+recupera después: la corrida siguiente ve las 16:00. **Un pulso salteado es un
+agujero permanente en la historia**, y los agujeros son justo lo que arruina la
+medición de elasticidad. Por eso va donde el presupuesto todavía no se gastó.
 
 **`ml_envios.py` va pegado a las ventas, no cada N horas.** Le pide a la API el
 costo de las órdenes que todavía no tiene, así que cada vez que entran órdenes
@@ -459,9 +470,169 @@ Empezó a acumular el **20/08/2026**. Antes de esa fecha no hay historia y no la
 va a haber nunca — lo que se puede medir hacia atrás es "días desde la última
 venta", que sale de `gold.fact_ventas` y llega hasta mayo.
 
-**Es idempotente:** borra las filas del día antes de insertar, así correr el
-catálogo dos veces el mismo día no deja el día duplicado. Las dos cosas van en
-una transacción.
+**Es idempotente:** la tabla tiene clave primaria `(fecha, inventory_id)`, así
+que correr el catálogo dos veces el mismo día no puede duplicar el día.
+
+> **Antes no lo era.** La versión original borraba el día y lo insertaba en una
+> transacción, pero si el `DELETE` fallaba —y fallaba *siempre* la primera vez,
+> porque la tabla todavía no existía— el `except` reintentaba el `INSERT` solo,
+> sin el borrado. En el arranque funcionaba de casualidad (no había nada que
+> duplicar); cualquier otro fallo del `DELETE` dejaba el día dos veces sin que
+> nada avisara. Hoy la tabla se crea con DDL explícito en `esquema.py` y la PK
+> hace imposible el duplicado.
+
+---
+
+## Medidor de elasticidad de precios
+
+El experimento reparte los artículos en tres grupos. Cada grupo pasa una semana
+en cada banda de markup sobre el costo (**10-18 %**, **18-25 %**, **25-35 %**) y
+después rota, de modo que en tres semanas los tres grupos pasaron por las tres
+bandas. Es un **cuadrado latino**: sirve para que el efecto «esta semana se
+vendió más» —feriados, quincena, campañas de ML— no se confunda con el efecto de
+la banda, porque cada semana contiene a las tres bandas al mismo tiempo.
+
+### Mercado Libre sí avisa el quiebre. Lo que no guarda es *desde cuándo*
+
+La API dice perfectamente si una publicación quebró stock: ML la pausa sola y le
+pone `sub_status = ["out_of_stock"]`. Ese dato ya está en
+`bronze.ml_publicaciones` — hoy con **4.732 de 8.509** publicaciones marcadas así
+(55,6 %) y **2.140 de 3.830** inventarios de Full en cero.
+
+Lo que no existía es la **historia**, porque esa tabla se escribe con
+`modo="replace"`: sabe cómo está la publicación hoy y pisa lo de ayer. Sin
+historia no se puede contestar «cuántas horas de esta semana el artículo estuvo
+realmente a la venta», que es la pregunta que hace falta.
+
+### Por qué el denominador es lo único que importa
+
+Comparar **unidades** entre semanas no mide elasticidad: mide disponibilidad.
+
+Si un SKU quebró stock el martes de la semana de markup 25-35 %, esa semana
+muestra menos unidades y la lectura ingenua es «con markup alto vende menos» —
+cuando en realidad no vendió porque no estaba a la venta. Con más de la mitad
+del catálogo quebrado en cualquier momento dado, ese sesgo **es más grande que
+el efecto que se busca medir**.
+
+Por eso la métrica es una tasa: `uds_por_dia_vendible` = unidades ÷ (horas a la
+venta ÷ 24). Y el quiebre deja de ser un flag para pasar a ser lo que descuenta
+el denominador.
+
+Ojo que el stock no es la única causa de exposición cero: hoy hay además 38
+publicaciones en `under_review` y 135 pausadas por nosotros. Todo eso es tiempo
+sin vender que **no** es quiebre, y por eso `gold.fact_experimento` reparte la
+ventana en cuatro columnas que siempre suman `horas_ventana`:
+
+| Columna | Qué es |
+|---|---|
+| `horas_vendible` | se podía comprar |
+| `horas_sin_stock` | quebrado |
+| `horas_pausada` | pausada por nosotros, en revisión, cerrada |
+| `horas_sin_dato` | **el pulso no corrió**: ni vendible ni quebrado |
+
+### Cómo se guarda: tramos, no fotos
+
+Lo obvio sería guardar las 8.509 publicaciones en cada pulso. Con un pulso cada
+2 horas eso da 102.000 filas por día y **37 millones al año** para un dato que
+casi nunca cambia. Por eso `ml_pulso.py` guarda **tramos** (SCD tipo 2): una fila
+nueva sólo cuando el estado cambia de verdad. Un artículo que estuvo vendible
+tres semanas es *una* fila con `desde` y `hasta`, no 250 fotos idénticas.
+
+El precio va en su propia tabla a propósito. Son dos preguntas distintas y
+cambian a ritmos distintos: la disponibilidad se mueve pocas veces por mes, el
+precio lo mueve el repricer varias veces por día. Juntos, cada cambio de precio
+abriría también un tramo de disponibilidad y la tabla que tenía que ser chica se
+fragmentaría hasta volver al problema que veníamos a evitar.
+
+**`visto_hasta` no es lo mismo que `hasta`.** Es el último pulso que confirmó ese
+estado. Si el pipeline estuvo caído dos días, el tramo abierto sigue diciendo
+«vendible» pero `visto_hasta` quedó dos días atrás: esas 48 horas son horas *sin
+dato*, no horas a la venta. Contarlas como vendibles inflaría el denominador
+justo en las semanas en que falló el pipeline, y nada lo delataría. De ahí también
+`bronze.ml_pulso_corrida`, que registra cada pulso: es lo que permite decir «esto
+no lo miramos» en vez de suponer que el estado se mantuvo.
+
+### El buy box no es un lujo, es el otro censor
+
+**2.107 de los 2.282 SKU del experimento (92 %) están en catálogo.** En catálogo,
+el que no gana la caja vende cerca de cero sin importar su precio. Y como la
+estrategia es «ponerse apenas debajo del competidor», perder la caja está
+**correlacionado con el tratamiento**: la semana de markup alto es justo la
+semana en la que más se pierde.
+
+Sin `bronze.ml_buybox_item`, «vendió menos porque estaba caro» y «vendió menos
+porque le sacaron la caja» son indistinguibles, y las dos empujan para el mismo
+lado: **la elasticidad medida sale exagerada**.
+
+`price_to_win` no tiene multiget —es una llamada por publicación—, así que va en
+su propio paso cada 6 h y sólo para los SKU bajo experimento. En cada pulso serían
+~25.000 llamadas por día sólo para esto.
+
+### La banda no es la variable explicativa: el markup realizado sí
+
+El experimento asigna una *banda*, pero el repricer sigue al competidor, así que
+dentro de 25-35 % el markup realmente aplicado se mueve —y se mueve dentro del
+día. `markup_realizado` se calcula desde `bronze.ml_precio_item`, ponderado por
+las **horas vendibles** (el precio que estuvo puesto con la publicación pausada
+no lo vio nadie) y descontándole el IVA, porque el precio de ML lo lleva adentro
+y el costo no.
+
+### Qué se puede concluir, y qué no
+
+Los números del universo, medidos el 21/08/2026:
+
+| | |
+|---|---|
+| SKU que entran al experimento | 2.282 |
+| Unidades en 60 días | 24.883 |
+| **Mediana de ventas por SKU y semana** | **0,58 unidades** |
+| SKU que venden menos de 1 por semana | 1.316 (58 %) |
+| SKU que venden 5 o más por semana | 93 (4 %) |
+| Participación de los 200 más vendidos | 45,6 % de las unidades |
+
+Esto **no** invalida el experimento, pero define qué preguntas puede contestar:
+
+- **Sí puede** decir cuál es la mejor banda a nivel agregado y por segmento
+  (categoría, proveedor, rango de precio). Con ~760 SKU por grupo y siete días,
+  ahí sobra volumen.
+- **No puede** dar «el markup exacto para cada producto» en tres semanas, que era
+  el objetivo original. Un SKU que vende 0,58 unidades por semana no distingue
+  10 % de 35 % de markup ni en tres semanas ni en diez: la diferencia entre
+  vender 0 y vender 1 es ruido. Sólo el puñado de arriba —del orden de los 93 a
+  200 SKU de mayor rotación— tiene volumen para una lectura individual.
+
+Por eso `gold.fact_experimento` guarda el grano SKU-semana pero el tablero lo lee
+agregado, y marca explícitamente qué filas tienen volumen suficiente para leerse
+solas. La conclusión útil de tres semanas es una **política de markup por
+segmento**, más una lista corta de artículos con evidencia propia.
+
+### Qué NO cancela el cuadrado latino
+
+- **Arrastre entre semanas.** ML tarda en digerir un cambio de precio: la
+  posición en el listado y el rendimiento de la publicidad se reacomodan durante
+  el día siguiente. Por eso `experimento.py` descarta las primeras **24 h** de
+  cada semana (`LAVADO`); sin eso, las ventas del lunes —que todavía responden al
+  precio de la semana anterior— se le atribuyen a la banda nueva.
+- **Composición de los grupos.** El reparto no es al azar: se ordena por unidades
+  y se reparte en serpentina (1-2-3, 3-2-1, …), con la disponibilidad de hoy como
+  segunda clave. Con 2.282 SKU al azar los grupos quedarían parecidos *en
+  promedio*, pero el experimento no se juega en el promedio: los 200 más vendidos
+  son el 45,6 % de las unidades, así que un solo artículo de alta rotación mal
+  repartido mueve el total de su grupo más que cien de cola. La serpentina además
+  es **reproducible**, que es lo que permite auditar un resultado meses después.
+
+### Comandos
+
+```bash
+python esquema.py                                  # crea las tablas (idempotente)
+python ml_pulso.py                                 # un pulso a mano
+python experimento.py --asignar --desde 2026-08-25 # arma el cuadrado latino
+python experimento.py --consolidar                 # recalcula gold.fact_experimento
+```
+
+La asignación se escribe **una vez** y no se toca: reescribirla a mitad del
+experimento le cambiaría la banda a semanas ya medidas. Para rehacerla hay que
+borrarla por nombre, a mano.
 
 **La fecha se toma en hora argentina, con huso explícito.** El catálogo corre a
 la mañana, pero si algún día corriera después de las 21, un `date.today()` en

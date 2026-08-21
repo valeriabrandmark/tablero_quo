@@ -187,6 +187,25 @@ PASOS = [
     # Por eso van al final. Si el catalogo de ML tarda media hora, la tarda con
     # el tablero de ventas ya actualizado, no antes.
 
+    # EL PULSO VA PRIMERO DE ESTE BLOQUE, Y NO AL FINAL COMO EL RESTO.
+    #
+    # El criterio de "nadie esta esperando esto" vale para los pasos que
+    # refrescan una foto: si se saltean, su tabla en bronze conserva la anterior
+    # y el dato queda viejo de una corrida, no roto.
+    #
+    # El pulso NO es eso. Guarda "como estaba el catalogo a las 14:00 del
+    # martes", y esa observacion no se puede recuperar despues: la corrida
+    # siguiente ve las 16:00, no las 14:00. Un pulso salteado es un agujero
+    # permanente en la historia, y los agujeros son justo lo que arruina la
+    # medicion -- las horas sin dato salen del denominador del experimento.
+    #
+    # Por eso se lo pone donde el presupuesto todavia no se gasto. Tarda poco
+    # mas de un minuto: ~430 llamadas al multiget, el mismo camino barato que
+    # usa el catalogo para las publicaciones.
+    {"comando": "ml_pulso.py",                 "intentos": 2, "espera": 30,
+     "cada_horas": None, "critico": False,
+     "escribe": "ml_estado_item, ml_precio_item", "techo": 15 * 60},
+
     # Stock de DIGIP: dos llamadas, segundos. El stock se mueve durante el dia,
     # asi que va en cada corrida.
     {"comando": "digip.py",                    "intentos": 2, "espera": 30,
@@ -223,7 +242,27 @@ PASOS = [
     # solo van a servir para la pestana de Stock Full cuando se arme.
     {"comando": "mercadolibre.py --catalogo",  "intentos": 2, "espera": 60,
      "cada_horas": None, "primera_del_dia": True, "critico": False,
-     "escribe": "ml_publicaciones, ml_stock_full", "techo": 20 * 60},
+     "escribe": "ml_publicaciones, ml_stock_full, ml_stock_full_historico",
+     "techo": 20 * 60},
+
+    # La caja de compra del experimento: una llamada por publicacion, sin
+    # multiget. Cada 6 h y no en cada corrida porque son ~2.100 llamadas por
+    # pasada (el 92% de los SKU del experimento estan en catalogo), y es una
+    # covariable que se lee por semana, no el dato principal. Ver ml_pulso.py.
+    {"comando": "ml_pulso.py --solo-buybox",   "intentos": 2, "espera": 60,
+     "cada_horas": 6, "critico": False, "escribe": "ml_buybox_item",
+     "techo": 20 * 60},
+
+    # El consolidado del experimento de elasticidad. Al reves que el pulso, este
+    # SI puede saltearse sin costo: no observa nada, solo vuelve a calcular
+    # gold.fact_experimento a partir de los tramos que ya estan guardados. Si
+    # una corrida se lo saltea, la siguiente lo recalcula igual y con mas datos.
+    #
+    # Cada 6 h y no en cada corrida porque nadie mira este tablero cada dos
+    # horas: la unidad de analisis del experimento es la semana.
+    {"comando": "experimento.py --consolidar", "intentos": 2, "espera": 30,
+     "cada_horas": 6, "critico": False, "escribe": "gold.fact_experimento",
+     "techo": 20 * 60},
 ]
 
 CARPETA = os.path.dirname(os.path.abspath(__file__))
