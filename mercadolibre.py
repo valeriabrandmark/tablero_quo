@@ -86,6 +86,12 @@ WINDOW_DAYS = 7
 
 
 def cargar_tokens():
+    if not os.path.exists(ARCHIVO_TOKENS):
+        raise RuntimeError(
+            f"No existe {ARCHIVO_TOKENS} en {os.getcwd()}.\n"
+            "  Ese archivo NO se versiona (esta en .gitignore) y es de cada maquina:\n"
+            "  un git clone no lo trae. Hay que autorizar la app con ml_token.py."
+        )
     with open(ARCHIVO_TOKENS) as f:
         return json.load(f)
 
@@ -98,6 +104,15 @@ def guardar_tokens(tokens):
 def renovar_access_token():
     """Usa el refresh_token para obtener un access_token nuevo.
        OJO: ML devuelve un refresh_token NUEVO cada vez, hay que guardarlo."""
+    faltan = [v for v in ("ML_CLIENT_ID", "ML_CLIENT_SECRET") if not os.getenv(v)]
+    if faltan:
+        # Sin esto, `os.getenv` devuelve None, requests lo manda como el texto
+        # "None", y ML contesta un 400 que se lee igual que el de un token
+        # vencido. Son dos problemas distintos y se arreglan distinto.
+        raise RuntimeError(
+            f"Faltan variables en el .env de {os.getcwd()}: {', '.join(faltan)}"
+        )
+
     tokens = cargar_tokens()
     r = requests.post(
         "https://api.mercadolibre.com/oauth/token",
@@ -111,7 +126,22 @@ def renovar_access_token():
         },
         timeout=TIMEOUT_HTTP,
     )
-    r.raise_for_status()
+
+    # `raise_for_status()` tira a la basura el cuerpo de la respuesta, y ahi
+    # esta la unica pista de que paso: el error quedaba en "400 Bad Request"
+    # pelado, que se lee igual para dos causas que no tienen nada que ver.
+    if not r.ok:
+        raise RuntimeError(
+            f"Mercado Libre rechazo la renovacion del token (HTTP {r.status_code}).\n"
+            f"  Respuesta: {r.text[:300]}\n"
+            "  invalid_grant  -> el refresh_token ya se uso o vencio.\n"
+            "     ML entrega un refresh_token NUEVO en cada renovacion y anula el\n"
+            "     anterior, asi que dos maquinas no pueden compartir el archivo:\n"
+            "     la que renueva deja a la otra afuera. Se arregla reautorizando\n"
+            "     con ml_token.py, en LA maquina que corre el orquestador.\n"
+            "  invalid_client -> revisar ML_CLIENT_ID y ML_CLIENT_SECRET en el .env."
+        )
+
     nuevos = r.json()
     guardar_tokens(nuevos)        # guardamos el refresh_token nuevo
     print("  Token renovado OK")
