@@ -17,24 +17,26 @@ on:
   # horas redondas -- todo el mundo programa a las 0 -- y ahi los atrasos son
   # de media hora. En el minuto 20 arranca mucho mas cerca de lo pedido.
   schedule:
-    # Cada 2 horas de 8 a 00 hora argentina: 08, 10, 12, 14, 16, 18, 20 y 22,
-    # mas el cierre a las 00. Son 9 corridas por dia.
+    # CADA HORA, LAS 24. 24 corridas por dia.
     #
-    # Llega hasta las 00 y no corta a las 21 porque la noche vende: el 19/08 la
-    # hora 23 fue la que MAS facturo del dia ($ 705.586), y la 21 la tercera.
-    # Cortar temprano dejaria el pico del dia sin cargar hasta la mañana.
+    # Sin lista de horas y sin cruces de medianoche justamente porque son todas:
+    # este cron no necesita traducirse de hora argentina a UTC. Si alguna vez se
+    # vuelve a recortar a un rango, ahi si hay que SUMARLE 3 a cada hora
+    # argentina para escribirla aca, y las que pasen de 21 caen al dia UTC
+    # siguiente (22 ART = 01 UTC).
     #
-    # Y NO HAY CORRIDAS DE MADRUGADA A PROPOSITO. No es solo que se venda poco:
-    # entre las 00 y las 08 no hay nadie mirando el tablero, asi que un dato de
-    # las 03 no lo lee nunca nadie -- la corrida de las 08 lo trae igual, porque
-    # todas las extracciones son ventanas moviles de varios dias y no
-    # incrementales. No se pierde nada, se dejan de pagar 4 corridas por dia.
+    # POR QUE LAS 24 Y NO SOLO EL HORARIO COMERCIAL. Antes estaba recortado a 9
+    # corridas para no pagar los minutos de Actions. Ese motivo desaparecio: el
+    # repo es publico y en repos publicos Actions no cobra minutos, asi que 24
+    # cuesta lo mismo que 9 -- nada.
     #
-    # El horario de aca es UTC y Argentina es UTC-3, asi que a cada hora hay que
-    # SUMARLE 3 para escribirla abajo. Las dos ultimas cruzan la medianoche de
-    # UTC (22 ART = 01 UTC, 00 ART = 03 UTC) y por eso van en su propia linea.
-    - cron: '20 11,13,15,17,19,21,23 * * *'
-    - cron: '20 1,3 * * *'
+    # Lo que se gana con la madrugada es chico pero real: a las 08 el tablero ya
+    # esta al dia en vez de esperar la primera corrida. Lo que se paga son 15
+    # llamadas mas por dia a las APIs de SIGMA, ML, Tienda Nube y Digip, y algo
+    # mas de trafico contra Supabase. Ninguna de las dos cosas esta cerca de
+    # ningun limite hoy, pero SI ESTE REPO SE VUELVE PRIVADO hay que volver a
+    # recortar: 24 corridas son ~5.000 min/mes contra 2.000 incluidos.
+    - cron: '20 * * * *'
 
   # El boton de "Run workflow" en la pestaña Actions. Sirve para forzar una
   # corrida despues de tocar algo, sin esperar al horario.
@@ -61,10 +63,17 @@ jobs:
     # primera del dia calendario y la que `primera_del_dia` engancha: el paso
     # caro cae en la hora en la que no lo espera nadie.
     #
-    # 45 es el techo para que una corrida colgada no se quede consumiendo
-    # minutos toda la noche. Sigue muy por debajo de las 2 horas de intervalo,
-    # asi que ni la corrida mas lenta puede pisar a la siguiente.
-    timeout-minutes: 45
+    # 55 y no 45: el orquestador tiene su PROPIO presupuesto de 50 minutos, y
+    # los dos topes tienen que estar en ese orden. Con el techo del job por
+    # debajo, GitHub mata el proceso de un hachazo antes de que el orquestador
+    # llegue a cortarse solo -- y ahi se pierde el paso de subir el log, que es
+    # justo el que hace falta para entender por que tardo tanto. Con 55, el
+    # presupuesto interno salta primero y la corrida termina ordenada.
+    #
+    # Que 55 sea menos que el intervalo de 60 no es lo que evita que dos
+    # corridas se pisen; de eso se encarga `concurrency` mas abajo, que aguanta
+    # igual si una corrida se atrasa en la cola.
+    timeout-minutes: 55
 
     env:
       # EL RUNNER CORRE EN UTC Y HAY 16 LUGARES EN EL CODIGO QUE USAN
