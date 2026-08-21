@@ -673,8 +673,19 @@ def main():
 
     if fallados:
         log(f"TERMINADO CON AVISOS ({duracion} min). Fallaron: {', '.join(fallados)}")
-    else:
-        log(f"========== ORQUESTADOR TERMINADO CON EXITO ({duracion} min) ==========")
+        # SALE CON ERROR, aunque el pipeline haya seguido de largo.
+        #
+        # Las dos cosas no se contradicen: que un paso no critico falle no tiene
+        # que frenar a los demas -- por eso arriba se sigue -- pero la corrida
+        # ENTERA no termino bien, y quien la lanzo tiene que enterarse.
+        #
+        # Corriendo a mano no hacia falta, porque el error estaba en pantalla.
+        # En GitHub Actions si: un `exit 0` pinta la corrida de verde y no manda
+        # ningun mail, asi que Mercado Libre podria estar sin cargar tres dias
+        # sin que nadie se entere. Con esto la corrida sale en rojo y avisa.
+        sys.exit(1)
+
+    log(f"========== ORQUESTADOR TERMINADO CON EXITO ({duracion} min) ==========")
 
 
 if __name__ == "__main__":
