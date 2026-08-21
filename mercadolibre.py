@@ -13,6 +13,8 @@ from dotenv import load_dotenv
 from errores_bd import es_tabla_inexistente
 from sqlalchemy import create_engine
 
+from esquema import asegurar_tablas
+
 # Cuanto se espera una respuesta de la API: (CONECTAR, LEER), en segundos.
 #
 # No es una optimizacion: sin `timeout`, `requests` espera PARA SIEMPRE si el
@@ -540,9 +542,18 @@ def guardar_foto_stock(df):
 
     Son ~3.800 filas por dia (1,4 M al ano), que para Postgres no es nada.
 
-    IDEMPOTENTE: borra las filas de hoy antes de insertar, asi correr el
-    catalogo dos veces el mismo dia no deja el dia duplicado. Y las dos cosas
-    van en una transaccion, para no dejar el dia a medio escribir.
+    IDEMPOTENTE DE VERDAD: la tabla tiene clave primaria (fecha, inventory_id),
+    asi que correr el catalogo dos veces el mismo dia no puede duplicar el dia
+    ni aunque falle algo en el medio.
+
+    ANTES NO LO ERA, Y ESE ERA EL PROBLEMA. La version anterior borraba el dia y
+    lo insertaba en una transaccion, pero si el DELETE fallaba -- y fallaba
+    siempre la primera vez, porque la tabla todavia no existia -- el `except`
+    reintentaba el INSERT SOLO, sin el borrado. En el arranque eso funcionaba de
+    casualidad (no habia nada que duplicar); cualquier otro fallo del DELETE
+    dejaba el dia dos veces y nada lo avisaba. La tabla ahora se crea con DDL
+    explicito en esquema.py, asi que el `except` que la creaba de rebote no hace
+    falta y el fallo, si lo hay, se ve.
     """
     if df.empty or "inventory_id" not in df.columns:
         print("  (sin stock que fotografiar)")
@@ -552,6 +563,20 @@ def guardar_foto_stock(df):
                             "not_available_quantity") if c in df.columns]
     foto = df[columnas].copy()
 
+    # Un inventario que la API no contesto NO se fotografia. Sus columnas vienen
+    # en nulo y guardarlo dejaria una foto que dice "cero disponible" para algo
+    # que probablemente tenia stock: exactamente el falso quiebre que todo esto
+    # viene a evitar. Se cuenta y se sigue.
+    if "error" in df.columns:
+        fallados = int(df["error"].notna().sum())
+        if fallados:
+            foto = foto[df["error"].isna()]
+            print(f"  ({fallados} inventarios sin respuesta: no entran a la foto)")
+
+    if foto.empty:
+        print("  (ningun inventario respondio: no se guarda foto)")
+        return
+
     # La fecha se toma en hora ARGENTINA y no la del sistema: el catalogo corre
     # a la manana, pero si algun dia corriera despues de las 21 un `date.today()`
     # en UTC ya seria el dia siguiente y la foto quedaria fechada mal.
@@ -560,22 +585,17 @@ def guardar_foto_stock(df):
     ).date()
     foto.insert(0, "fecha", hoy)
 
-    engine = _crear_engine()
+    engine = asegurar_tablas(_crear_engine())
     tabla = "ml_stock_full_historico"
-    try:
-        with engine.begin() as con:
-            borradas = con.exec_driver_sql(
-                f'DELETE FROM bronze."{tabla}" WHERE fecha = %(hoy)s', {"hoy": hoy}
-            ).rowcount
-            if borradas:
-                print(f"  (foto de {hoy} ya estaba: se reemplazan {borradas} filas)")
-            foto.to_sql(tabla, con, schema="bronze", if_exists="append", index=False)
-    except Exception as e:
-        print(f"  (no se pudo reemplazar la foto: {str(e)[:80]}... -> creando tabla)")
-        foto.to_sql(tabla, engine, schema="bronze", if_exists="append", index=False)
+    with engine.begin() as con:
+        borradas = con.exec_driver_sql(
+            f'DELETE FROM bronze."{tabla}" WHERE fecha = %(hoy)s', {"hoy": hoy}
+        ).rowcount
+        if borradas:
+            print(f"  (foto de {hoy} ya estaba: se reemplazan {borradas} filas)")
+        foto.to_sql(tabla, con, schema="bronze", if_exists="append", index=False)
 
     print(f"  Foto del {hoy}: bronze.{tabla} ({len(foto)} filas)")
-
 
 
 # ============================================================
