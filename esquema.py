@@ -26,7 +26,7 @@ Todo es `if not exists`: se puede correr las veces que haga falta.
 import os
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 load_dotenv()
 
@@ -267,7 +267,27 @@ def asegurar_tablas(engine=None):
     nuevo no necesita que nadie se acuerde de correr un DDL a mano."""
     engine = engine or crear_engine()
     with engine.begin() as con:
-        con.exec_driver_sql(DDL)
+        # `text(DDL)` y no `exec_driver_sql(DDL)`.
+        #
+        # `exec_driver_sql` manda la consulta CRUDA a psycopg2, que usa el
+        # estilo `pyformat`: cualquier `%` en el texto lo toma como marcador de
+        # parametro. Este DDL tiene cuatro, todos dentro de comentarios
+        # ("markup 10-18%", "56% del competidor"), y con eso alcanzaba para que
+        # la creacion del esquema muriera con
+        #
+        #   TypeError: immutabledict is not a sequence
+        #
+        # Rompio el paso `mercadolibre.py --catalogo` el 21/08/2026, que llama
+        # a esta funcion desde `guardar_foto_stock`.
+        #
+        # `text()` compila el SQL para el dialecto y escapa los `%` como `%%`,
+        # que psycopg2 devuelve como un `%` literal. Verificado: los cuatro
+        # quedan escapados y el comentario llega intacto a Postgres.
+        #
+        # Es seguro aca porque `text()` interpreta `:nombre` como parametro y
+        # este DDL no tiene NI UN `:`. Si algun dia se le agrega un cast `::` o
+        # un literal con dos puntos, hay que volver a mirar esto.
+        con.execute(text(DDL))
     return engine
 
 
