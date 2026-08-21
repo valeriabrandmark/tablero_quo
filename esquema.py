@@ -265,6 +265,31 @@ create table if not exists gold.fact_experimento (
 
     primary key (experimento, sku, semana)
 );
+
+
+-- ---------------------------------------------------------------------------
+--  EVOLUCION - columnas agregadas DESPUES de que la tabla ya existia
+-- ---------------------------------------------------------------------------
+--
+-- POR QUE HACE FALTA ESTA SECCION, Y POR QUE ES UNA TRAMPA SILENCIOSA
+--
+-- Todo lo de arriba es `create table if not exists`. Eso alcanza la primera
+-- vez, pero NO agrega una columna nueva a una tabla que YA existe. El
+-- `if not exists` ve la tabla, no hace nada, y `asegurar_tablas` termina
+-- diciendo "listo" -- o sea que el dia que se agrega una columna al DDL, quien
+-- ya tenia la tabla se queda sin ella y NADA lo avisa.
+--
+-- Paso el 21/08/2026 con `margen_por_unidad`. Se corrio `python esquema.py`,
+-- dijo "listo", y la columna no estaba. El consolidado habria fallado despues,
+-- lejos de la causa.
+--
+-- `add column if not exists` es idempotente, asi que estas lineas se dejan para
+-- siempre. REGLA: toda columna nueva va en DOS lugares, arriba en su
+-- `create table` (para quien arranca de cero) y aca abajo (para quien ya tenia
+-- la tabla). Si alguien se olvida de la segunda, lo levanta el chequeo de
+-- `_verificar_columnas`.
+alter table gold.fact_experimento
+    add column if not exists margen_por_unidad double precision;
 """
 
 
@@ -294,6 +319,65 @@ def _verificar_sin_parametros(ddl):
             "y hacen fallar la creacion del esquema. Ojo que agregarle un espacio "
             "adelante NO alcanza (`( :sku)` liga igual): hay que sacar los dos "
             "puntos, o duplicarlos si de verdad va un cast."
+        )
+
+
+# Las columnas que cada `create table` del DDL declara.
+_TABLA = re.compile(
+    r"create table if not exists\s+(\w+)\.(\w+)\s*\((.*?)\n\);", re.S | re.I
+)
+
+
+def _columnas_declaradas(ddl):
+    """{(schema, tabla): {columnas}} segun el DDL."""
+    declaradas = {}
+    for schema, tabla, cuerpo in _TABLA.findall(ddl):
+        columnas = set()
+        for linea in cuerpo.splitlines():
+            linea = linea.strip()
+            if not linea or linea.startswith("--"):
+                continue
+            if linea.lower().startswith(("primary key", "unique", "foreign key", "constraint")):
+                continue
+            nombre = re.match(r"(\w+)\s", linea)
+            if nombre:
+                columnas.add(nombre.group(1).lower())
+        declaradas[(schema.lower(), tabla.lower())] = columnas
+    return declaradas
+
+
+def _verificar_columnas(con, ddl):
+    """Explota si una tabla existe pero le falta alguna columna del DDL.
+
+    Es la red que cierra la trampa del `create table if not exists`. Sin esto,
+    agregar una columna al DDL y olvidarse del `alter` de la seccion EVOLUCION
+    no da ningun error: la creacion "funciona", y el problema aparece mucho mas
+    tarde y en otro lado.
+    """
+    faltantes = []
+    for (schema, tabla), columnas in _columnas_declaradas(ddl).items():
+        reales = {
+            fila[0].lower()
+            for fila in con.execute(
+                text(
+                    "select column_name from information_schema.columns "
+                    "where table_schema = :s and table_name = :t"
+                ),
+                {"s": schema, "t": tabla},
+            )
+        }
+        if not reales:
+            continue                      # la tabla no existe todavia; se acaba de crear
+        for columna in sorted(columnas - reales):
+            faltantes.append(f"{schema}.{tabla}.{columna}")
+
+    if faltantes:
+        raise RuntimeError(
+            "Estas columnas estan en el DDL pero no en la base: "
+            + ", ".join(faltantes)
+            + ". La tabla ya existia, asi que `create table if not exists` no las "
+            "agrego. Sumalas a la seccion EVOLUCION del DDL con "
+            "`alter table ... add column if not exists`."
         )
 
 
@@ -340,6 +424,7 @@ def asegurar_tablas(engine=None):
         # vez de confiar en que alguien lea este comentario.
         _verificar_sin_parametros(DDL)
         con.execute(text(DDL))
+        _verificar_columnas(con, DDL)
     return engine
 
 
