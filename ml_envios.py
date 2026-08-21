@@ -3,16 +3,26 @@ import json
 import time
 import requests
 import pandas as pd
-from datetime import date
+from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from mercadolibre import renovar_access_token
 
 load_dotenv()
 
+# `statement_timeout` propio, mas largo que el de la base.
+#
+# Supabase corta cualquier consulta a los 2 minutos, y esta bien que lo haga:
+# es la defensa contra una consulta suelta que cuelgue el tablero. Pero esto es
+# un proceso de fondo que corre solo, no una pagina esperando a un usuario, y
+# tenerlo cortado por el limite pensado para paginas no protege nada -- el
+# techo real de este paso lo pone el orquestador, que lo mata a los 45 minutos.
+ENGINE_OPCIONES = {"options": "-c statement_timeout=300000"}   # 5 min
+
 engine = create_engine(
     f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
-    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
+    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}",
+    connect_args=ENGINE_OPCIONES,
 )
 
 MI_USER_ID = int(os.getenv("ML_USER_ID"))
@@ -27,28 +37,52 @@ def to_date(valor):
 def extraer_envios():
     print("=== Extrayendo costos de envio de ML (retomando) ===")
 
-    # 1) Ordenes con envio desde el corte
-    ordenes = pd.read_sql("""
-        SELECT id, "shipping.id" AS shipping_id, date_created
-        FROM bronze.ml_ventas
-        WHERE status = 'paid' AND "shipping.id" IS NOT NULL
-    """, engine)
+    # 1) Los envios que FALTAN, resueltos en SQL y no en pandas.
+    #
+    # Antes esta consulta se traia las 38.000 ordenes pagadas desde mayo, con
+    # sus tres columnas, y recien despues filtraba en pandas por fecha y por
+    # cuales ya estaban bajadas. Traia 38.000 filas para quedarse con veinte.
+    #
+    # Eso reventaba contra el `statement_timeout`: `bronze.ml_ventas` pesa
+    # 108 MB y no tiene indices, asi que la consulta es un recorrido completo de
+    # la tabla. Con el cache frio -- justo lo que pasa despues de que
+    # mercadolibre.py la reescribe entera -- no entra en dos minutos y la corrida
+    # se cae. Paso el 21/08.
+    #
+    # Ahora el filtro va en la base: la fecha, y el `NOT EXISTS` contra lo que
+    # ya esta bajado. La consulta devuelve solo los que hay que pedirle a la API.
+    #
+    # El piso de fecha se compara como TEXTO, que es como esta guardada
+    # `date_created` (ISO-8601, que ordena igual como texto que como fecha), y va
+    # un dia antes del corte a proposito: el filtro fino sigue siendo el de
+    # pandas, que resuelve bien el huso. Sin ese dia de más, una orden del 5 de
+    # mayo a las 23 hs -- que en UTC ya es 6 de mayo -- se perderia.
+    piso = (FECHA_CORTE - timedelta(days=1)).isoformat()
+    ship = 'v."shipping.id"::bigint::text'
+
+    # `bronze.ml_envios` no existe en una instalacion nueva: la crea el primer
+    # to_sql. Si todavia no esta, no hay nada bajado que saltear.
+    with engine.connect() as con:
+        hay_envios = con.exec_driver_sql(
+            "select to_regclass('bronze.ml_envios') is not null").scalar()
+
+    filtro_ya_bajados = f"""
+          AND NOT EXISTS (SELECT 1 FROM bronze.ml_envios e
+                           WHERE e.shipping_id = {ship})""" if hay_envios else ""
+
+    ordenes = pd.read_sql(f"""
+        SELECT DISTINCT ON ({ship})
+               v.id, {ship} AS shipping_id_str, v.date_created
+        FROM bronze.ml_ventas v
+        WHERE v.status = 'paid'
+          AND v."shipping.id" IS NOT NULL
+          AND v.date_created >= :piso{filtro_ya_bajados}
+        ORDER BY {ship}
+    """, engine, params={"piso": piso})
+
     ordenes["fecha"] = ordenes["date_created"].apply(to_date)
-    ordenes = ordenes[ordenes["fecha"].notna() & (ordenes["fecha"] >= FECHA_CORTE)]
-    ordenes = ordenes.drop_duplicates(subset=["shipping_id"])
-
-    # 2) Ver cuales YA tenemos guardados (para saltearlos)
-    try:
-        ya = pd.read_sql("SELECT shipping_id FROM bronze.ml_envios", engine)
-        ya_hechos = set(ya["shipping_id"].astype(str))
-        print(f"Ya guardados: {len(ya_hechos)}")
-    except Exception:
-        ya_hechos = set()
-
-    # 3) Filtrar los que faltan
-    ordenes["shipping_id_str"] = ordenes["shipping_id"].astype(str).str.replace(r"\.0$", "", regex=True)
-    faltan = ordenes[~ordenes["shipping_id_str"].isin(ya_hechos)]
-    print(f"Total envios: {len(ordenes)} | Faltan: {len(faltan)}")
+    faltan = ordenes[ordenes["fecha"].notna() & (ordenes["fecha"] >= FECHA_CORTE)]
+    print(f"Faltan {len(faltan)} envios por pedirle a la API.")
 
     if len(faltan) == 0:
         print("Ya estan todos! Nada que hacer.")
