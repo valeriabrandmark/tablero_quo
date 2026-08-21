@@ -35,11 +35,22 @@ create index concurrently if not exists ml_ventas_envios_idx
   where "shipping.id" is not null;
 
 
--- 2) EL DEL TABLERO
+-- 2) EL DEL TABLERO -- Y LA RED CONTRA DUPLICADOS
 --
 -- El filtro por hora, el grafico de facturacion por hora y el corte del periodo
 -- anterior cruzan gold.fact_ventas contra esta tabla por `id`.
-create index concurrently if not exists ml_ventas_id_idx
+--
+-- Va UNIQUE a proposito. `id` es el numero de orden de Mercado Libre: no puede
+-- repetirse, y que se repita es exactamente el bug del 21/08/2026 -- 2.548
+-- ordenes duplicadas porque un DELETE fallo y el codigo inserto igual.
+--
+-- Con el indice unico eso deja de ser posible: si el borrado no se hizo, la
+-- insercion FALLA. Un paso que falla se ve en el log y se reintenta; uno que
+-- duplica en silencio no se ve hasta que alguien mira el tablero y desconfia.
+--
+-- Si ya existe el indice no-unico, hay que sacarlo primero:
+--   drop index if exists bronze.ml_ventas_id_idx;
+create unique index concurrently if not exists ml_ventas_id_uniq
   on bronze.ml_ventas (id);
 
 
