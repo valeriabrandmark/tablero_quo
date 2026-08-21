@@ -7,6 +7,8 @@ from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
+from errores_bd import es_tabla_inexistente
+
 load_dotenv()
 
 BASE = os.getenv("DIGIP_URL_BASE")
@@ -112,20 +114,46 @@ def extraer_preparaciones():
     with engine.begin() as con:
         con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
 
-    if codigos:
-        try:
-            with engine.begin() as con:
-                resultado = con.exec_driver_sql(
-                    "DELETE FROM bronze.digip_preparaciones WHERE pedido_codigo = ANY(%(codigos)s)",
-                    {"codigos": codigos}
-                )
-                print(f"  Filas borradas dentro de la ventana (se van a reemplazar): {resultado.rowcount}")
-        except Exception:
-            print("  (tabla bronze.digip_preparaciones no existe todavia, se va a crear)")
-
+    # SI NO HAY NADA CON QUE REEMPLAZAR, NO SE BORRA. Y el chequeo va ACA, antes
+    # del DELETE, que es donde estaba el problema.
+    #
+    # Este script se traga los errores de la API: cuando una llamada no devuelve
+    # 200 hace `errores += 1; continue`. Con Digip caido, entonces, las ~28
+    # llamadas de la ventana fallan, `df` queda vacio... y la version anterior
+    # igual borraba los 7 dias, no insertaba nada, imprimia "sin preparaciones
+    # nuevas" y terminaba EN VERDE. Una semana de logistica perdida sin que
+    # nada avise.
+    #
+    # Es la misma trampa que dejo a Tienda Nube sin datos desde el 12/06 y la
+    # que duplico 2.548 ordenes el 21/08: borrar primero y despues no tener con
+    # que reemplazar. Ver errores_bd.py.
+    #
+    # Quedarse con lo de la corrida anterior es estrictamente mejor: el dato
+    # queda viejo una corrida en vez de desaparecer, y la que viene lo arregla.
     if df.empty:
-        print("  (sin preparaciones nuevas en esta ventana)")
+        print("  (sin preparaciones en esta ventana: NO se toca lo que ya estaba)")
         return
+
+    # BORRAR E INSERTAR EN UNA SOLA TRANSACCION, igual que en digip.py. En dos
+    # transacciones separadas hay un instante en el que la ventana no existe, y
+    # el tablero de Logistica lee esta tabla en vivo.
+    try:
+        with engine.begin() as con:
+            resultado = con.exec_driver_sql(
+                "DELETE FROM bronze.digip_preparaciones WHERE pedido_codigo = ANY(%(codigos)s)",
+                {"codigos": codigos},
+            )
+            print(f"  Filas borradas dentro de la ventana (se van a reemplazar): {resultado.rowcount}")
+            df.to_sql("digip_preparaciones", con, schema="bronze", if_exists="append", index=False)
+        print("\nGuardado (ventana) en bronze.digip_preparaciones")
+        return
+    except Exception as e:
+        # SOLO se tolera que la tabla no exista (primera corrida en base limpia).
+        # Cualquier otro error explota: si el borrado no se hizo, insertar igual
+        # duplica la ventana entera.
+        if not es_tabla_inexistente(e):
+            raise
+        print("  bronze.digip_preparaciones no existe todavia -> la crea el to_sql.")
 
     df.to_sql("digip_preparaciones", engine, schema="bronze", if_exists="append", index=False)
     print("\nGuardado (ventana) en bronze.digip_preparaciones")

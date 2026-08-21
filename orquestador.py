@@ -257,11 +257,23 @@ PASOS = [
     {"comando": "digip_pedidos.py",            "intentos": 3, "espera": 60,
      "cada_horas": None, "critico": False, "escribe": "digip_pedidos", "techo": 10 * 60},
 
-    # Una llamada por pedido de la ventana: 9,8 min de mediana. Alimenta
-    # Logistica, que se mira por semana y no por hora. Va antes de
-    # prorratear_flete, que lo lee.
+    # PASA A CORRER EN CADA CORRIDA. Estaba en `cada_horas: 6` de cuando el
+    # script consultaba TODOS los pedidos historicos, uno por uno: 9,8 min de
+    # mediana, y espaciarlo era la unica forma de que no se comiera el
+    # presupuesto. Desde que filtra por la ventana movil son ~28 pedidos y
+    # tarda 33 SEGUNDOS medidos.
+    #
+    # Con 6 horas, el atraso se notaba: el 21/08 Digip fue creando las
+    # preparaciones entre las 10 y las 15 y el tablero de Logistica no las vio
+    # hasta la corrida de las 15:58, porque la anterior habia sido 09:57.
+    # Parecia un paso roto y era solo la frecuencia. Corriendo cada hora, el
+    # atraso maximo pasa de 6 horas a 1.
+    #
+    # El techo baja de 25 a 10 min por lo mismo: 25 era 45 veces la duracion
+    # real, y esa reserva se la sacaba al presupuesto de los pasos de abajo.
+    # 10 es el piso que fija el README.
     {"comando": "digip_preparaciones.py",      "intentos": 2, "espera": 60,
-     "cada_horas": 6, "critico": False, "escribe": "digip_preparaciones", "techo": 25 * 60},
+     "cada_horas": None, "critico": False, "escribe": "digip_preparaciones", "techo": 10 * 60},
 
     # Los fletes se miran por semana: dos veces por dia alcanza y sobra.
     {"comando": "prorratear_flete.py",         "intentos": 2, "espera": 30,
