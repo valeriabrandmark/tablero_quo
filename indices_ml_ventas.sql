@@ -54,6 +54,22 @@ create unique index concurrently if not exists ml_ventas_id_uniq
   on bronze.ml_ventas (id);
 
 
+-- 2b) EL DEL BORRADO DE LA VENTANA MOVIL
+--
+-- `guardar_ventana_en_bd` borra la ventana antes de reinsertarla. El filtro
+-- exacto es `date_created::date >= cutoff`, y un cast no lo puede servir ningun
+-- indice: ese DELETE recorria la tabla entera en CADA corrida. El 21/08/2026 se
+-- paso del statement_timeout y fue el principio del incidente que duplico 2.548
+-- ordenes.
+--
+-- El codigo ahora agrega un pre-filtro redundante `date_created >= piso` (un dia
+-- antes del cutoff, como texto) que SI usa este indice. El filtro exacto sigue
+-- decidiendo que se borra, asi que el resultado es identico -- solo que Postgres
+-- llega mirando una fraccion de la tabla en vez de toda.
+create index concurrently if not exists ml_ventas_date_created_idx
+  on bronze.ml_ventas (date_created);
+
+
 -- 3) EL DE LAS CANCELADAS
 --
 -- El panel de canceladas y el grafico apilado filtran por estado. Son el 11 %

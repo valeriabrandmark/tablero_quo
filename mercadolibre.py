@@ -11,9 +11,8 @@ import pandas as pd
 from datetime import date, timedelta
 from dotenv import load_dotenv
 from errores_bd import es_tabla_inexistente
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
-from esquema import asegurar_tablas
 
 # Cuanto se espera una respuesta de la API: (CONECTAR, LEER), en segundos.
 #
@@ -301,14 +300,35 @@ def guardar_ventana_en_bd(df, tabla, col_fecha, cutoff):
 
     try:
         with engine.begin() as con:
+            # El `>= piso` es REDUNDANTE con el `::date`, y esta puesto para
+            # que Postgres pueda usar el indice.
+            #
+            # `"{col_fecha}"::date` es un cast, y ningun indice puede servir un
+            # cast: el DELETE recorria los 108 MB de la tabla entera. El 21/08
+            # se paso del statement_timeout de Supabase y ese fue el principio
+            # del incidente que duplico 2.548 ordenes.
+            #
+            # El piso va UN DIA ANTES del cutoff porque `::date` se resuelve en
+            # UTC y puede correr una fila hasta un dia hacia adelante: una venta
+            # de las 21 hora argentina ya es del dia siguiente alla. Con el dia
+            # de colchon, el pre-filtro NUNCA deja afuera una fila que el filtro
+            # exacto si querria borrar -- y el exacto sigue decidiendo, asi que
+            # el conjunto borrado es identico al de antes.
+            piso = (cutoff - timedelta(days=1)).isoformat()
             porFecha = con.exec_driver_sql(
-                f'DELETE FROM bronze."{tabla}" WHERE "{col_fecha}"::date >= %(cutoff)s',
-                {"cutoff": cutoff},
+                f'DELETE FROM bronze."{tabla}" '
+                f'WHERE "{col_fecha}" >= %(piso)s '
+                f'  AND "{col_fecha}"::date >= %(cutoff)s',
+                {"piso": piso, "cutoff": cutoff},
             ).rowcount
             # El que realmente evita los duplicados: saca las que se van a
             # volver a insertar, sin importar en que dia las ubique el huso.
+            #
+            # Compara `id` contra un bigint[] y no `id::text` contra text[]: el
+            # cast tambien impedia usar el indice. Medido, con 3 ids: Index Scan
+            # de costo 5,35 contra un Seq Scan de 13.871.
             porId = con.exec_driver_sql(
-                f'DELETE FROM bronze."{tabla}" WHERE id::text = ANY(%(ids)s)',
+                f'DELETE FROM bronze."{tabla}" WHERE id = ANY(%(ids)s::bigint[])',
                 {"ids": ids},
             ).rowcount
             print(f"  Borradas antes de reinsertar: {porFecha} por ventana + {porId} por id")
@@ -527,6 +547,33 @@ def extraer_stock_full():
     guardar_foto_stock(df)
 
 
+# La foto diaria del stock en Full. La declara ACA y no en esquema.py porque es
+# del pipeline de ventas: la escribe `guardar_foto_stock` y la lee el tablero de
+# Stock Full. Cuando vivia en el DDL del experimento, este archivo tenia que
+# importar `asegurar_tablas` de alla, y el 21/08/2026 un `%` en un comentario de
+# ese DDL rompio `--catalogo`.
+#
+# La clave primaria (fecha, inventory_id) no es decoracion: es lo que garantiza
+# que la foto de un dia no pueda entrar dos veces aunque el borrado previo falle.
+DDL_FOTO_STOCK = """
+create table if not exists bronze.ml_stock_full_historico (
+    fecha                  date  not null,
+    inventory_id           text  not null,
+    total                  double precision,
+    available_quantity     double precision,
+    not_available_quantity double precision,
+    primary key (fecha, inventory_id)
+);
+"""
+
+
+def _asegurar_foto_stock(engine):
+    """Crea la tabla de la foto si falta. Barato y sin efecto si ya esta."""
+    with engine.begin() as con:
+        con.execute(text(DDL_FOTO_STOCK))
+    return engine
+
+
 def guardar_foto_stock(df):
     """Guarda la foto de HOY del stock Full en bronze.ml_stock_full_historico.
 
@@ -585,7 +632,7 @@ def guardar_foto_stock(df):
     ).date()
     foto.insert(0, "fecha", hoy)
 
-    engine = asegurar_tablas(_crear_engine())
+    engine = _asegurar_foto_stock(_crear_engine())
     tabla = "ml_stock_full_historico"
     with engine.begin() as con:
         borradas = con.exec_driver_sql(

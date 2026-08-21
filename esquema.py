@@ -150,16 +150,16 @@ create table if not exists bronze.ml_buybox_item (
 create index if not exists ix_buybox_abierto
     on bronze.ml_buybox_item (item_id) where hasta is null;
 
--- Foto diaria del stock en Full. Ya la escribia `guardar_foto_stock`, pero sin
--- tabla declarada: dependia de que pandas la creara al vuelo en el `except`.
-create table if not exists bronze.ml_stock_full_historico (
-    fecha                  date  not null,
-    inventory_id           text  not null,
-    total                  double precision,
-    available_quantity     double precision,
-    not_available_quantity double precision,
-    primary key (fecha, inventory_id)
-);
+-- `bronze.ml_stock_full_historico` NO esta aca, aunque parezca que corresponde.
+--
+-- La escribe `mercadolibre.py` (guardar_foto_stock) y la lee el tablero de
+-- Stock Full: es del pipeline de ventas, no del experimento. Estuvo un tiempo
+-- en este DDL, y eso obligo a `mercadolibre.py` a importar `asegurar_tablas` de
+-- aca -- o sea que el pipeline de ventas pasaba a depender del experimento.
+--
+-- El 21/08/2026 eso costo caro: un `%` en un comentario de este archivo rompio
+-- `mercadolibre.py --catalogo`, que no tiene nada que ver con elasticidad.
+-- Cada uno crea lo suyo.
 
 
 -- ---------------------------------------------------------------------------
