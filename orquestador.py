@@ -43,13 +43,13 @@ Uso:
 import argparse
 import datetime
 import json
+import estado
 import os
 import subprocess
 import sys
 import time
 
 ARCHIVO_LOG = "orquestador_log.txt"
-ARCHIVO_ESTADO = "estado_pasos.json"
 
 # TECHOS DE TIEMPO
 # ----------------
@@ -321,22 +321,25 @@ def log(msg):
 # pasada, en vez de esperar a un horario fijo que ya paso.
 
 def cargar_estado():
-    ruta = os.path.join(CARPETA, ARCHIVO_ESTADO)
-    if not os.path.exists(ruta):
-        return {}
+    """Cuando corrio bien cada paso por ultima vez. Vive en Postgres.
+
+    Estaba en `estado_pasos.json`, al lado del script, y eso ataba el
+    orquestador a una maquina: un runner de GitHub Actions arranca con el disco
+    limpio y correria TODOS los pasos en cada corrida. La primera vez que se
+    llama, `estado.leer` importa el archivo viejo si todavia esta, asi que no se
+    pierde lo que ya habia. Ver estado.py.
+    """
     try:
-        with open(ruta, encoding="utf-8") as f:
-            return json.load(f)
-    except (ValueError, OSError):
-        # Archivo corrupto: se arranca de cero y todos los pasos corren una vez.
-        log(f"AVISO: {ARCHIVO_ESTADO} ilegible, se ignora y se regenera.")
+        return estado.leer("pasos", {})
+    except Exception as e:
+        # Sin estado se arranca de cero: todos los pasos corren una vez. Es
+        # ruidoso pero no rompe nada, y es mejor que abortar la corrida entera.
+        log(f"AVISO: no se pudo leer el estado ({str(e)[:80]}). Corren todos.")
         return {}
 
 
-def guardar_estado(estado):
-    ruta = os.path.join(CARPETA, ARCHIVO_ESTADO)
-    with open(ruta, "w", encoding="utf-8") as f:
-        json.dump(estado, f, indent=2, ensure_ascii=False)
+def guardar_estado(nuevo):
+    estado.guardar("pasos", nuevo)
 
 
 def registro(estado, comando):

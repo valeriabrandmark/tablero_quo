@@ -2,6 +2,7 @@ import datetime
 import itertools
 import os
 import json
+import estado
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -61,7 +62,6 @@ _CANDADO_TOKEN = threading.Lock()
 
 load_dotenv()
 
-ARCHIVO_TOKENS = "ml_tokens.json"
 USER_ID = os.getenv("ML_USER_ID")
 # Segundos de espera entre llamada y llamada a la API de Mercado Libre.
 #
@@ -88,19 +88,28 @@ WINDOW_DAYS = 7
 
 
 def cargar_tokens():
-    if not os.path.exists(ARCHIVO_TOKENS):
+    """El token de Mercado Libre. Vive en Postgres, no en un archivo.
+
+    ML entrega un refresh_token NUEVO en cada renovacion y anula el anterior,
+    asi que con el token en un archivo local dos maquinas se pisan: la que
+    renueva deja a la otra afuera. Paso el 20/08/2026 -- correr el orquestador
+    desde la notebook dejo a la PC de la oficina sin poder autenticarse.
+
+    En la base hay uno solo y el problema desaparece. La primera vez,
+    `estado.leer` importa `ml_tokens.json` si todavia esta al lado del script.
+    """
+    tokens = estado.leer("ml_tokens")
+    if not tokens:
         raise RuntimeError(
-            f"No existe {ARCHIVO_TOKENS} en {os.getcwd()}.\n"
-            "  Ese archivo NO se versiona (esta en .gitignore) y es de cada maquina:\n"
-            "  un git clone no lo trae. Hay que autorizar la app con ml_token.py."
+            "No hay token de Mercado Libre guardado (ops.estado['ml_tokens'])\n"
+            "  ni un ml_tokens.json que importar. Hay que autorizar la app con\n"
+            "  ml_token.py, que ahora lo guarda directo en la base."
         )
-    with open(ARCHIVO_TOKENS) as f:
-        return json.load(f)
+    return tokens
 
 
 def guardar_tokens(tokens):
-    with open(ARCHIVO_TOKENS, "w") as f:
-        json.dump(tokens, f, indent=2)
+    estado.guardar("ml_tokens", tokens)
 
 
 def renovar_access_token():
