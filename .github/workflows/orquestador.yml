@@ -1,0 +1,127 @@
+name: Orquestador
+
+# ============================================================================
+#  El pipeline de datos, corriendo en GitHub en vez de en una PC de la oficina.
+#
+#  Antes esto era una tarea del Programador de Windows. Eso significaba que si
+#  la maquina estaba apagada, dormida, con la sesion cerrada o con el "detener
+#  si el equipo empieza a usar la bateria" tildado, el tablero se quedaba viejo
+#  sin que nadie se enterara. Paso mas de una vez.
+# ============================================================================
+
+on:
+  # Los horarios van en UTC, SIEMPRE. Argentina es UTC-3, asi que hay que
+  # restarle 3 a la hora de aca para escribirla en el cron.
+  #
+  # El minuto 20 y no el 0 es a proposito: la cola de GitHub se llena en las
+  # horas redondas -- todo el mundo programa a las 0 -- y ahi los atrasos son
+  # de media hora. En el minuto 20 arranca mucho mas cerca de lo pedido.
+  schedule:
+    # Cada 2 horas de 8 a 00 hora argentina: 08, 10, 12, 14, 16, 18, 20 y 22,
+    # mas el cierre a las 00. Son 9 corridas por dia.
+    #
+    # Llega hasta las 00 y no corta a las 21 porque la noche vende: el 19/08 la
+    # hora 23 fue la que MAS facturo del dia ($ 705.586), y la 21 la tercera.
+    # Cortar temprano dejaria el pico del dia sin cargar hasta la mañana.
+    #
+    # Y NO HAY CORRIDAS DE MADRUGADA A PROPOSITO. No es solo que se venda poco:
+    # entre las 00 y las 08 no hay nadie mirando el tablero, asi que un dato de
+    # las 03 no lo lee nunca nadie -- la corrida de las 08 lo trae igual, porque
+    # todas las extracciones son ventanas moviles de varios dias y no
+    # incrementales. No se pierde nada, se dejan de pagar 4 corridas por dia.
+    #
+    # El horario de aca es UTC y Argentina es UTC-3, asi que a cada hora hay que
+    # SUMARLE 3 para escribirla abajo. Las dos ultimas cruzan la medianoche de
+    # UTC (22 ART = 01 UTC, 00 ART = 03 UTC) y por eso van en su propia linea.
+    - cron: '20 11,13,15,17,19,21,23 * * *'
+    - cron: '20 1,3 * * *'
+
+  # El boton de "Run workflow" en la pestaña Actions. Sirve para forzar una
+  # corrida despues de tocar algo, sin esperar al horario.
+  workflow_dispatch:
+
+# UNA CORRIDA POR VEZ. Es lo mas importante de este archivo.
+#
+# Dos orquestadores simultaneos escriben las mismas tablas: uno borra la ventana
+# movil mientras el otro la esta insertando. El 21/08/2026 una version de eso
+# dejo 2.548 ordenes duplicadas.
+#
+# `cancel-in-progress: false` porque cancelar es PEOR que esperar: mataria una
+# corrida a mitad de camino, con la mitad de los pasos hechos. La nueva espera
+# a que termine la anterior.
+concurrency:
+  group: orquestador
+  cancel-in-progress: false
+
+jobs:
+  correr:
+    runs-on: ubuntu-latest
+    # Una corrida normal son ~6-8 min, y ~21 min la que le toca el catalogo de
+    # Mercado Libre. Con este horario esa es SIEMPRE la de las 00:20, que es la
+    # primera del dia calendario y la que `primera_del_dia` engancha: el paso
+    # caro cae en la hora en la que no lo espera nadie.
+    #
+    # 45 es el techo para que una corrida colgada no se quede consumiendo
+    # minutos toda la noche. Sigue muy por debajo de las 2 horas de intervalo,
+    # asi que ni la corrida mas lenta puede pisar a la siguiente.
+    timeout-minutes: 45
+
+    env:
+      # EL RUNNER CORRE EN UTC Y HAY 16 LUGARES EN EL CODIGO QUE USAN
+      # `date.today()` PARA ARMAR LA VENTANA MOVIL.
+      #
+      # Sin esto, entre las 21 y la medianoche de Argentina el runner ya esta en
+      # el dia siguiente y las ventanas se corren un dia entero. Python respeta
+      # esta variable en Linux -- verificado: sin TZ da 15:13, con TZ da 12:13.
+      TZ: America/Argentina/Buenos_Aires
+
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASS: ${{ secrets.DB_PASS }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+
+      SIGMA_TOKEN: ${{ secrets.SIGMA_TOKEN }}
+      SIGMA_URL_CLIENTE: ${{ secrets.SIGMA_URL_CLIENTE }}
+      SIGMA_ID_CLIENTE: ${{ secrets.SIGMA_ID_CLIENTE }}
+      SIGMA_BASEALIAS: ${{ secrets.SIGMA_BASEALIAS }}
+
+      ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+      ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+      ML_REDIRECT_URI: ${{ secrets.ML_REDIRECT_URI }}
+      ML_USER_ID: ${{ secrets.ML_USER_ID }}
+
+      TN_STORE_ID: ${{ secrets.TN_STORE_ID }}
+      TN_TOKEN: ${{ secrets.TN_TOKEN }}
+      TN_USER_AGENT: ${{ secrets.TN_USER_AGENT }}
+
+      DIGIP_API_KEY: ${{ secrets.DIGIP_API_KEY }}
+      DIGIP_URL_BASE: ${{ secrets.DIGIP_URL_BASE }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          # Cachea las dependencias entre corridas. Sin esto cada corrida se
+          # baja pandas y numpy de nuevo: mas de un minuto de los seis, pagado.
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Correr el orquestador
+        run: python orquestador.py
+
+      # El log queda igual en la consola de Actions, pero como archivo se puede
+      # bajar y comparar con el de otra corrida. Se guarda tambien cuando el
+      # paso anterior fallo, que es justo cuando mas se necesita.
+      - name: Guardar el log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: log-${{ github.run_number }}
+          path: orquestador_log.txt
+          retention-days: 14
+          if-no-files-found: ignore
