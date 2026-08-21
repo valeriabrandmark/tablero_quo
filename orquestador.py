@@ -233,34 +233,20 @@ PASOS = [
      "cada_horas": None, "critico": False,
      "escribe": "ml_estado_item, ml_precio_item", "techo": 10 * 60},
 
-    # LOS DOS PASOS DEL EXPERIMENTO VAN PEGADOS AL PULSO, Y NO AL FINAL.
+    # ACA ESTABAN `ml_pulso.py --solo-buybox` Y `experimento.py --consolidar`.
+    # Se sacaron el 21/08/2026 porque el tablero de elasticidad dejo de leer lo
+    # que escribian.
     #
-    # Estaban ultimos y se salteaban en la primera corrida del dia -- la unica
-    # en la que disparan tambien el catalogo de Sigma, digip_preparaciones y el
-    # catalogo de ML. Simulando esa corrida contra el presupuesto de 50 min, los
-    # dos quedaban afuera por unos pocos minutos.
+    # La pantalla se rehizo: la banda de margen de cada venta ya no sale de una
+    # tabla de asignacion sino de LA VENTA MISMA -- cada linea trae su precio y
+    # su costo, asi que el margen con el que se vendio se calcula solo. Sin
+    # asignacion no hay `gold.experimento_markup` que consultar, y sin eso
+    # `--consolidar` escribia una tabla que nadie abre, y `--solo-buybox` no
+    # tenia para que publicaciones pedir la caja: devolvia "no hay experimento
+    # activo" en cada corrida.
     #
-    # No se perdian (los saltea sin marcarlos como OK, asi que entran en la
-    # corrida siguiente), pero ponerlos aca es mejor por dos motivos: leen
-    # justo lo que el pulso acaba de escribir, y le ceden el lugar a los pasos
-    # pesados que corren UNA vez por dia, que son los que se pueden permitir
-    # esperar una hora.
-
-    # La caja de compra: una llamada por publicacion, sin multiget. Cada 6 h y
-    # no en cada corrida porque son ~3.900 llamadas por pasada (de los 4.360 SKU
-    # del experimento, 3.880 estan en catalogo), y es una covariable que se lee
-    # por semana, no el dato principal. Ver ml_pulso.py.
-    {"comando": "ml_pulso.py --solo-buybox",   "intentos": 2, "espera": 60,
-     "cada_horas": 6, "critico": False, "escribe": "ml_buybox_item",
-     "techo": 15 * 60},
-
-    # El consolidado del experimento. Al reves que el pulso, este SI puede
-    # saltearse sin costo: no observa nada, solo vuelve a calcular
-    # gold.fact_experimento a partir de los tramos ya guardados. Si una corrida
-    # se lo saltea, la siguiente lo recalcula igual y con mas datos.
-    {"comando": "experimento.py --consolidar", "intentos": 2, "espera": 30,
-     "cada_horas": 6, "critico": False, "escribe": "gold.fact_experimento",
-     "techo": 10 * 60},
+    # El pulso de arriba SI sigue, y es el que importa: de sus tramos salen los
+    # dias sin stock, que es lo que permite descontar un resultado falso.
 
     # Stock de DIGIP: dos llamadas, segundos. El stock se mueve durante el dia,
     # asi que va en cada corrida.

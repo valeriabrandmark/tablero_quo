@@ -1,4 +1,37 @@
-"""Medidor de elasticidad de precios en Mercado Libre.
+"""FUERA DE USO desde el 21/08/2026. No lo corre nadie.
+
+El tablero de elasticidad se rehizo y ya no necesita nada de este archivo.
+
+QUE CAMBIO
+Este script asignaba a cada articulo una banda de markup por semana (un cuadrado
+latino de 3 grupos x 3 semanas) y despues consolidaba los resultados contra esa
+asignacion. La idea era controlar el experimento desde aca.
+
+No hacia falta: CADA VENTA YA TRAE SU PRECIO Y SU COSTO, asi que el margen con
+el que se vendio se calcula solo, y con el margen se sabe en que banda cayo. El
+tablero deduce la banda de la venta y no la busca en ninguna tabla. Quien decide
+el precio es el sistema de precios; el tablero solo observa el resultado.
+
+Y ademas la asignacion tenia un problema escondido: si el precio asignado no se
+cargaba, o se cargaba tarde, o el repricer lo movia, la tabla decia una cosa y
+la realidad otra -- y el tablero le hubiera creido a la tabla.
+
+QUE SIGUE VIVO
+`ml_pulso.py`, que es el que guarda los tramos de disponibilidad. De ahi salen
+los dias sin stock, que es lo que permite descontar un resultado falso: un
+articulo que vendio poco no vendio poco por caro si estuvo cuatro dias quebrado.
+
+QUE QUEDA EN LA BASE
+`gold.experimento_markup` tiene 13.080 filas de una corrida de `--asignar` del
+21/08. No molestan y no las lee nadie. `gold.fact_experimento` quedo vacia.
+
+Se deja el archivo en vez de borrarlo por si algun dia se quiere volver a un
+experimento controlado -- el algebra de intervalos y el cuadrado latino estan
+probados. Pero NO esta en el orquestador y correrlo no aporta nada.
+
+---------------------------------------------------------------------------
+
+Medidor de elasticidad de precios en Mercado Libre.
 
 QUE ES EL EXPERIMENTO
 Los articulos se reparten en tres grupos. Cada grupo pasa una semana en cada
