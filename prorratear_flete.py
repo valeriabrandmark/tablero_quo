@@ -38,6 +38,11 @@ def construir_fact_ventas_flete():
     """, engine)
     print(f"  Lineas de distri: {len(fact)}")
 
+    # Identidad de la linea ANTES de cualquier merge. Con esto se puede saber
+    # despues si dos renglones son la misma linea repetida por un join o dos
+    # lineas de verdad. Ver el drop_duplicates del paso 4.
+    fact["_fila_id"] = range(len(fact))
+
     # --- 1b) Traer volumetria por SKU (litros por unidad, cargados en Sigma) ---
     print("Leyendo volumetria (litrosUnitarios) de sigma_articulos...")
     vol = pd.read_sql('SELECT id AS sku, "litrosUnitarios" FROM bronze.sigma_articulos', engine)
@@ -69,6 +74,30 @@ def construir_fact_ventas_flete():
     merged = fact.merge(
         prep, left_on="nro_orden_str", right_on="pedido_codigo", how="left"
     )
+
+    # EL MERGE PUEDE MULTIPLICAR LAS LINEAS, Y ESO INFLA EL FLETE.
+    #
+    # `prep` tiene una fila por (preparacion_id, pedido_codigo). Si el mismo par
+    # aparece dos veces, este merge devuelve la linea de venta DUPLICADA, y de
+    # ahi para abajo todo la cuenta dos veces.
+    #
+    # No es hipotetico: el 22/08 quedaron 741 lineas con un flete estimado del
+    # 50 % de la venta en vez del 5 % -- $ 8,53 M cargados contra $ 853 mil que
+    # correspondian, $ 7,68 M de flete fantasma sobre $ 17 M de venta. El origen
+    # fueron filas repetidas en bronze.digip_preparaciones, que a su vez salieron
+    # del DELETE que se tragaba el timeout e insertaba igual (el mismo bug que
+    # duplico 2.548 ordenes de ML el 21/08; arreglado en digip_preparaciones.py).
+    #
+    # Aquel arreglo evita que se vuelvan a generar duplicados. Este evita que un
+    # duplicado, venga de donde venga, se convierta en plata mal contada.
+    #
+    # Se deduplica por (linea, preparacion): si una linea entra de verdad en dos
+    # preparaciones distintas -- envio partido -- las dos filas se conservan.
+    antes = len(merged)
+    merged = merged.drop_duplicates(subset=["_fila_id", "preparacion_id"])
+    if len(merged) < antes:
+        print(f"  Aviso: {antes - len(merged)} filas repetidas por preparaciones "
+              f"duplicadas. Se descartan (si no, el flete se contaria de mas).")
 
     # Aviso informativo: un mismo (nro_orden, sku) puede repetirse porque Sigma
     # cargo el mismo articulo en 2 renglones de factura (normal en el ERP).
@@ -118,6 +147,7 @@ def construir_fact_ventas_flete():
             flete_linea_calc = None  # se recalcula como estimado al reunir, si hace falta
 
         lineas.append({
+            "_fila_id": row["_fila_id"],
             "nro_orden": row["nro_orden_str"],
             "sku": row["sku"],
             "cantidad": row["cantidad"],
@@ -139,9 +169,20 @@ def construir_fact_ventas_flete():
         else:
             # si algun renglon no tuvo flete real, la combinacion entera cae a estimado
             # (evita mezclar "un poco real + un poco estimado" en la misma linea)
-            cant_total = grupo["cantidad"].sum()
-            precio_neto = grupo["precio_neto"].iloc[0]
-            flete_final = (precio_neto or 0) * (cant_total or 0) * 0.05
+            # EL 5 % VA SOBRE LA VENTA NETA DE LA LINEA, sumada renglon por
+            # renglon. Antes era `precio_neto.iloc[0] * cantidad.sum()`, que
+            # toma el precio del PRIMER renglon y lo multiplica por la cantidad
+            # de TODOS. Eso da bien solo si todos los renglones valen lo mismo;
+            # con un renglon bonificado a $ 0, o con la linea repetida por el
+            # merge, se dispara.
+            #
+            # `drop_duplicates` por las dudas: si algo volviera a repetir la
+            # linea, el 5 % se calcula igual una sola vez.
+            unicas = grupo.drop_duplicates(subset=["_fila_id"])
+            venta_linea = (
+                unicas["precio_neto"].fillna(0) * unicas["cantidad"].fillna(0)
+            ).sum()
+            flete_final = venta_linea * 0.05
             tiene_real = False
 
         claves_validas = [c for c in grupo["clave_fila"] if pd.notna(c)]
