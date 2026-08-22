@@ -127,6 +127,33 @@ def piso_sql():
     El filtro EXACTO lo sigue haciendo Python con `if f < CUTOFF: continue`, que
     ya convierte a hora argentina. Este piso no decide que entra: solo evita
     traer de la base lo que se va a tirar igual.
+
+    COMO SE COMPARA, Y POR QUE IMPORTA TANTO
+    Se compara la columna DERECHA contra el piso -- `fecha >= '2026-08-14'` --
+    y NO `left(fecha, 10) >= '2026-08-14'`.
+
+    Las dos dan exactamente el mismo resultado, porque las fechas de bronze son
+    texto ISO-8601 de ancho fijo ('2026-08-21T12:06:26.000-04:00') y en ese
+    formato el orden alfabetico ES el orden cronologico: cualquier cosa que
+    empiece con '2026-08-14' es mayor que '2026-08-14' a secas, y '2026-08-13T..'
+    es menor. Verificado sobre las tres tablas: 3.278 / 864 / 3 filas de un lado
+    y del otro.
+
+    Pero para Postgres NO son lo mismo. `left(columna, 10)` es una funcion
+    aplicada a la columna, y eso hace que el indice sobre esa columna no se pueda
+    usar: no hay mas remedio que leer la tabla entera.
+
+    El 22/08/2026 eso tumbo el pipeline. Con `left()`, la consulta de ml_ventas
+    leia 118 MB de DISCO por llamada -- la tabla completa, incluido el JSON de
+    `order_items` -- y como corre en un loop paginado, varias veces por corrida.
+    Eran el 89,8 % de todo el I/O de la base. Mientras corria, cualquier otra
+    consulta se pasaba del statement_timeout de 2 minutos: `SELECT id,
+    "ivaPorcentual" FROM sigma_articulos` (8.000 filas) llego a tardar 97
+    segundos, y un INSERT en ops.estado (3 filas) tardo 52. Doce corridas
+    seguidas en rojo.
+
+    Sacando el left(), la misma consulta pasa a Index Scan: 6,7 ms y 8 MB de
+    cache. Medido con EXPLAIN (ANALYZE, BUFFERS).
     """
     return (CUTOFF - timedelta(days=1)).isoformat()
 
@@ -219,7 +246,9 @@ def construir_fact_ventas():
                "comprobanteTipo"
         FROM bronze.sigma_ventas
         WHERE empresa IN ('0001','0002','0003','0004')
-          AND left(fecha, 10) >= '{desde}'
+          -- Sin left(), por lo mismo. Aca ademas es literalmente un no-op:
+          -- sigma_ventas.fecha ya viene como 'YYYY-MM-DD' pelado, 10 caracteres.
+          AND fecha >= '{desde}'
     """.format(desde=piso_sql()), engine)
 
     for _, r in sigma.iterrows():
@@ -304,7 +333,7 @@ def construir_fact_ventas():
                cliente_nombre, {col_envio}
         FROM bronze.tn_pedidos_items
         WHERE estado_pago = 'paid' AND estado <> 'cancelled'
-          AND left(fecha, 10) >= '{piso_sql()}'
+          AND fecha >= '{piso_sql()}'
     """, engine)
 
     # `envio_costo_tienda` es lo que paga LA TIENDA por el flete, y viene en la
@@ -377,7 +406,10 @@ def construir_fact_ventas():
             SELECT id, date_created, order_items, "buyer.nickname"
             FROM bronze.ml_ventas
             WHERE status IN ('paid', 'partially_refunded')
-              AND left(date_created, 10) >= '{piso_sql()}'
+              -- SIN left(). Ver la nota de arriba de piso_sql(): envolver la
+              -- columna en una funcion tira el indice a la basura, y esta
+              -- consulta lee `order_items`, que es el JSON entero de la orden.
+              AND date_created >= '{piso_sql()}'
             ORDER BY id
             LIMIT {LOTE} OFFSET {offset}
         """, engine)
