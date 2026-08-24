@@ -193,12 +193,25 @@ def construir_fact_ventas_flete():
             "clave_fila": clave_repr,
             "flete_prorrateado": round(float(flete_final), 2),
             "tiene_flete_real": bool(tiene_real),
+            # Cuantos renglones de fact_ventas se juntaron en esta fila. Es el
+            # divisor que necesita el tablero: alla el join va por
+            # (nro_orden, sku), asi que una linea facturada en dos comprobantes
+            # trae el flete DOS veces y lo suma de mas. Con este numero cada
+            # renglon se lleva su parte y el total cierra.
+            "lineas_venta": int(grupo["_fila_id"].nunique()),
         })
 
     df_resultado = pd.DataFrame(resultado)
     print(f"\nTotal lineas procesadas: {len(df_resultado)}")
     print(f"  Con flete real prorrateado: {int(df_resultado['tiene_flete_real'].sum())}")
     print(f"  Con estimacion 5%: {int((~df_resultado['tiene_flete_real']).sum())}")
+    # Control: la suma de los divisores tiene que dar los renglones leidos al
+    # principio. Si no da, alguna linea quedo sin representar y el flete que
+    # muestre el tablero va a estar corto.
+    representados = int(df_resultado["lineas_venta"].sum())
+    print(f"  Renglones de venta representados: {representados} de {len(fact)}")
+    if representados != len(fact):
+        print(f"  OJO: faltan {len(fact) - representados} renglones sin flete asignado")
 
     # --- 8) Guardar en gold.fact_ventas_flete (tabla aparte, no toca fact_ventas) ---
     with engine.begin() as con:
@@ -209,8 +222,16 @@ def construir_fact_ventas_flete():
                 clave_fila text,
                 flete_prorrateado numeric,
                 tiene_flete_real boolean,
+                lineas_venta integer,
                 fecha_calculo timestamptz DEFAULT now()
             );
+        """)
+        # La tabla ya existe en produccion sin esta columna, y mas abajo se
+        # escribe con to_sql(if_exists="append"), que no crea columnas: sin el
+        # ALTER el INSERT falla.
+        con.exec_driver_sql("""
+            ALTER TABLE gold.fact_ventas_flete
+            ADD COLUMN IF NOT EXISTS lineas_venta integer;
         """)
 
     # DELETE + APPEND en una sola transaccion (no `replace`, que hace DROP y
