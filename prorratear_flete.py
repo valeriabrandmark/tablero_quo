@@ -185,6 +185,21 @@ def construir_fact_ventas_flete():
             flete_final = venta_linea * 0.05
             tiene_real = False
 
+        # Venta anulada: la factura y su nota de credito se cancelan y no queda
+        # nada vendido. El flete tiene que ser 0, no importa por que camino se
+        # haya calculado arriba. Si no, la linea queda con costo de transporte
+        # sobre una venta de $ 0 y la rentabilidad se va a menos infinito.
+        #
+        # Las devoluciones PARCIALES no entran aca a proposito: ahi si quedaron
+        # unidades vendidas, y como el prorrateo usa la cantidad con signo, el
+        # flete que les toca ya sale proporcional a lo que quedo. Una devolucion
+        # parcial tiene que mostrar rentabilidad baja, no cero.
+        unidades_netas = (
+            grupo.drop_duplicates(subset=["_fila_id"])["cantidad"].fillna(0).sum()
+        )
+        if unidades_netas == 0:
+            flete_final = 0.0
+
         claves_validas = [c for c in grupo["clave_fila"] if pd.notna(c)]
         clave_repr = ", ".join(sorted(set(claves_validas))) if claves_validas else None
         resultado.append({
@@ -210,6 +225,8 @@ def construir_fact_ventas_flete():
     # muestre el tablero va a estar corto.
     representados = int(df_resultado["lineas_venta"].sum())
     print(f"  Renglones de venta representados: {representados} de {len(fact)}")
+    anuladas = int((df_resultado["flete_prorrateado"] == 0).sum())
+    print(f"  Lineas con flete 0 (anuladas o sin costo): {anuladas}")
     if representados != len(fact):
         print(f"  OJO: faltan {len(fact) - representados} renglones sin flete asignado")
 
