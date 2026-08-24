@@ -13,6 +13,16 @@ load_dotenv()
 
 CARPETA_COSTOS = "costos_mensuales"
 
+# Columna K de la hoja "Ofertas": el descuento que ponemos nosotros, aparte del
+# que da el proveedor (columna J, DESCUENTO TOTAL PROVEEDOR).
+COL_DESC_PROPIO = "DESC PROPIO"
+
+# Sube de numero cada vez que cambia lo que esta funcion escribe (una columna
+# nueva, otra cuenta). Entra en la huella para que --si-cambio recargue una vez
+# aunque ningun Excel se haya tocado: sin esto, la columna agregada hoy queda
+# vacia hasta que alguien edite un archivo.
+VERSION_ESQUEMA = 2
+
 engine = create_engine(
     f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
     f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
@@ -91,8 +101,12 @@ def huella_de_los_excel():
     Se usan tamano + fecha de modificacion y no el contenido entero porque los
     cuatro archivos pesan 11 MB juntos: leerlos para hashearlos costaria casi lo
     mismo que procesarlos, que es lo que se quiere evitar.
+
+    Ademas entra VERSION_ESQUEMA, porque un cambio en este script tambien
+    cambia lo que hay que escribir aunque los Excel esten iguales.
     """
     h = hashlib.sha256()
+    h.update(f"v{VERSION_ESQUEMA}|".encode())
     for archivo in sorted(glob.glob(os.path.join(CARPETA_COSTOS, "*.xlsx"))):
         st = os.stat(archivo)
         h.update(f"{os.path.basename(archivo)}:{st.st_size}:{int(st.st_mtime)}|".encode())
@@ -122,6 +136,16 @@ def meses_disponibles():
     return sorted(
         os.path.splitext(os.path.basename(a))[0]
         for a in glob.glob(os.path.join(CARPETA_COSTOS, "*.xlsx"))
+    )
+
+
+def asegurar_columnas(con):
+    """La tabla se escribe con to_sql(if_exists="append"), que no crea columnas
+       nuevas: si el DataFrame trae una que la tabla no tiene, el INSERT falla.
+       Por eso cada columna agregada despues de la creacion original va aca."""
+    con.exec_driver_sql(
+        "ALTER TABLE bronze.costos_historicos "
+        "ADD COLUMN IF NOT EXISTS desc_propio_pct double precision DEFAULT 0"
     )
 
 
@@ -169,21 +193,36 @@ def cargar_costos(mes=None):
         print(f"    Costos: {len(costos)} SKUs")
 
         # --- Pestaña OFERTAS: encabezados en fila 1 (header=0) ---
-        # Columna D = SKU, Columna J = DESCUENTO TOTAL PROVEEDOR
+        # Columna D = SKU, Columna J = DESCUENTO TOTAL PROVEEDOR, K = DESC PROPIO
         dfo = leer_hoja_flexible(archivo, "Ofertas", ["SKU", "DESCUENTO TOTAL PROVEEDOR"])
         ofertas = dfo[["SKU", "DESCUENTO TOTAL PROVEEDOR"]].copy()
         ofertas.columns = ["sku", "oferta_pct"]
+        # "DESC PROPIO" no va en las columnas obligatorias de leer_hoja_flexible:
+        # si un mes viejo no la trae, mejor cargar ese mes con el descuento
+        # propio en cero que no cargarlo.
+        if COL_DESC_PROPIO in dfo.columns:
+            ofertas["desc_propio_pct"] = dfo[COL_DESC_PROPIO]
+        else:
+            print(f"    OJO: la hoja Ofertas no tiene '{COL_DESC_PROPIO}', queda en 0")
+            ofertas["desc_propio_pct"] = 0.0
         ofertas["sku"] = ofertas["sku"].astype(str).str.strip()
         ofertas["sku"] = ofertas["sku"].str.replace(r"\.0$", "", regex=True)
         ofertas["oferta_pct"] = ofertas["oferta_pct"].apply(limpiar_pct)
+        ofertas["desc_propio_pct"] = ofertas["desc_propio_pct"].apply(limpiar_pct)
         ofertas = ofertas.dropna(subset=["sku"])
         ofertas = ofertas[(ofertas["sku"] != "") & (ofertas["sku"].str.lower() != "nan")]
         ofertas = ofertas.drop_duplicates(subset=["sku"], keep="last")
-        print(f"    Ofertas: {len(ofertas)} SKUs (con o sin descuento)")
+        con_propio = int((ofertas["desc_propio_pct"] > 0).sum())
+        print(f"    Ofertas: {len(ofertas)} SKUs (con o sin descuento), "
+              f"{con_propio} con descuento propio")
 
         # --- Combinar: costo_real = costo_teorico * (1 - oferta%/100) ---
+        # El descuento propio NO entra en costo_real: es lo que resignamos
+        # nosotros sobre el precio de venta, no una rebaja que da el proveedor.
+        # Viaja a la tabla para poder mostrarlo, nada mas.
         costos = costos.merge(ofertas, on="sku", how="left")
         costos["oferta_pct"] = costos["oferta_pct"].fillna(0)
+        costos["desc_propio_pct"] = costos["desc_propio_pct"].fillna(0)
         costos["costo_real"] = costos["costo_teorico"] * (1 - costos["oferta_pct"] / 100)
         costos["mes_comercial"] = nombre
         todos.append(costos)
@@ -194,7 +233,8 @@ def cargar_costos(mes=None):
 
     final = pd.concat(todos, ignore_index=True)
     final = final.drop_duplicates(subset=["sku", "mes_comercial"], keep="last")
-    final = final[["sku", "mes_comercial", "costo_teorico", "oferta_pct", "costo_real"]]
+    final = final[["sku", "mes_comercial", "costo_teorico", "oferta_pct",
+                   "desc_propio_pct", "costo_real"]]
 
     if mes:
         # Borrar + agregar, para no tocar los otros meses. Si la tabla todavia
@@ -207,6 +247,7 @@ def cargar_costos(mes=None):
                 )
             """).scalar()
             if existe:
+                asegurar_columnas(con)
                 borradas = con.exec_driver_sql(
                     "DELETE FROM bronze.costos_historicos WHERE mes_comercial = %(mes)s",
                     {"mes": mes},
@@ -233,6 +274,7 @@ def cargar_costos(mes=None):
                 )
             """).scalar()
             if existe:
+                asegurar_columnas(con)
                 con.exec_driver_sql("DELETE FROM bronze.costos_historicos;")
             final.to_sql("costos_historicos", con, schema="bronze",
                          if_exists="append", index=False)
