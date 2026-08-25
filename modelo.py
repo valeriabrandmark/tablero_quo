@@ -251,8 +251,14 @@ def construir_fact_ventas():
           -- Sigma tiene un rubro aparte, el 9999 "RUBRO FINANCIERO", con
           -- articulos que no son productos: ARTICULO FINANCIERO, COMISIONES
           -- POR COBRANZAS, ARTICULO PARA DESCUENTOS Y PUNITORIOS, REVALUOS.
-          -- No tienen costo, asi que entraban con margen igual al 100 % de su
+          -- No tienen costo, asi que entraban con un margen igual a todo su
           -- importe y ensuciaban todo lo que se calcule sobre eso.
+          --
+          -- OJO AL EDITAR ESTE COMENTARIO: no escribas el signo de porcentaje
+          -- aca adentro. psycopg2 lo lee como marcador de parametro incluso
+          -- dentro de un comentario SQL, y la consulta muere con
+          -- "immutabledict is not a sequence", que no dice nada de lo que pasa.
+          -- Si hace falta el signo, va duplicado.
           --
           -- El SKU 9990 (CHEQUE RECHAZADO) va aparte porque en Sigma esta mal
           -- clasificado: figura en el rubro 0131 VARIOS, division Capilares.
@@ -269,7 +275,7 @@ def construir_fact_ventas():
           -- Por eso el corte va por articulo, que es lo que de verdad no es
           -- una venta, y no por el papel con el que se emitio.
           --
-          -- Lo que sale hoy: $ 14.821.420 de "facturacion" con margen 100 %.
+          -- Lo que sale hoy: $ 14.821.420 de "facturacion", todo margen.
           --   9990  CHEQUE RECHAZADO          2 renglones   $ 8.755.742
           --   9999  ARTICULO FINANCIERO      14 renglones   $ 4.052.616
           --   9992  COMISIONES POR COBRANZAS  5 renglones   $ 2.013.062
