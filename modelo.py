@@ -111,8 +111,15 @@ def mercaderia_perdida(motivo):
     """True si esta nota de credito no devuelve mercaderia vendible al stock.
 
     Solo los fallados. Ojo: NO es lo mismo que "el flete no se revierte" --
-    esa lista es mas larga y vive en prorratear_flete.py."""
-    return (motivo or "").strip().upper().startswith(MOTIVOS_SIN_RECUPERO)
+    esa lista es mas larga y vive en prorratear_flete.py.
+
+    El motivo llega de una columna de pandas, asi que en las facturas (que no
+    tienen motivo) NO viene None: viene NaN, que es un float y ADEMAS es
+    truthy. Por eso el filtro es por tipo y no un `or ""`, que dejaba pasar el
+    NaN y reventaba con "'float' object has no attribute 'strip'"."""
+    if not isinstance(motivo, str):
+        return False
+    return motivo.strip().upper().startswith(MOTIVOS_SIN_RECUPERO)
 
 
 ZONA = "America/Argentina/Buenos_Aires"
