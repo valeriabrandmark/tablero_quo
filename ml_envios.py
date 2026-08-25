@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from mercadolibre import renovar_access_token
+from conexion import crear_engine
 
 load_dotenv()
 
@@ -19,11 +20,7 @@ load_dotenv()
 # techo real de este paso lo pone el orquestador, que lo mata a los 45 minutos.
 ENGINE_OPCIONES = {"options": "-c statement_timeout=300000"}   # 5 min
 
-engine = create_engine(
-    f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
-    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}",
-    connect_args=ENGINE_OPCIONES,
-)
+engine = crear_engine(connect_args=ENGINE_OPCIONES)
 
 MI_USER_ID = int(os.getenv("ML_USER_ID"))
 FECHA_CORTE = date(2026, 5, 6)

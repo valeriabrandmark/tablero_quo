@@ -1,16 +1,12 @@
 import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
+from conexion import crear_engine
 
 load_dotenv()
 
-url = (
-    f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
-    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
-)
-
 try:
-    engine = create_engine(url)
+    engine = crear_engine()
     with engine.connect() as conexion:
         resultado = conexion.execute(text("SELECT version();"))
         print("CONEXION EXITOSA")

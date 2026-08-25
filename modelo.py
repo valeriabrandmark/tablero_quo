@@ -5,14 +5,11 @@ import pandas as pd
 from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
+from conexion import crear_engine
 
 load_dotenv()
 
-engine = create_engine(
-    f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
-    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}",
-    connect_args={"client_encoding": "utf8"}
-)
+engine = crear_engine(connect_args={"client_encoding": "utf8"})
 
 # Fecha de corte ABSOLUTA: nunca se procesa nada anterior a esto (piso historico)
 FECHA_CORTE = date(2026, 5, 6)

@@ -8,6 +8,7 @@ import re
 import pandas as pd
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
+from conexion import crear_engine
 
 load_dotenv()
 
@@ -23,10 +24,7 @@ COL_DESC_PROPIO = "DESC PROPIO"
 # vacia hasta que alguien edite un archivo.
 VERSION_ESQUEMA = 2
 
-engine = create_engine(
-    f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
-    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
-)
+engine = crear_engine()
 
 
 def limpiar_pct(valor):

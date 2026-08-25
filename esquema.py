@@ -27,7 +27,8 @@ import os
 import re
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+from conexion import crear_engine as crear_engine_base
 
 load_dotenv()
 
@@ -294,11 +295,9 @@ alter table gold.fact_experimento
 
 
 def crear_engine():
-    return create_engine(
-        f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
-        f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}",
-        connect_args={"client_encoding": "utf8"},
-    )
+    # El nombre se mantiene porque lo importan ml_pulso.py y experimento.py.
+    # El pool sale de conexion.py; aca solo se agrega el encoding.
+    return crear_engine_base(connect_args={"client_encoding": "utf8"})
 
 
 # La misma regex con la que SQLAlchemy detecta un parametro en `text()`.

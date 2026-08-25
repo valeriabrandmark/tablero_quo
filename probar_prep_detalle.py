@@ -1,10 +1,11 @@
 import os, json, requests, pandas as pd
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
+from conexion import crear_engine
 load_dotenv()
 BASE = os.getenv("DIGIP_URL_BASE"); API_KEY = os.getenv("DIGIP_API_KEY")
 headers = {"X-API-Key": API_KEY}
-engine = create_engine(f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}")
+engine = crear_engine()
 
 resp = requests.get(f"{BASE}Preparaciones/3520", headers=headers, timeout=30)
 prep = resp.json()
