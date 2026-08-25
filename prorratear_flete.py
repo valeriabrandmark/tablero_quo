@@ -130,21 +130,33 @@ def construir_fact_ventas_flete():
 
     # --- 6) Prorrateo por linea (real donde hay dato, estimado 5% donde no) ---
     lineas = []
+    claves_sin_volumen = set()
     for _, row in merged.iterrows():
         clave = row["clave_fila"]
         flete_total = row["flete_total_clave"]
         volumen_total_clave = row["volumen_total_clave"]
 
-        linea_real = (
-            pd.notna(clave)
-            and pd.notna(flete_total)
-            and volumen_total_clave and volumen_total_clave > 0
-        )
+        # "Real" quiere decir QUE HAY UN DATO CARGADO para esa preparacion, no
+        # que se haya podido repartir. Antes tambien exigia volumen > 0, y por
+        # eso una preparacion con la venta anulada -- factura + NC, volumen neto
+        # cero -- caia a la estimacion del 5 % aunque el flete estuviera cargado
+        # a mano. Son dos preguntas distintas y ahora estan separadas.
+        tiene_dato_cargado = pd.notna(clave) and pd.notna(flete_total)
+        hay_volumen = bool(volumen_total_clave) and volumen_total_clave > 0
 
-        if linea_real:
+        if tiene_dato_cargado and hay_volumen:
             flete_linea_calc = flete_total * (row["volumen_linea"] / volumen_total_clave)
+        elif tiene_dato_cargado:
+            claves_sin_volumen.add(clave)
+            # Hay dato pero no hay sobre que repartirlo. Si la venta se anulo,
+            # imputarle costo de transporte a una linea que quedo en $ 0 solo
+            # ensucia el margen. Se avisa mas abajo con el monto, para que no
+            # desaparezca en silencio.
+            flete_linea_calc = 0.0
         else:
             flete_linea_calc = None  # se recalcula como estimado al reunir, si hace falta
+
+        linea_real = tiene_dato_cargado
 
         lineas.append({
             "_fila_id": row["_fila_id"],
@@ -185,6 +197,21 @@ def construir_fact_ventas_flete():
             flete_final = venta_linea * 0.05
             tiene_real = False
 
+        # Venta anulada: la factura y su nota de credito se cancelan y no queda
+        # nada vendido. El flete tiene que ser 0, no importa por que camino se
+        # haya calculado arriba. Si no, la linea queda con costo de transporte
+        # sobre una venta de $ 0 y la rentabilidad se va a menos infinito.
+        #
+        # Las devoluciones PARCIALES no entran aca a proposito: ahi si quedaron
+        # unidades vendidas, y como el prorrateo usa la cantidad con signo, el
+        # flete que les toca ya sale proporcional a lo que quedo. Una devolucion
+        # parcial tiene que mostrar rentabilidad baja, no cero.
+        unidades_netas = (
+            grupo.drop_duplicates(subset=["_fila_id"])["cantidad"].fillna(0).sum()
+        )
+        if unidades_netas == 0:
+            flete_final = 0.0
+
         claves_validas = [c for c in grupo["clave_fila"] if pd.notna(c)]
         clave_repr = ", ".join(sorted(set(claves_validas))) if claves_validas else None
         resultado.append({
@@ -210,6 +237,24 @@ def construir_fact_ventas_flete():
     # muestre el tablero va a estar corto.
     representados = int(df_resultado["lineas_venta"].sum())
     print(f"  Renglones de venta representados: {representados} de {len(fact)}")
+    anuladas = int((df_resultado["flete_prorrateado"] == 0).sum())
+    print(f"  Lineas con flete 0 (anuladas o sin costo): {anuladas}")
+
+    # Plata realmente pagada al transportista que no se puede imputar a ninguna
+    # linea, porque la venta de esa preparacion se anulo entera. No entra al
+    # margen de nadie, pero salio de la caja: si no se avisa, desaparece.
+    sin_donde_imputar = {
+        clave: monto for clave, monto in flete_map.items()
+        if monto and float(monto) != 0
+        and clave in claves_sin_volumen
+    }
+    if sin_donde_imputar:
+        total = sum(float(m) for m in sin_donde_imputar.values())
+        print(f"\n  OJO: ${total:,.2f} de flete cargado a mano no se imputa a "
+              f"ninguna linea, porque esas ventas estan anuladas enteras:")
+        for clave, monto in sorted(sin_donde_imputar.items(),
+                                   key=lambda kv: -float(kv[1])):
+            print(f"    {clave}: ${float(monto):,.2f}")
     if representados != len(fact):
         print(f"  OJO: faltan {len(fact) - representados} renglones sin flete asignado")
 
