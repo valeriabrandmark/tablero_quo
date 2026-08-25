@@ -112,28 +112,36 @@ def construir_fact_ventas_flete():
     """, engine)
     print(f"  Lineas de distri: {len(fact)}")
 
-    # NOTAS DE CREDITO POR INCOBRABLE: el flete NO se revierte.
+    # NOTAS DE CREDITO DONDE LA MERCADERIA NO SE RECUPERA: el flete NO se
+    # revierte. Es la misma lista que MOTIVOS_SIN_RECUPERO en modelo.py.
     #
-    # El resto de las NC son devoluciones o ventas que no ocurrieron, y ahi
-    # revertir el flete esta bien. Pero cuando el motivo es "INCOBRABLE /
-    # MOROSO" el cliente no devolvio nada: la mercaderia se despacho, el
-    # transporte se pago, y lo unico que no llego fue la plata. Esa NC se
-    # llevaba un 5 % NEGATIVO que borraba el flete de la factura original
-    # -- $ 100.940 en total -- y encima, como el margen ajustado RESTA el
-    # flete, restar un negativo sumaba al margen.
+    # Con motivo INCOBRABLE el cliente no devolvio nada, y con FALLADO la
+    # mercaderia vuelve pero se destruye. En los dos casos el despacho ocurrio
+    # y el transporte se pago: no hay nada que devolver.
     #
-    # Estas lineas quedan neutras: no aportan volumen, no entran en la base
-    # del 5 % y no cuentan para el neteo de unidades. La factura conserva su
-    # flete, que es el que de verdad se pago.
-    incobrables = set(pd.read_sql("""
+    # Esas notas se llevaban un 5 % NEGATIVO que borraba el flete de la factura
+    # original -- $ 105.842 en total -- y encima, como el margen ajustado RESTA
+    # el flete, restar un negativo sumaba al margen.
+    #
+    # Estas lineas quedan neutras: no aportan volumen, no entran en la base del
+    # 5 % y no cuentan para el neteo de unidades. La factura conserva su flete,
+    # que es el que de verdad se pago. En una devolucion parcial eso deja el
+    # flete entero sobre las unidades que quedaron, que es lo correcto: se pago
+    # por despachar todas.
+    #
+    # El resto de los motivos (error de carga, cancelacion, error de logistica)
+    # son devoluciones sanas o ventas que no ocurrieron, y ahi el flete se
+    # revierte como siempre.
+    sin_recupero = set(pd.read_sql("""
         SELECT DISTINCT "comprobanteTipo" || '-' || "comprobanteCodigo"
                || '-' || "comprobanteNumero" AS comprobante
         FROM bronze.sigma_ventas
         WHERE "comprobanteTipo" = 'C'
-          AND upper(coalesce("motivoNc", '')) LIKE 'INCOBRABLE%%'
+          AND (upper(coalesce("motivoNc", '')) LIKE 'INCOBRABLE%%'
+            OR upper(coalesce("motivoNc", '')) LIKE 'FALLADO%%')
     """, engine)["comprobante"])
-    fact["_incobrable"] = fact["comprobante"].isin(incobrables)
-    print(f"  Lineas de NC por incobrable (flete neutro): {int(fact['_incobrable'].sum())}")
+    fact["_sin_recupero"] = fact["comprobante"].isin(sin_recupero)
+    print(f"  Lineas de NC sin recupero (flete neutro): {int(fact['_sin_recupero'].sum())}")
 
     # Identidad de la linea ANTES de cualquier merge. Con esto se puede saber
     # despues si dos renglones son la misma linea repetida por un join o dos
@@ -254,9 +262,9 @@ def construir_fact_ventas_flete():
     # Si el SKU no tiene litrosUnitarios cargado (raro, ~0.3% de los casos),
     # usamos cantidad sola como respaldo para no perder la linea del calculo.
     def volumen_de_fila(row):
-        # Las NC por incobrable no mueven mercaderia: aportan volumen 0 para no
+        # Estas NC no devuelven mercaderia vendible: aportan volumen 0 para no
         # cancelar el de la factura dentro de la misma preparacion.
-        if row.get("_incobrable"):
+        if row.get("_sin_recupero"):
             return 0
         litros = litros_de(row["sku"])
         if litros is not None:
@@ -308,7 +316,7 @@ def construir_fact_ventas_flete():
             "clave_fila": clave if pd.notna(clave) else None,
             "flete_linea_real": flete_linea_calc,
             "linea_real": linea_real,
-            "_incobrable": bool(row.get("_incobrable")),
+            "_sin_recupero": bool(row.get("_sin_recupero")),
         })
 
     df_lineas = pd.DataFrame(lineas)
@@ -333,9 +341,9 @@ def construir_fact_ventas_flete():
             # `drop_duplicates` por las dudas: si algo volviera a repetir la
             # linea, el 5 % se calcula igual una sola vez.
             unicas = grupo.drop_duplicates(subset=["_fila_id"])
-            # Sin las NC por incobrable: si entraran, la base del 5 % se netea
-            # contra la factura y el estimado sale 0 o negativo.
-            unicas = unicas[~unicas["_incobrable"]]
+            # Sin esas NC: si entraran, la base del 5 % se netea contra la
+            # factura y el estimado sale 0 o negativo.
+            unicas = unicas[~unicas["_sin_recupero"]]
             venta_linea = (
                 unicas["precio_neto"].fillna(0) * unicas["cantidad"].fillna(0)
             ).sum()
@@ -352,9 +360,9 @@ def construir_fact_ventas_flete():
         # flete que les toca ya sale proporcional a lo que quedo. Una devolucion
         # parcial tiene que mostrar rentabilidad baja, no cero.
         netas = grupo.drop_duplicates(subset=["_fila_id"])
-        # Idem: una NC por incobrable no anula la venta -- la venta salio y no
-        # se cobro. Si contara aca, la factura perderia su flete.
-        netas = netas[~netas["_incobrable"]]
+        # Idem: estas NC no anulan el despacho -- la mercaderia salio igual. Si
+        # contaran aca, la factura perderia el flete que ya se pago.
+        netas = netas[~netas["_sin_recupero"]]
         unidades_netas = netas["cantidad"].fillna(0).sum()
         if unidades_netas == 0:
             flete_final = 0.0

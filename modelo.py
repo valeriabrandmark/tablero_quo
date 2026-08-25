@@ -76,6 +76,34 @@ def mes_comercial(fecha):
     return f"{anio:04d}-{mes:02d}"
 
 
+# MOTIVOS DE NOTA DE CREDITO DONDE LA MERCADERIA NO SE RECUPERA.
+#
+# Una NC normal revierte la venta entera, costo incluido: la mercaderia vuelve
+# al deposito y se vuelve a vender. Pero Sigma dice en `motivoNc` por que se
+# emitio, y con estos motivos no vuelve nada vendible:
+#
+#   INCOBRABLE / MOROSO  -> el cliente no devolvio, no pago. La mercaderia salio
+#                           y quedo afuera.
+#   FALLADO / VENCIMIENT  \
+#   FALLADO DE FABRICA    -> vuelve, pero se destruye. No se puede revender.
+#
+# Devolverles el costo al informe es regalar plata que no existe. Peor todavia
+# cuando la venta original iba por debajo del costo: revertir una venta que
+# perdia plata DA GANANCIA. La factura F-FA9-00000802 daba -$ 51.938 de margen y
+# su nota C-CA9-00000114 daba +$ 73.438, con lo que perder la venta entera
+# terminaba SUMANDO margen.
+#
+# El resto de los motivos (error de carga, cancelacion de pedido, error de
+# logistica) si son devoluciones sanas o ventas que nunca ocurrieron: ahi la
+# mercaderia vuelve entera y el costo se revierte como siempre.
+MOTIVOS_SIN_RECUPERO = ("INCOBRABLE", "FALLADO")
+
+
+def mercaderia_perdida(motivo):
+    """True si esta nota de credito no devuelve mercaderia vendible al stock."""
+    return (motivo or "").strip().upper().startswith(MOTIVOS_SIN_RECUPERO)
+
+
 ZONA = "America/Argentina/Buenos_Aires"
 
 
@@ -317,31 +345,19 @@ def construir_fact_ventas():
         precio_neto = precio                          # Sigma ya viene SIN IVA (y ahora con descuento)
         precio_con_iva = precio * (1 + iva / 100)     # para el % de rentabilidad
 
-        # COSTO DE LAS NOTAS DE CREDITO.
+        # COSTO DE LAS NOTAS DE CREDITO. Ver MOTIVOS_SIN_RECUPERO arriba.
         #
         # Una NC lleva cantidad negativa, asi que el costo entra restando: es la
-        # mercaderia que vuelve al deposito. Pero eso vale SOLO si de verdad
-        # volvio. Sigma dice en `motivoNc` por que se emitio, y no todos los
-        # motivos son lo mismo:
+        # mercaderia que vuelve al deposito y se puede volver a vender. Cuando
+        # NO vuelve -- o vuelve rota -- ese costo se perdio y no hay que
+        # devolverlo.
         #
-        #   INCOBRABLE / MOROSO -> el cliente NO devolvio nada, no pago. La
-        #       mercaderia salio y no vuelve. Devolverle el costo al informe es
-        #       regalar plata que no existe: la factura habia dado -$ 51.938 de
-        #       margen y su NC daba +$ 73.438, con lo que la venta perdida
-        #       terminaba sumando. Aca el costo va en 0 y la NC queda con el
-        #       margen negativo que corresponde: se perdio toda la venta.
-        #
-        #   El resto de los motivos (fallado, error de carga, cancelacion,
-        #       error de logistica) si son devoluciones o ventas que no
-        #       ocurrieron: la mercaderia vuelve y el costo se revierte.
-        #
-        # Ademas, cuando la mercaderia si vuelve hay que costearla al costo con
-        # el que SALIO, no al del mes en que se emite la NC. La factura
+        # Ademas, cuando la mercaderia si se recupera hay que costearla al costo
+        # con el que SALIO, no al del mes en que se emite la NC. La factura
         # F-FA9-00000802 salio en 2026-05 y su NC es de 2026-08; en el medio
         # LO03032 y LO03033 subieron 25 %, y esos $ 21.500 de diferencia
         # aparecian como margen de la nada y no se cancelaban nunca.
-        motivo = (r["motivoNc"] or "").strip().upper()
-        if motivo.startswith("INCOBRABLE"):
+        if mercaderia_perdida(r["motivoNc"]):
             costo = 0.0
         else:
             f_orig = to_date(r["fechaOriginal"])
