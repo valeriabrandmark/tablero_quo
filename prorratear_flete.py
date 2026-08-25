@@ -21,13 +21,90 @@ def calcular_clave_fila(row):
     return str(prep_id)
 
 
+def detectar_refacturaciones(fact, prep, flete_map, clave_de_pedido):
+    """Encuentra ventas anuladas que se volvieron a facturar con OTRO pedido.
+
+    QUE PROBLEMA RESUELVE
+
+    Por un error de carga se anula una venta (factura + nota de credito) y se
+    la vuelve a facturar con un pedido nuevo. La mercaderia viajo UNA sola vez,
+    bajo la preparacion del pedido viejo, asi que el flete queda pegado a la
+    orden anulada -- que no tiene venta -- y la orden que si quedo viva no
+    tiene preparacion y se come una estimacion del 5 % que no existe.
+
+    EL CRITERIO, Y POR QUE ES SEGURO
+
+    Lo que hace confiable el apareo no es que coincidan los SKU, sino que la
+    orden origen este ANULADA ENTERA: unidades netas cero. Eso es objetivo y
+    poco frecuente (11 veces en cuatro meses). Una venta repetida de verdad no
+    lo cumple, porque la primera no se anulo.
+
+    Sobre esa base se pide ademas: mismo cliente, misma firma de SKU y
+    cantidades, y que el destino NO tenga preparacion propia.
+
+    Medido sobre la base al 25/08/2026: 6 pares, todos uno a uno, ninguno
+    ambiguo. Los tres con flete cargado movian $ 207.312 que hoy se descartan.
+
+    DOS FRENOS
+
+    - Si una anulada matchea mas de una candidata, no se toca nada. Mover plata
+      a la orden equivocada es peor que dejar la estimacion.
+    - Si la preparacion de la anulada no tiene flete cargado, tampoco se aparea:
+      heredar un cero convertiria una estimacion razonable en un cero falso.
+    """
+    def firma(grupo):
+        """SKU y cantidades vendidas de una orden, como texto comparable.
+           Solo las positivas: las de la nota de credito son el reverso."""
+        pos = grupo[grupo["cantidad"] > 0].groupby("sku")["cantidad"].sum()
+        return "|".join(f"{sku}:{cant}" for sku, cant in sorted(pos.items()))
+
+    resumen = {}
+    for orden, grupo in fact.groupby("nro_orden_str"):
+        resumen[orden] = {
+            "netas": grupo["cantidad"].fillna(0).sum(),
+            "firma": firma(grupo),
+            "cliente": (grupo["cliente"].dropna().iloc[0]
+                        if grupo["cliente"].notna().any() else None),
+        }
+
+    con_preparacion = set(prep["pedido_codigo"].astype(str))
+
+    anuladas = {o: d for o, d in resumen.items()
+                if d["netas"] == 0 and o in con_preparacion and d["firma"]}
+    vivas = {o: d for o, d in resumen.items()
+             if d["netas"] > 0 and o not in con_preparacion and d["firma"]}
+
+    pares, ambiguas = [], []
+    for anulada, da in anuladas.items():
+        candidatas = [v for v, dv in vivas.items()
+                      if dv["cliente"] == da["cliente"] and dv["firma"] == da["firma"]]
+        if len(candidatas) > 1:
+            ambiguas.append((anulada, candidatas))
+            continue
+        if not candidatas:
+            continue
+        # Sin flete cargado no hay nada que heredar.
+        claves = clave_de_pedido(anulada)
+        if not any(c in flete_map for c in claves):
+            continue
+        pares.append((anulada, candidatas[0], claves))
+
+    if ambiguas:
+        print("\n  OJO: estas ventas anuladas coinciden con MAS DE UNA orden "
+              "viva, asi que no se les mueve el flete:")
+        for anulada, cands in ambiguas:
+            print(f"    {anulada} -> {', '.join(cands)}")
+
+    return pares
+
+
 def construir_fact_ventas_flete():
     print("=== Construyendo gold.fact_ventas_flete ===")
 
     # --- 1) Traer lineas de la distribuidora (Mayorista) ---
     print("Leyendo fact_ventas (Mayorista)...")
     fact = pd.read_sql("""
-        SELECT nro_orden, sku, unidad, cantidad, precio_neto
+        SELECT nro_orden, sku, unidad, cantidad, precio_neto, cliente
         FROM gold.fact_ventas
         WHERE canal = 'Mayorista'
           AND unidad IN ('Quo', 'Noa')
@@ -66,8 +143,48 @@ def construir_fact_ventas_flete():
     flete_map = dict(zip(fletes["clave_fila"], fletes["neto_cobrado_transporte"]))
     print(f"  Claves con flete real cargado: {len(flete_map)}")
 
-    # --- 4) Unir fact con preparaciones (nro_orden = pedido_codigo) ---
     fact["nro_orden_str"] = fact["nro_orden"].astype("Int64").astype(str)
+
+    # --- 3b) Refacturaciones: la orden nueva hereda la preparacion de la vieja ---
+    #
+    # Se resuelve agregando filas a `prep`, no tocando el prorrateo: la orden
+    # refacturada pasa a tener la misma preparacion que la anulada, y de ahi
+    # para abajo todo funciona igual que siempre.
+    #
+    # Las dos ordenes quedan colgadas de la misma clave, y eso esta bien: la
+    # anulada aporta volumen neto CERO (factura + nota de credito se cancelan),
+    # asi que el prorrateo por volumen le da el 100 % del flete a la que quedo
+    # viva. Y la anulada termina en cero por la regla de unidades netas del
+    # paso 7.
+    def claves_del_pedido(pedido):
+        filas = prep[prep["pedido_codigo"].astype(str) == str(pedido)]
+        claves = set()
+        for _, fila in filas.iterrows():
+            unidad_pedido = fact.loc[fact["nro_orden_str"] == str(pedido), "unidad"]
+            for unidad in (unidad_pedido.unique() if len(unidad_pedido) else [None]):
+                clave = calcular_clave_fila({
+                    "preparacion_id": fila["preparacion_id"],
+                    "transporte": fila["transporte"],
+                    "unidad": unidad,
+                })
+                if clave is not None:
+                    claves.add(clave)
+        return claves
+
+    pares = detectar_refacturaciones(fact, prep, flete_map, claves_del_pedido)
+    if pares:
+        print(f"\n  Ventas anuladas y refacturadas con otro pedido: {len(pares)}")
+        heredadas = []
+        for anulada, refacturada, claves in pares:
+            monto = sum(float(flete_map[c]) for c in claves if c in flete_map)
+            print(f"    {anulada} -> {refacturada}: hereda ${monto:,.2f} "
+                  f"({', '.join(sorted(claves))})")
+            copia = prep[prep["pedido_codigo"].astype(str) == str(anulada)].copy()
+            copia["pedido_codigo"] = str(refacturada)
+            heredadas.append(copia)
+        prep = pd.concat([prep] + heredadas, ignore_index=True)
+
+    # --- 4) Unir fact con preparaciones (nro_orden = pedido_codigo) ---
     merged = fact.merge(
         prep, left_on="nro_orden_str", right_on="pedido_codigo", how="left"
     )
