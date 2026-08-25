@@ -31,8 +31,9 @@ despues de este cambio se lleva el estado que ya habia.
 import json
 import os
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from dotenv import load_dotenv
+from conexion import crear_engine
 
 load_dotenv()
 
@@ -65,9 +66,7 @@ LEGADO = {
 
 
 def _engine():
-    return create_engine(
-        f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
-        f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}",
+    return crear_engine(
         # Este es un proceso de fondo, no una pagina esperando: el limite de 2
         # minutos de Supabase esta pensado para lo segundo.
         connect_args={"options": "-c statement_timeout=120000"},

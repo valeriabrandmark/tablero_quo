@@ -5,9 +5,9 @@ import requests
 import pandas as pd
 from datetime import date, timedelta
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
 
 from errores_bd import es_tabla_inexistente
+from conexion import crear_engine
 
 load_dotenv()
 
@@ -15,11 +15,7 @@ BASE = os.getenv("DIGIP_URL_BASE")
 API_KEY = os.getenv("DIGIP_API_KEY")
 headers = {"X-API-Key": API_KEY}
 
-engine = create_engine(
-    f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
-    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}",
-    connect_args={"client_encoding": "utf8"}
-)
+engine = crear_engine(connect_args={"client_encoding": "utf8"})
 
 FECHA_CORTE = date(2026, 5, 6)
 WINDOW_DAYS = 7

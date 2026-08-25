@@ -12,7 +12,8 @@ import pandas as pd
 from datetime import date, timedelta
 from dotenv import load_dotenv
 from errores_bd import es_tabla_inexistente
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+from conexion import crear_engine
 
 
 # Cuanto se espera una respuesta de la API: (CONECTAR, LEER), en segundos.
@@ -196,10 +197,7 @@ def llamar_ml(endpoint, access_token, params=None, max_reintentos=6, pausa=True)
 
 
 def _crear_engine():
-    return create_engine(
-        f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
-        f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
-    )
+    return crear_engine()
 
 
 def _listas_a_texto(df):

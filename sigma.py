@@ -7,6 +7,7 @@ import pandas as pd
 from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
+from conexion import crear_engine
 
 # Cuanto se espera una respuesta de la API: (CONECTAR, LEER), en segundos.
 #
@@ -79,9 +80,7 @@ def llamar_sigma(endpoint, params=None):
 
 
 def _crear_engine():
-    return create_engine(
-        f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
-        f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}",
+    return crear_engine(
         connect_args={
             "client_encoding": "utf8",
             "options": "-c client_encoding=UTF8"

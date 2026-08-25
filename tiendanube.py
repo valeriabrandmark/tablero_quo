@@ -3,7 +3,7 @@ import time
 import requests
 import pandas as pd
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
+from conexion import crear_engine
 
 # Cuanto se espera una respuesta de la API: (CONECTAR, LEER), en segundos.
 #
@@ -133,10 +133,7 @@ def guardar_en_bd(df, tabla, modo="replace"):
             df[col] = df[col].apply(
                 lambda x: _json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else x
             )
-    engine = create_engine(
-        f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
-        f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
-    )
+    engine = crear_engine()
     with engine.begin() as con:
         con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
     agregar_columnas_nuevas(engine, tabla, df)

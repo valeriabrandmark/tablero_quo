@@ -1,6 +1,7 @@
 import json
 import requests
 from mercadolibre import renovar_access_token
+from conexion import crear_engine
 
 print("=== Stock ML Full (Fulfillment) ===")
 token = renovar_access_token()
@@ -13,10 +14,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 load_dotenv()
-engine = create_engine(
-    f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}"
-    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
-)
+engine = crear_engine()
 
 # Traemos unos inventory_id de ejemplo de lo que ya tenemos guardado
 df = pd.read_sql("SELECT * FROM bronze.ml_stock_full LIMIT 5", engine)
