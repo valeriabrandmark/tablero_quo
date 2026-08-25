@@ -236,16 +236,21 @@ def construir_fact_ventas():
     # --- 1) SIGMA ---
     print("Procesando Sigma...")
     sigma = pd.read_sql("""
-        SELECT empresa, surcursal, fecha, "itemArticuloId", "itemDescripcion",
-               "itemCantidad", "itemPrecioUnitario", "clienteNombre",
-               "itemDescuento", "itemDescuentoGlobal", "itemDescuentoFinanciero",
-               "itemPedidoId", vendedor, "comprobanteCodigo", "comprobanteNumero",
-               "comprobanteTipo"
+        SELECT sv.empresa, sv.surcursal, sv.fecha, sv."itemArticuloId", sv."itemDescripcion",
+               sv."itemCantidad", sv."itemPrecioUnitario", sv."clienteNombre",
+               sv."itemDescuento", sv."itemDescuentoGlobal", sv."itemDescuentoFinanciero",
+               sv."itemPedidoId", sv.vendedor, sv."comprobanteCodigo", sv."comprobanteNumero",
+               sv."comprobanteTipo", sv."motivoNc",
+               -- Fecha de la factura que esta nota de credito ajusta. Sirve para
+               -- costear la devolucion al costo con el que salio, no al de hoy.
+               orig.fecha AS "fechaOriginal"
         FROM bronze.sigma_ventas sv
-        WHERE empresa IN ('0001','0002','0003','0004')
+        LEFT JOIN (SELECT DISTINCT id, fecha FROM bronze.sigma_ventas) orig
+               ON orig.id = sv."ajustaComprobanteId"::bigint
+        WHERE sv.empresa IN ('0001','0002','0003','0004')
           -- Sin left(), por lo mismo. Aca ademas es literalmente un no-op:
           -- sigma_ventas.fecha ya viene como 'YYYY-MM-DD' pelado, 10 caracteres.
-          AND fecha >= '{desde}'
+          AND sv.fecha >= '{desde}'
           -- FUERA LO QUE NO ES MERCADERIA.
           --
           -- Sigma tiene un rubro aparte, el 9999 "RUBRO FINANCIERO", con
@@ -311,7 +316,37 @@ def construir_fact_ventas():
         iva = iva_de(sku)
         precio_neto = precio                          # Sigma ya viene SIN IVA (y ahora con descuento)
         precio_con_iva = precio * (1 + iva / 100)     # para el % de rentabilidad
-        costo = costo_de(sku, mc)
+
+        # COSTO DE LAS NOTAS DE CREDITO.
+        #
+        # Una NC lleva cantidad negativa, asi que el costo entra restando: es la
+        # mercaderia que vuelve al deposito. Pero eso vale SOLO si de verdad
+        # volvio. Sigma dice en `motivoNc` por que se emitio, y no todos los
+        # motivos son lo mismo:
+        #
+        #   INCOBRABLE / MOROSO -> el cliente NO devolvio nada, no pago. La
+        #       mercaderia salio y no vuelve. Devolverle el costo al informe es
+        #       regalar plata que no existe: la factura habia dado -$ 51.938 de
+        #       margen y su NC daba +$ 73.438, con lo que la venta perdida
+        #       terminaba sumando. Aca el costo va en 0 y la NC queda con el
+        #       margen negativo que corresponde: se perdio toda la venta.
+        #
+        #   El resto de los motivos (fallado, error de carga, cancelacion,
+        #       error de logistica) si son devoluciones o ventas que no
+        #       ocurrieron: la mercaderia vuelve y el costo se revierte.
+        #
+        # Ademas, cuando la mercaderia si vuelve hay que costearla al costo con
+        # el que SALIO, no al del mes en que se emite la NC. La factura
+        # F-FA9-00000802 salio en 2026-05 y su NC es de 2026-08; en el medio
+        # LO03032 y LO03033 subieron 25 %, y esos $ 21.500 de diferencia
+        # aparecian como margen de la nada y no se cancelaban nunca.
+        motivo = (r["motivoNc"] or "").strip().upper()
+        if motivo.startswith("INCOBRABLE"):
+            costo = 0.0
+        else:
+            f_orig = to_date(r["fechaOriginal"])
+            mc_costo = mes_comercial(f_orig) if f_orig is not None else mc
+            costo = costo_de(sku, mc_costo)
         margen = None if costo is None else (precio_neto - costo) * cant
         filas.append({
             "canal": "Mayorista", "unidad": unidad, "tipo": tipo, "nro_orden": r["itemPedidoId"],

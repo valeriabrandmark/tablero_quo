@@ -104,13 +104,36 @@ def construir_fact_ventas_flete():
     # --- 1) Traer lineas de la distribuidora (Mayorista) ---
     print("Leyendo fact_ventas (Mayorista)...")
     fact = pd.read_sql("""
-        SELECT nro_orden, sku, unidad, cantidad, precio_neto, cliente
+        SELECT nro_orden, sku, unidad, cantidad, precio_neto, cliente, comprobante
         FROM gold.fact_ventas
         WHERE canal = 'Mayorista'
           AND unidad IN ('Quo', 'Noa')
           AND nro_orden IS NOT NULL
     """, engine)
     print(f"  Lineas de distri: {len(fact)}")
+
+    # NOTAS DE CREDITO POR INCOBRABLE: el flete NO se revierte.
+    #
+    # El resto de las NC son devoluciones o ventas que no ocurrieron, y ahi
+    # revertir el flete esta bien. Pero cuando el motivo es "INCOBRABLE /
+    # MOROSO" el cliente no devolvio nada: la mercaderia se despacho, el
+    # transporte se pago, y lo unico que no llego fue la plata. Esa NC se
+    # llevaba un 5 % NEGATIVO que borraba el flete de la factura original
+    # -- $ 100.940 en total -- y encima, como el margen ajustado RESTA el
+    # flete, restar un negativo sumaba al margen.
+    #
+    # Estas lineas quedan neutras: no aportan volumen, no entran en la base
+    # del 5 % y no cuentan para el neteo de unidades. La factura conserva su
+    # flete, que es el que de verdad se pago.
+    incobrables = set(pd.read_sql("""
+        SELECT DISTINCT "comprobanteTipo" || '-' || "comprobanteCodigo"
+               || '-' || "comprobanteNumero" AS comprobante
+        FROM bronze.sigma_ventas
+        WHERE "comprobanteTipo" = 'C'
+          AND upper(coalesce("motivoNc", '')) LIKE 'INCOBRABLE%%'
+    """, engine)["comprobante"])
+    fact["_incobrable"] = fact["comprobante"].isin(incobrables)
+    print(f"  Lineas de NC por incobrable (flete neutro): {int(fact['_incobrable'].sum())}")
 
     # Identidad de la linea ANTES de cualquier merge. Con esto se puede saber
     # despues si dos renglones son la misma linea repetida por un join o dos
@@ -231,6 +254,10 @@ def construir_fact_ventas_flete():
     # Si el SKU no tiene litrosUnitarios cargado (raro, ~0.3% de los casos),
     # usamos cantidad sola como respaldo para no perder la linea del calculo.
     def volumen_de_fila(row):
+        # Las NC por incobrable no mueven mercaderia: aportan volumen 0 para no
+        # cancelar el de la factura dentro de la misma preparacion.
+        if row.get("_incobrable"):
+            return 0
         litros = litros_de(row["sku"])
         if litros is not None:
             return litros * (row["cantidad"] or 0)
@@ -281,6 +308,7 @@ def construir_fact_ventas_flete():
             "clave_fila": clave if pd.notna(clave) else None,
             "flete_linea_real": flete_linea_calc,
             "linea_real": linea_real,
+            "_incobrable": bool(row.get("_incobrable")),
         })
 
     df_lineas = pd.DataFrame(lineas)
@@ -305,6 +333,9 @@ def construir_fact_ventas_flete():
             # `drop_duplicates` por las dudas: si algo volviera a repetir la
             # linea, el 5 % se calcula igual una sola vez.
             unicas = grupo.drop_duplicates(subset=["_fila_id"])
+            # Sin las NC por incobrable: si entraran, la base del 5 % se netea
+            # contra la factura y el estimado sale 0 o negativo.
+            unicas = unicas[~unicas["_incobrable"]]
             venta_linea = (
                 unicas["precio_neto"].fillna(0) * unicas["cantidad"].fillna(0)
             ).sum()
@@ -320,9 +351,11 @@ def construir_fact_ventas_flete():
         # unidades vendidas, y como el prorrateo usa la cantidad con signo, el
         # flete que les toca ya sale proporcional a lo que quedo. Una devolucion
         # parcial tiene que mostrar rentabilidad baja, no cero.
-        unidades_netas = (
-            grupo.drop_duplicates(subset=["_fila_id"])["cantidad"].fillna(0).sum()
-        )
+        netas = grupo.drop_duplicates(subset=["_fila_id"])
+        # Idem: una NC por incobrable no anula la venta -- la venta salio y no
+        # se cobro. Si contara aca, la factura perderia su flete.
+        netas = netas[~netas["_incobrable"]]
+        unidades_netas = netas["cantidad"].fillna(0).sum()
         if unidades_netas == 0:
             flete_final = 0.0
 
