@@ -112,26 +112,30 @@ def construir_fact_ventas_flete():
     """, engine)
     print(f"  Lineas de distri: {len(fact)}")
 
-    # NOTAS DE CREDITO DONDE LA MERCADERIA NO SE RECUPERA: el flete NO se
-    # revierte. Es la misma lista que MOTIVOS_SIN_RECUPERO en modelo.py.
+    # NOTAS DE CREDITO DONDE EL DESPACHO SI OCURRIO: el flete NO se revierte.
     #
-    # Con motivo INCOBRABLE el cliente no devolvio nada, y con FALLADO la
-    # mercaderia vuelve pero se destruye. En los dos casos el despacho ocurrio
-    # y el transporte se pago: no hay nada que devolver.
+    # OJO: esta lista NO es la misma que MOTIVOS_SIN_RECUPERO en modelo.py, y
+    # la diferencia es a proposito. Alla se pregunta si vuelve el COSTO; aca,
+    # si vuelve el FLETE. Son dos preguntas distintas:
     #
-    # Esas notas se llevaban un 5 % NEGATIVO que borraba el flete de la factura
-    # original -- $ 105.842 en total -- y encima, como el margen ajustado RESTA
-    # el flete, restar un negativo sumaba al margen.
+    #   INCOBRABLE  -> la mercaderia se recupera (el costo vuelve), pero el
+    #                  camion salio igual: el flete se pago y no vuelve.
+    #   FALLADO     -> ni una cosa ni la otra.
+    #
+    # El resto de los motivos (error de carga, cancelacion de pedido, error de
+    # logistica) son ventas que no ocurrieron o que las cubre el transportista,
+    # y ahi el flete se revierte como siempre.
+    #
+    # Antes esas notas se llevaban un 5 % NEGATIVO que borraba el flete de la
+    # factura original, y encima, como el margen ajustado RESTA el flete,
+    # restar un negativo SUMABA al margen. Asi C-CA9-00000114 mostraba
+    # +$ 92.329 de margen ajustado sobre una venta perdida de $ 377.817.
     #
     # Estas lineas quedan neutras: no aportan volumen, no entran en la base del
     # 5 % y no cuentan para el neteo de unidades. La factura conserva su flete,
     # que es el que de verdad se pago. En una devolucion parcial eso deja el
     # flete entero sobre las unidades que quedaron, que es lo correcto: se pago
     # por despachar todas.
-    #
-    # El resto de los motivos (error de carga, cancelacion, error de logistica)
-    # son devoluciones sanas o ventas que no ocurrieron, y ahi el flete se
-    # revierte como siempre.
     sin_recupero = set(pd.read_sql("""
         SELECT DISTINCT "comprobanteTipo" || '-' || "comprobanteCodigo"
                || '-' || "comprobanteNumero" AS comprobante

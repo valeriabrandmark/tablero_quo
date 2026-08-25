@@ -76,31 +76,42 @@ def mes_comercial(fecha):
     return f"{anio:04d}-{mes:02d}"
 
 
-# MOTIVOS DE NOTA DE CREDITO DONDE LA MERCADERIA NO SE RECUPERA.
+# NOTAS DE CREDITO: DOS PREGUNTAS DISTINTAS, DOS LISTAS.
 #
-# Una NC normal revierte la venta entera, costo incluido: la mercaderia vuelve
-# al deposito y se vuelve a vender. Pero Sigma dice en `motivoNc` por que se
-# emitio, y con estos motivos no vuelve nada vendible:
+# Una NC lleva cantidad negativa, asi que revierte la venta. Pero "revertir la
+# venta" son dos cosas separadas y no siempre van juntas:
 #
-#   INCOBRABLE / MOROSO  -> el cliente no devolvio, no pago. La mercaderia salio
-#                           y quedo afuera.
-#   FALLADO / VENCIMIENT  \
-#   FALLADO DE FABRICA    -> vuelve, pero se destruye. No se puede revender.
+#   1) El COSTO, ¿vuelve? Solo si la mercaderia se recupera y se puede volver a
+#      vender (o si alguien la paga).
+#   2) El FLETE, ¿vuelve? Solo si el despacho no ocurrio. Si el camion salio,
+#      el transporte se pago, y no hay nada que devolver.
 #
-# Devolverles el costo al informe es regalar plata que no existe. Peor todavia
-# cuando la venta original iba por debajo del costo: revertir una venta que
-# perdia plata DA GANANCIA. La factura F-FA9-00000802 daba -$ 51.938 de margen y
-# su nota C-CA9-00000114 daba +$ 73.438, con lo que perder la venta entera
-# terminaba SUMANDO margen.
+# Segun el motivo que Sigma guarda en `motivoNc`:
 #
-# El resto de los motivos (error de carga, cancelacion de pedido, error de
-# logistica) si son devoluciones sanas o ventas que nunca ocurrieron: ahi la
-# mercaderia vuelve entera y el costo se revierte como siempre.
-MOTIVOS_SIN_RECUPERO = ("INCOBRABLE", "FALLADO")
+#   motivo                 que paso                              costo  flete
+#   ---------------------  ------------------------------------  -----  -----
+#   INCOBRABLE / MOROSO    devolvio la mercaderia, no pago       vuelve  NO
+#   FALLADO / VENCIMIENT   vuelve, se destruye                     NO    NO
+#   FALLADO DE FABRICA     vuelve, se destruye                     NO    NO
+#   ERROR DE CARGA VEND    se refactura con otro comprobante     vuelve  vuelve
+#   CANCELACION DE PEDID   la venta no ocurrio                   vuelve  vuelve
+#   ERROR LOGISTICA        no vuelve, lo reconoce el transporte  vuelve  vuelve
+#
+# El costo solo se pierde con los fallados: son los unicos que vuelven al
+# deposito sin poder revenderse. En el incobrable la mercaderia se recupera, y
+# en el error de logistica la paga el transportista.
+#
+# El flete, en cambio, no vuelve ni en el incobrable ni en el fallado: en los
+# dos el pedido se despacho de verdad. Esa parte se aplica en
+# prorratear_flete.py, que repite esta misma lista.
+MOTIVOS_SIN_RECUPERO = ("FALLADO",)
 
 
 def mercaderia_perdida(motivo):
-    """True si esta nota de credito no devuelve mercaderia vendible al stock."""
+    """True si esta nota de credito no devuelve mercaderia vendible al stock.
+
+    Solo los fallados. Ojo: NO es lo mismo que "el flete no se revierte" --
+    esa lista es mas larga y vive en prorratear_flete.py."""
     return (motivo or "").strip().upper().startswith(MOTIVOS_SIN_RECUPERO)
 
 
