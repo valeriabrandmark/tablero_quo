@@ -241,11 +241,43 @@ def construir_fact_ventas():
                "itemDescuento", "itemDescuentoGlobal", "itemDescuentoFinanciero",
                "itemPedidoId", vendedor, "comprobanteCodigo", "comprobanteNumero",
                "comprobanteTipo"
-        FROM bronze.sigma_ventas
+        FROM bronze.sigma_ventas sv
         WHERE empresa IN ('0001','0002','0003','0004')
           -- Sin left(), por lo mismo. Aca ademas es literalmente un no-op:
           -- sigma_ventas.fecha ya viene como 'YYYY-MM-DD' pelado, 10 caracteres.
           AND fecha >= '{desde}'
+          -- FUERA LO QUE NO ES MERCADERIA.
+          --
+          -- Sigma tiene un rubro aparte, el 9999 "RUBRO FINANCIERO", con
+          -- articulos que no son productos: ARTICULO FINANCIERO, COMISIONES
+          -- POR COBRANZAS, ARTICULO PARA DESCUENTOS Y PUNITORIOS, REVALUOS.
+          -- No tienen costo, asi que entraban con margen igual al 100 % de su
+          -- importe y ensuciaban todo lo que se calcule sobre eso.
+          --
+          -- El SKU 9990 (CHEQUE RECHAZADO) va aparte porque en Sigma esta mal
+          -- clasificado: figura en el rubro 0131 VARIOS, division Capilares.
+          -- Existe un 9998 "ART FINANCIERO CH RECHAZADO" que si esta en el
+          -- rubro correcto y no se usa. Lo ideal seria arreglarlo en Sigma;
+          -- mientras tanto se lo nombra aca.
+          --
+          -- NO alcanza con filtrar por tipo de comprobante. La primera version
+          -- de esto sacaba las notas de debito (comprobanteTipo = 'D') y esta
+          -- MAL: la orden 3584 tiene la nota de debito D-DB93-00000012 por
+          -- +$ 4.343.588 y su contrasiento C-CB93-00000095 por -$ 4.343.588.
+          -- Sacando solo la D, la nota de credito quedaba sola y el tablero
+          -- mostraba $ 4,3 M NEGATIVOS de la nada. Peor que no tocar nada.
+          -- Por eso el corte va por articulo, que es lo que de verdad no es
+          -- una venta, y no por el papel con el que se emitio.
+          --
+          -- Lo que sale hoy: $ 14.821.420 de "facturacion" con margen 100 %.
+          --   9990  CHEQUE RECHAZADO          2 renglones   $ 8.755.742
+          --   9999  ARTICULO FINANCIERO      14 renglones   $ 4.052.616
+          --   9992  COMISIONES POR COBRANZAS  5 renglones   $ 2.013.062
+          AND NOT EXISTS (
+              SELECT 1 FROM bronze.sigma_articulos a
+              WHERE a.id = sv."itemArticuloId"
+                AND (a."rubroCodigo" = '9999' OR a.id = '9990')
+          )
     """.format(desde=piso_sql()), engine)
 
     for _, r in sigma.iterrows():
