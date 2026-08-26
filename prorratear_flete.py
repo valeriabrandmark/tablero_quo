@@ -112,40 +112,6 @@ def construir_fact_ventas_flete():
     """, engine)
     print(f"  Lineas de distri: {len(fact)}")
 
-    # NOTAS DE CREDITO DONDE EL DESPACHO SI OCURRIO: el flete NO se revierte.
-    #
-    # OJO: esta lista NO es la misma que MOTIVOS_SIN_RECUPERO en modelo.py, y
-    # la diferencia es a proposito. Alla se pregunta si vuelve el COSTO; aca,
-    # si vuelve el FLETE. Son dos preguntas distintas:
-    #
-    #   INCOBRABLE  -> la mercaderia se recupera (el costo vuelve), pero el
-    #                  camion salio igual: el flete se pago y no vuelve.
-    #   FALLADO     -> ni una cosa ni la otra.
-    #
-    # El resto de los motivos (error de carga, cancelacion de pedido, error de
-    # logistica) son ventas que no ocurrieron o que las cubre el transportista,
-    # y ahi el flete se revierte como siempre.
-    #
-    # Antes esas notas se llevaban un 5 % NEGATIVO que borraba el flete de la
-    # factura original, y encima, como el margen ajustado RESTA el flete,
-    # restar un negativo SUMABA al margen. Asi C-CA9-00000114 mostraba
-    # +$ 92.329 de margen ajustado sobre una venta perdida de $ 377.817.
-    #
-    # Estas lineas quedan neutras: no aportan volumen, no entran en la base del
-    # 5 % y no cuentan para el neteo de unidades. La factura conserva su flete,
-    # que es el que de verdad se pago. En una devolucion parcial eso deja el
-    # flete entero sobre las unidades que quedaron, que es lo correcto: se pago
-    # por despachar todas.
-    sin_recupero = set(pd.read_sql("""
-        SELECT DISTINCT "comprobanteTipo" || '-' || "comprobanteCodigo"
-               || '-' || "comprobanteNumero" AS comprobante
-        FROM bronze.sigma_ventas
-        WHERE "comprobanteTipo" = 'C'
-          AND (upper(coalesce("motivoNc", '')) LIKE 'INCOBRABLE%%'
-            OR upper(coalesce("motivoNc", '')) LIKE 'FALLADO%%')
-    """, engine)["comprobante"])
-    fact["_sin_recupero"] = fact["comprobante"].isin(sin_recupero)
-    print(f"  Lineas de NC sin recupero (flete neutro): {int(fact['_sin_recupero'].sum())}")
 
     # Identidad de la linea ANTES de cualquier merge. Con esto se puede saber
     # despues si dos renglones son la misma linea repetida por un join o dos
@@ -266,10 +232,6 @@ def construir_fact_ventas_flete():
     # Si el SKU no tiene litrosUnitarios cargado (raro, ~0.3% de los casos),
     # usamos cantidad sola como respaldo para no perder la linea del calculo.
     def volumen_de_fila(row):
-        # Estas NC no devuelven mercaderia vendible: aportan volumen 0 para no
-        # cancelar el de la factura dentro de la misma preparacion.
-        if row.get("_sin_recupero"):
-            return 0
         litros = litros_de(row["sku"])
         if litros is not None:
             return litros * (row["cantidad"] or 0)
@@ -320,7 +282,6 @@ def construir_fact_ventas_flete():
             "clave_fila": clave if pd.notna(clave) else None,
             "flete_linea_real": flete_linea_calc,
             "linea_real": linea_real,
-            "_sin_recupero": bool(row.get("_sin_recupero")),
         })
 
     df_lineas = pd.DataFrame(lineas)
@@ -345,13 +306,23 @@ def construir_fact_ventas_flete():
             # `drop_duplicates` por las dudas: si algo volviera a repetir la
             # linea, el 5 % se calcula igual una sola vez.
             unicas = grupo.drop_duplicates(subset=["_fila_id"])
-            # Sin esas NC: si entraran, la base del 5 % se netea contra la
-            # factura y el estimado sale 0 o negativo.
-            unicas = unicas[~unicas["_sin_recupero"]]
             venta_linea = (
                 unicas["precio_neto"].fillna(0) * unicas["cantidad"].fillna(0)
             ).sum()
-            flete_final = venta_linea * 0.05
+            # EL ESTIMADO NUNCA VA EN NEGATIVO.
+            #
+            # Si la base es negativa es porque el grupo es una nota de credito
+            # sola, sin la factura al lado -- pasa cuando la NC se emite con
+            # pedido propio, distinto al de la venta. Un 5 % negativo ahi no es
+            # "menos flete": es flete DEVUELTO, y nadie devuelve un flete que
+            # ya se pago. Peor todavia, el margen ajustado RESTA el flete, asi
+            # que restar un negativo SUMA. Con eso C-CA9-00000114 mostraba
+            # +$ 92.329 de margen ajustado sobre una venta perdida de $ 377.817.
+            #
+            # Cuando la factura y su NC comparten pedido no hace falta esto: la
+            # base se netea a 0 sola, y de eso se ocupa la regla de unidades
+            # netas de mas abajo.
+            flete_final = max(venta_linea, 0.0) * 0.05
             tiene_real = False
 
         # Venta anulada: la factura y su nota de credito se cancelan y no queda
@@ -363,11 +334,9 @@ def construir_fact_ventas_flete():
         # unidades vendidas, y como el prorrateo usa la cantidad con signo, el
         # flete que les toca ya sale proporcional a lo que quedo. Una devolucion
         # parcial tiene que mostrar rentabilidad baja, no cero.
-        netas = grupo.drop_duplicates(subset=["_fila_id"])
-        # Idem: estas NC no anulan el despacho -- la mercaderia salio igual. Si
-        # contaran aca, la factura perderia el flete que ya se pago.
-        netas = netas[~netas["_sin_recupero"]]
-        unidades_netas = netas["cantidad"].fillna(0).sum()
+        unidades_netas = (
+            grupo.drop_duplicates(subset=["_fila_id"])["cantidad"].fillna(0).sum()
+        )
         if unidades_netas == 0:
             flete_final = 0.0
 

@@ -122,6 +122,26 @@ def mercaderia_perdida(motivo):
     return motivo.strip().upper().startswith(MOTIVOS_SIN_RECUPERO)
 
 
+def es_anulacion_total(r):
+    """True si esta nota de credito revierte la factura ENTERA.
+
+    El criterio es estructural, no la etiqueta: mismas unidades y mismo importe
+    que la factura que ajusta, con el signo dado vuelta. Cuando eso pasa, la
+    venta se anulo entera -- casi siempre para refacturarla desde otra empresa,
+    como F-Z19-00003629 que se rehizo en F-B93-00001167 -- y los dos
+    comprobantes tienen que netearse en cero.
+
+    Los importes se comparan redondeados al centavo: son `double precision`, y
+    sumar 59 renglones deja basura en el orden de 1e-11 que hace fallar un `==`
+    exacto aunque los dos comprobantes sean identicos.
+    """
+    if pd.isna(r["unidadesOriginal"]) or pd.isna(r["importeOriginal"]):
+        return False        # sin vinculo a una factura no hay con que comparar
+    if r["unidadesPropias"] != -r["unidadesOriginal"]:
+        return False
+    return round(float(r["importePropio"]), 2) == round(-float(r["importeOriginal"]), 2)
+
+
 ZONA = "America/Argentina/Buenos_Aires"
 
 
@@ -289,10 +309,25 @@ def construir_fact_ventas():
                sv."comprobanteTipo", sv."motivoNc",
                -- Fecha de la factura que esta nota de credito ajusta. Sirve para
                -- costear la devolucion al costo con el que salio, no al de hoy.
-               orig.fecha AS "fechaOriginal"
+               orig.fecha AS "fechaOriginal",
+               -- Unidades e importe de la nota y de la factura que ajusta. Si
+               -- son exactamente opuestos, la nota anula la venta entera. Ver
+               -- `anula_todo` mas abajo.
+               propio.unidades AS "unidadesPropias",
+               propio.importe  AS "importePropio",
+               orig.unidades   AS "unidadesOriginal",
+               orig.importe    AS "importeOriginal"
         FROM bronze.sigma_ventas sv
-        LEFT JOIN (SELECT DISTINCT id, fecha FROM bronze.sigma_ventas) orig
+        LEFT JOIN (SELECT id, min(fecha) AS fecha,
+                          sum("itemCantidad") AS unidades,
+                          sum("itemCantidad" * "itemPrecioUnitario") AS importe
+                     FROM bronze.sigma_ventas GROUP BY id) orig
                ON orig.id = sv."ajustaComprobanteId"::bigint
+        LEFT JOIN (SELECT id,
+                          sum("itemCantidad") AS unidades,
+                          sum("itemCantidad" * "itemPrecioUnitario") AS importe
+                     FROM bronze.sigma_ventas GROUP BY id) propio
+               ON propio.id = sv.id
         WHERE sv.empresa IN ('0001','0002','0003','0004')
           -- Sin left(), por lo mismo. Aca ademas es literalmente un no-op:
           -- sigma_ventas.fecha ya viene como 'YYYY-MM-DD' pelado, 10 caracteres.
@@ -375,7 +410,26 @@ def construir_fact_ventas():
         # F-FA9-00000802 salio en 2026-05 y su NC es de 2026-08; en el medio
         # LO03032 y LO03033 subieron 25 %, y esos $ 21.500 de diferencia
         # aparecian como margen de la nada y no se cancelaban nunca.
-        if mercaderia_perdida(r["motivoNc"]):
+        # LA ANULACION TOTAL MANDA SOBRE EL MOTIVO.
+        #
+        # `motivoNc` lo elige una persona de una lista, y se equivoca. De las 8
+        # notas cargadas como FALLADO, 6 son anulaciones enteras: la nota
+        # revierte la factura completa, mismos SKUs y las unidades exactamente
+        # opuestas. Nadie devuelve 249 unidades de 19 SKUs porque vinieron
+        # falladas -- eso es una anulacion administrativa, casi siempre para
+        # refacturar con otro comprobante.
+        #
+        # C-Z19-00003664 es justo eso: figura como FALLADO, anula las 196
+        # unidades de F-Z19-00003629 y se refactura igual en F-B93-00001167. Al
+        # creerle a la etiqueta, la nota quedaba con costo 0 y le metia
+        # -$ 647.297 de perdida inventada al cliente.
+        #
+        # Cuando la nota anula la venta entera se revierte todo, costo incluido,
+        # diga lo que diga el motivo: la factura y su nota se netean en cero. El
+        # costo solo se pierde en la devolucion PARCIAL de fallados, que es la
+        # unica donde la etiqueta describe lo que de verdad paso.
+        anula_todo = es_anulacion_total(r)
+        if mercaderia_perdida(r["motivoNc"]) and not anula_todo:
             costo = 0.0
         else:
             f_orig = to_date(r["fechaOriginal"])
