@@ -303,6 +303,34 @@ def guardar_ventana_en_bd(df, tabla, col_fecha, cutoff):
         return
 
     df = _listas_a_texto(df)
+
+    # LA MISMA ORDEN PUEDE VENIR DOS VECES EN LA MISMA TANDA.
+    #
+    # `/orders/search` se pagina con offset y limit, y no acepta un orden
+    # explicito. Mientras se recorren las paginas el conjunto de resultados
+    # SIGUE CAMBIANDO: cada vez que una orden se actualiza, ML la reubica. Una
+    # orden que estaba en la pagina 3 puede saltar a la 2 justo despues de que
+    # se leyo la 2, y entonces sale de nuevo en la 3.
+    #
+    # Eso no es teorico: el 26/08/2026 la orden 2000018121647354 vino repetida y
+    # tumbo el orquestador dos corridas seguidas (118 y 119). El DELETE por id
+    # de mas abajo borra la fila vieja UNA vez, pero el INSERT intenta meter las
+    # dos copias y la segunda choca contra el indice unico ml_ventas_id_uniq.
+    #
+    # Deduplicar aca y no en la base es a proposito: el indice unico es la red
+    # de seguridad que descubrio esto y tiene que seguir siendo un error si
+    # alguna vez se cuela un duplicado por otra via. Lo que se arregla es la
+    # causa -- mandar dos filas con la misma clave -- no el sintoma.
+    #
+    # Se conserva la copia MAS ACTUALIZADA: si ML devolvio la orden dos veces es
+    # porque algo le cambio en el medio, asi que la segunda foto es la buena.
+    antes = len(df)
+    if "last_updated" in df.columns:
+        df = df.sort_values("last_updated", na_position="first")
+    df = df.drop_duplicates(subset=["id"], keep="last")
+    if len(df) < antes:
+        print(f"  ML devolvio {antes - len(df)} orden(es) repetida(s) en la paginacion: se dejo la mas actualizada")
+
     ids = [str(x) for x in df["id"].tolist()]
 
     try:
