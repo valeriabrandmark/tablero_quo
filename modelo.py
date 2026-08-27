@@ -412,6 +412,14 @@ def construir_fact_ventas():
         100% bonificado) y None significa "no se cuanto cobra". Confundirlos
         haria que un medio de pago nuevo entre al tablero como gratis, y nadie
         se enteraria."""
+        # Un pedido sin cobro (`free`) no trae `payment_details`, asi que el
+        # medio llega vacio. La tabla lo tiene cargado como "ninguno" con 0%:
+        # sin esta traduccion ese pedido no encontraria su fila y saldria
+        # avisado como medio desconocido, que es justo lo contrario -- se sabe
+        # perfectamente cuanto cobra, cero. Ojo que el vacio puede ser NaN, no
+        # None: viene de un DataFrame.
+        if metodo is None or (not isinstance(metodo, str) and pd.isna(metodo)):
+            metodo = "ninguno"
         tarifas = aranceles.get((gateway, metodo))
         if not tarifas or fecha is None:
             return None
@@ -809,6 +817,15 @@ def construir_fact_ventas():
             "envio": round(envio_item, 2),
             "descuento": round(desc_item, 2),
             "cupon": r["cupon"] if isinstance(r["cupon"], str) else None,
+            # La pasarela y el medio se guardan CRUDOS, tal cual los manda la
+            # API. Traducirlos a "Pago Nube" o "tarjeta" es cosa del tablero: si
+            # manana Tienda Nube agrega un medio, aca entra solo y lo unico que
+            # falta es el arancel, no una migracion.
+            "pasarela": r["gateway"] if isinstance(r["gateway"], str) else None,
+            # OJO con el nombre: en bronze.tn_pedidos_items `medio_pago` es el
+            # nombre lindo ("Pago Nube") y `metodo_pago` el crudo. Lo que se
+            # guarda aca es el CRUDO, asi que se llama igual que alla.
+            "metodo_pago": r["metodo_pago"] if isinstance(r["metodo_pago"], str) else None,
             "total_linea": cant * precio_real, "margen_total": margen,
             "proveedor": proveedor_de(sku),
             "marca": marca_de(sku),
@@ -976,7 +993,9 @@ def construir_fact_ventas():
             con.exec_driver_sql(
                 'ALTER TABLE gold.fact_ventas '
                 '  ADD COLUMN IF NOT EXISTS descuento double precision, '
-                '  ADD COLUMN IF NOT EXISTS cupon text'
+                '  ADD COLUMN IF NOT EXISTS cupon text, '
+                '  ADD COLUMN IF NOT EXISTS pasarela text, '
+                '  ADD COLUMN IF NOT EXISTS metodo_pago text'
             )
 
     # EL BORRADO Y LA INSERCION VAN EN LA MISMA TRANSACCION.
