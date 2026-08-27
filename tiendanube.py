@@ -218,6 +218,13 @@ def extraer_pedidos_y_items():
         cliente = pedido.get("customer") or {}
         direccion = pedido.get("shipping_address") or {}
 
+        # Codigo del cupon, para poder ver en el tablero POR QUE un pedido tiene
+        # descuento. `coupon` es una lista -- un pedido puede llevar mas de uno --
+        # asi que se guardan todos separados por coma. Sin esto, el pedido 130
+        # aparecia con $96.547 de descuento y nada que explicara de donde salia
+        # (era GANADOR100K, el premio de un sorteo).
+        cupones = [c.get("code") for c in (pedido.get("coupon") or []) if c.get("code")]
+
         # Se arma una vez por pedido y se repite en cada linea: son atributos
         # del pedido, no del producto.
         cabecera = {
@@ -232,6 +239,7 @@ def extraer_pedidos_y_items():
             "total_pedido": pedido.get("total"),
             "subtotal_pedido": pedido.get("subtotal"),
             "descuento": pedido.get("discount"),
+            "cupon": ", ".join(cupones) or None,
             "envio_costo_tienda": pedido.get("shipping_cost_owner"),
             "envio_cobrado": pedido.get("shipping_cost_customer"),
             "envio_opcion": pedido.get("shipping_option"),

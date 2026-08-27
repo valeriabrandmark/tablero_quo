@@ -560,9 +560,24 @@ def construir_fact_ventas():
         "envio_costo_tienda, envio_cobrado" if hay_envio
         else "NULL AS envio_costo_tienda, NULL AS envio_cobrado"
     )
+
+    # `cupon` lo empezo a traer tiendanube.py despues que `descuento`, asi que
+    # puede faltar por una corrida. Mismo criterio que con el envio: si no esta,
+    # se sigue sin el codigo -- el descuento se aplica igual, que es lo que
+    # mueve la plata -- en vez de dejar el canal entero sin actualizar.
+    with engine.begin() as con:
+        hay_cupon = con.exec_driver_sql("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'bronze' AND table_name = 'tn_pedidos_items'
+                  AND column_name = 'cupon'
+            )
+        """).scalar()
+    col_cupon = "cupon" if hay_cupon else "NULL AS cupon"
+
     tn = pd.read_sql(f"""
         SELECT pedido_id, pedido_numero, fecha, sku, nombre, cantidad, precio,
-               cliente_nombre, {cols_envio}
+               cliente_nombre, subtotal_pedido, descuento, {col_cupon}, {cols_envio}
         FROM bronze.tn_pedidos_items
         WHERE estado_pago = 'paid' AND estado <> 'cancelled'
           AND fecha >= '{piso_sql()}'
@@ -638,26 +653,73 @@ def construir_fact_ventas():
         precio_neto = precio / (1 + iva / 100)
         costo = costo_de(sku, mc)
 
-        # Lo que nos cuesta el flete: lo que pagamos menos lo que nos reembolsa
-        # el cliente. Ver la nota larga arriba.
-        envio_bruto = importe(r["envio_costo_tienda"]) - importe(r["envio_cobrado"])
         valor_item = precio * cant
         total = valor_pedido.get(r["pedido_id"], 0)
+
+        # EL DESCUENTO SE RESTA DE LA VENTA.
+        #
+        # `descuento` vive en la CABECERA del pedido, igual que el envio, asi que
+        # no venia por ningun lado y las lineas quedaban a precio de lista. El
+        # pedido 130 -- premio de un sorteo, cupon GANADOR100K de $100.000 --
+        # figuraba como una venta de $56.973 cuando en realidad entro $0.
+        #
+        # El cupon puede ser mas grande que la mercaderia y comerse tambien el
+        # envio (`includes_shipping`), asi que se parte en dos:
+        #   desc_producto -> lo que se come de la venta, topeado al subtotal
+        #   desc_envio    -> el sobrante, que es envio que el cliente NO pago
+        #
+        # No se mira el flag `includes_shipping` sino los importes: si el
+        # descuento supera al subtotal, la diferencia solo puede haber salido del
+        # envio. Es aritmetica y no depende de que ML/TN mantenga el flag.
+        subtotal = importe(r["subtotal_pedido"])
+        descuento = importe(r["descuento"])
+        desc_producto = min(descuento, subtotal)
+        desc_envio = min(max(descuento - subtotal, 0.0), importe(r["envio_cobrado"]))
+
+        # La parte del descuento que le toca a esta linea, proporcional a lo que
+        # vale. Viene CON IVA, como el precio, asi que se pasa a neto con el IVA
+        # de ESTA linea y no con un 21% fijo: un pedido puede mezclar alicuotas.
+        desc_item = desc_producto * (valor_item / total) if total > 0 else 0.0
+        precio_real = precio - desc_item / cant if cant else precio
+        # Un descuento del 100% deja el precio en 1e-13 y no en cero: el reparto
+        # proporcional divide y multiplica por el mismo total. Sin este corte, un
+        # pedido enteramente bonificado -- el 130 -- sumaba -0,0000000001 y el
+        # tablero mostraba "-$ 0", con el signo menos. Mismo bicho que llevo a
+        # redondear los importes en las consultas.
+        if abs(precio_real) < 1e-9:
+            precio_real = 0.0
+        precio_neto_real = precio_real / (1 + iva / 100)
+
+        # Lo que nos cuesta el flete: lo que pagamos menos lo que nos reembolsa
+        # el cliente DE VERDAD. Ver la nota larga arriba.
+        #
+        # El `- desc_envio` es lo que evita que un cupon que cubre el envio lo
+        # haga desaparecer: en el pedido 130 el envio figura cobrado en $39.574,
+        # pero lo pago el cupon, no el cliente. Sin esto neteaba a cero y ese
+        # flete -- que salio de nuestro bolsillo -- no lo veia nadie.
+        cobrado_real = importe(r["envio_cobrado"]) - desc_envio
+        envio_bruto = importe(r["envio_costo_tienda"]) - cobrado_real
         envio_item = (envio_bruto / 1.21) * (valor_item / total) if total > 0 else 0
 
         # Sin comision: Tienda Nube no la informa en el pedido. Lo que cobra la
         # pasarela de pago NO esta en ningun campo de la API, asi que se deja en
         # 0 en vez de inventar un porcentaje. El margen de este canal queda por
         # eso un poco optimista, y el tablero lo dice.
-        margen = None if costo is None else (precio_neto - costo) * cant - envio_item
+        margen = None if costo is None else (precio_neto_real - costo) * cant - envio_item
         filas.append({
             "canal": "Tienda Nube", "unidad": "Quo", "tipo": "Fiscal",
             "nro_orden": r["pedido_numero"],
             "fecha": f, "mes_comercial": mc, "sku": sku, "producto": r["nombre"],
-            "cantidad": cant, "precio_unitario": precio, "precio_neto": precio_neto,
+            # El precio que se guarda es el EFECTIVO, ya con el descuento
+            # aplicado: asi la venta del tablero es la que se facturo de verdad
+            # y ninguna consulta tiene que acordarse de restar nada. Cuanto se
+            # resigno queda en `descuento`, y por que, en `cupon`.
+            "cantidad": cant, "precio_unitario": precio_real, "precio_neto": precio_neto_real,
             "iva_pct": iva, "costo_unitario": costo, "comision": 0,
             "envio": round(envio_item, 2),
-            "total_linea": cant * precio, "margen_total": margen,
+            "descuento": round(desc_item, 2),
+            "cupon": r["cupon"] if isinstance(r["cupon"], str) else None,
+            "total_linea": cant * precio_real, "margen_total": margen,
             "proveedor": proveedor_de(sku),
             "marca": marca_de(sku),
             "cliente": r["cliente_nombre"],
@@ -803,6 +865,23 @@ def construir_fact_ventas():
 
     with engine.begin() as con:
         con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS gold;")
+
+        # Columnas agregadas despues de que la tabla ya existia. Sin esto el
+        # `to_sql(if_exists="append")` muere con `column "descuento" of relation
+        # "fact_ventas" does not exist` en la primera corrida tras el deploy, que
+        # es exactamente lo que paso con envio_costo_tienda en bronze.
+        #
+        # El IF NOT EXISTS lo hace idempotente: corre en todas las corridas y no
+        # hace nada cuando ya estan.
+        if con.exec_driver_sql("""
+            SELECT EXISTS (SELECT 1 FROM information_schema.tables
+                           WHERE table_schema='gold' AND table_name='fact_ventas')
+        """).scalar():
+            con.exec_driver_sql(
+                'ALTER TABLE gold.fact_ventas '
+                '  ADD COLUMN IF NOT EXISTS descuento double precision, '
+                '  ADD COLUMN IF NOT EXISTS cupon text'
+            )
 
     # EL BORRADO Y LA INSERCION VAN EN LA MISMA TRANSACCION.
     #
