@@ -142,6 +142,66 @@ def es_anulacion_total(r):
     return round(float(r["importePropio"]), 2) == round(-float(r["importeOriginal"]), 2)
 
 
+# Umbral de envio gratis de Mercado Libre, con IVA, sobre el precio de UNA
+# unidad de la publicacion (no sobre el total de la linea ni del carrito).
+#
+# Por arriba de este precio ML obliga al envio gratis y nos cobra el flete a
+# nosotros; por abajo lo paga el comprador y a nosotros no nos cuesta nada. Por
+# eso el flete de un paquete lo tienen que cargar los productos que lo
+# dispararon, y no los baratos que viajaron de arriba.
+#
+# Contrastado contra agosto 2026, sobre los 7.789 paquetes de un solo producto:
+# de los 974 en los que pagamos flete, 969 tenian el producto por encima de los
+# $33.000; de los 6.815 en los que no pagamos, 6.812 lo tenian por debajo. Ocho
+# excepciones sobre 7.789 (0,1%).
+#
+# ES UN VALOR NOMINAL Y ML LO ACTUALIZA. El dia que lo suban hay que cambiarlo
+# aca; mientras tanto un --todo reprocesa meses viejos con el umbral de hoy.
+# Eso mueve el reparto DENTRO de un paquete, nunca el flete total del canal.
+UMBRAL_ENVIO_GRATIS = 33000.0
+
+
+def repartir_envio(costo, lineas):
+    """Reparte el costo de UN envio entre las lineas del paquete que despacho.
+
+    `lineas` es una lista de (indice, precio_unitario, valor_linea) y devuelve
+    {indice: parte_del_envio}. Las tres reglas, en orden:
+
+      1. Una sola linea                -> se lleva el envio entero.
+      2. Alguna linea supera el umbral -> el envio se parte en PARTES IGUALES
+         entre esas, y las baratas quedan en cero. Viajaron gratis: el flete lo
+         disparo el producto caro.
+      3. Ninguna supera el umbral      -> ponderado por monto entre todas.
+
+    Sobre la regla 3: en agosto los 453 paquetes multiproducto sin ningun
+    producto caro tuvieron TODOS costo de envio cero, y los 37 con algun
+    producto caro tuvieron TODOS costo. La regla 2 es la que hace el trabajo;
+    la 3 esta para que un caso raro no se quede sin repartir.
+
+    El reparto de la regla 2 es en partes iguales POR LINEA, no por unidad: una
+    linea de tres unidades caras cuenta lo mismo que una de una sola. Es la
+    lectura literal del criterio ("en partes iguales entre los productos caros").
+    """
+    if not lineas or not costo:
+        return {}
+
+    if len(lineas) == 1:
+        return {lineas[0][0]: costo}
+
+    caras = [l for l in lineas if l[1] > UMBRAL_ENVIO_GRATIS]
+    if caras:
+        parte = costo / len(caras)
+        return {idx: parte for idx, _, _ in caras}
+
+    total = sum(valor for _, _, valor in lineas)
+    if total <= 0:
+        # Un paquete entero a precio cero no deberia existir, pero si existe es
+        # mejor partirlo en iguales que dividir por cero y dejar todo en NaN.
+        parte = costo / len(lineas)
+        return {idx: parte for idx, _, _ in lineas}
+    return {idx: costo * (valor / total) for idx, _, valor in lineas}
+
+
 ZONA = "America/Argentina/Buenos_Aires"
 
 
@@ -262,33 +322,33 @@ def construir_fact_ventas():
     # nada, pero deja lineas con una rentabilidad que no es la suya -- y son
     # justo las que despues aparecen como "margen muy bajo" en las alertas.
     #
-    # Por eso se trae tambien a que envio pertenece cada orden, y el costo se
-    # reparte entre TODAS las lineas de TODAS las ordenes del envio, proporcional
-    # a cuanto vale cada una. Para un envio de una sola orden da exactamente lo
-    # mismo que antes.
+    # Por eso se trae a que envio pertenece cada orden, y el costo se reparte
+    # entre TODAS las lineas de TODAS las ordenes del envio. Con que criterio se
+    # reparte lo decide repartir_envio(): ya no es siempre proporcional al monto.
+    # Para un envio de una sola linea da lo mismo que antes -- se lo lleva entero.
     env = pd.read_sql("""
         SELECT e.shipping_id,
                e.costo_envio,
-               v.id::bigint::text AS order_id,
-               -- coalesce por las dudas: un total en null envenenaria la suma
-               -- del envio entero y dejaria el reparto en NaN.
-               coalesce(v.total_amount, 0) AS total_amount
+               v.id::bigint::text AS order_id
         FROM bronze.ml_envios e
         JOIN bronze.ml_ventas v
           ON v."shipping.id"::bigint::text = e.shipping_id
-        WHERE v.status = 'paid'
+        -- Los dos estados que el modelo cuenta como venta. Antes decia solo
+        -- 'paid': una orden parcialmente devuelta dentro de un paquete no
+        -- encontraba su envio y entraba al tablero con flete cero.
+        WHERE v.status IN ('paid', 'partially_refunded')
     """, engine)
-    # ml_ventas puede traer la misma orden repetida; sin esto el total del envio
-    # se contaria dos veces y el reparto daria de menos.
     env = env.drop_duplicates(subset=["shipping_id", "order_id"])
 
-    total_por_envio = env.groupby("shipping_id")["total_amount"].sum()
-
-    # order_id -> (costo del envio al que pertenece, valor total de ESE envio)
-    envio_por_orden = {
-        r.order_id: (r.costo_envio, total_por_envio[r.shipping_id])
-        for r in env.itertuples()
-    }
+    # order_id -> shipping_id, y shipping_id -> costo del envio.
+    #
+    # Van separados porque el reparto ya no se puede resolver orden por orden:
+    # la regla mira a TODOS los productos del paquete para saber cuales
+    # dispararon el flete, y esos productos estan repartidos entre varias
+    # ordenes. Primero se juntan las lineas de cada envio, y recien al final se
+    # reparte (ver el bloque de Mercado Libre mas abajo).
+    envio_de_orden = dict(zip(env["order_id"], env["shipping_id"]))
+    costo_de_envio = dict(zip(env["shipping_id"], env["costo_envio"]))
 
     def costo_de(sku, mc):
         return costo_idx.get((str(sku), mc))
@@ -557,6 +617,15 @@ def construir_fact_ventas():
     # en la orden. O sea que sobreestiman un poco. Es menos malo que el error
     # anterior -- contarlas en cero -- pero no es exacto, y el tablero lo aclara.
     print("Procesando Mercado Libre (puede tardar)...")
+
+    # shipping_id -> [(indice en `filas`, precio unitario, valor de la linea)]
+    #
+    # Se acumula mientras se recorren los lotes y se reparte despues del while:
+    # un paquete se parte en varias ordenes que no tienen por que caer en el
+    # mismo lote, asi que dentro del loop todavia no se sabe con quien viajo
+    # cada producto.
+    lineas_por_envio = {}
+
     LOTE = 5000
     offset = 0
     while True:
@@ -583,11 +652,10 @@ def construir_fact_ventas():
             items = json.loads(r["order_items"]) if isinstance(r["order_items"], str) else r["order_items"]
             items = items or []
 
-            # Envio del paquete al que pertenece esta orden, y el valor total de
-            # ese paquete (que puede abarcar varias ordenes). Ya NETO: la API de
-            # ML devuelve el costo CON IVA.
-            envio_bruto, total_envio = envio_por_orden.get(str(r["id"]), (0, 0))
-            envio_neto = (envio_bruto or 0) / 1.21
+            # A que envio pertenece esta orden. El costo todavia no se toca: se
+            # reparte al final, cuando ya estan juntas las lineas de todas las
+            # ordenes del paquete.
+            ship = envio_de_orden.get(str(r["id"]))
 
             for it in items:
                 sku = (it.get("item") or {}).get("seller_sku")
@@ -602,32 +670,28 @@ def construir_fact_ventas():
                 precio_neto = precio / (1 + iva / 100)
                 costo = costo_de(sku, mc)
 
-                # Reparto del envio: proporcional al valor de esta linea sobre el
-                # valor de TODO el paquete. Si el paquete es una sola orden, el
-                # denominador es el total de la orden y da igual que antes.
-                valor_item = precio * cant
-                if total_envio and total_envio > 0:
-                    envio_item = envio_neto * (valor_item / float(total_envio))
-                else:
-                    envio_item = 0
-
-                # La comision va multiplicada por la cantidad: es por unidad.
+                # El envio queda en cero por ahora y el margen sin el: los dos se
+                # completan abajo, una vez repartido el flete del paquete.
+                #
+                # La comision SI va multiplicada por la cantidad: es por unidad.
                 # Sin el * cant, una linea de 10 unidades descontaba una sola
                 # comision y la ganancia de Mercado Libre quedaba inflada
                 # (21,5 M de mas sobre el historico, un 13%).
-                # El envio NO se multiplica: envio_item ya es la parte de esta
-                # linea del envio total de la orden.
                 margen = (
                     None if costo is None
-                    else (precio_neto - costo - comision) * cant - envio_item
+                    else (precio_neto - costo - comision) * cant
                 )
+                if ship is not None:
+                    lineas_por_envio.setdefault(ship, []).append(
+                        (len(filas), precio, precio * cant)
+                    )
                 filas.append({
                     "canal": "Mercado Libre", "unidad": "Quo", "tipo": "Fiscal", "nro_orden": r["id"],
                     "fecha": f, "mes_comercial": mc, "sku": sku,
                     "producto": (it.get("item") or {}).get("title"),
                     "cantidad": cant, "precio_unitario": precio, "precio_neto": precio_neto,
                     "iva_pct": iva, "costo_unitario": costo, "comision": comision,
-                    "envio": round(envio_item, 2),
+                    "envio": 0.0,
                     "total_linea": cant * precio, "margen_total": margen,
                     "proveedor": proveedor_de(sku),
                     "marca": marca_de(sku),
@@ -635,6 +699,35 @@ def construir_fact_ventas():
                 })
 
         offset += LOTE
+
+    # --- Reparto del envio de Mercado Libre ---
+    #
+    # Recien aca, con todas las lineas de todas las ordenes ya juntas por envio,
+    # se puede aplicar el criterio: mira a todo el paquete para saber que
+    # productos dispararon el flete. Ver repartir_envio().
+    #
+    # El costo viene CON IVA de la API de ML y se pasa a neto para poder
+    # restarlo de una venta neta.
+    #
+    # OJO: se reparte el 100% del flete entre las lineas que TENEMOS. Si una
+    # orden del paquete quedo afuera de la ventana o del criterio de venta, su
+    # parte la absorben las demas en vez de perderse. El total del canal cierra
+    # siempre; lo que puede correrse es a que linea le toca.
+    repartidos = 0
+    for ship, lineas in lineas_por_envio.items():
+        costo_bruto = costo_de_envio.get(ship)
+        # El pd.isna() no es de mas: costo_envio sale de un DataFrame, asi que un
+        # envio sin costo llega como NaN y NO como None. NaN es truthy y pasaria
+        # el `not`, dejando el envio y el margen de todo el paquete en NaN.
+        if costo_bruto is None or pd.isna(costo_bruto) or not costo_bruto:
+            continue
+        for idx, parte in repartir_envio(costo_bruto / 1.21, lineas).items():
+            fila = filas[idx]
+            fila["envio"] = round(parte, 2)
+            if fila["margen_total"] is not None:
+                fila["margen_total"] -= parte
+            repartidos += 1
+    print(f"  Envio de ML repartido en {repartidos} lineas de {len(lineas_por_envio)} paquetes")
 
 
     # El texto sale de CUTOFF y no de WINDOW_DAYS, que es una constante y no
