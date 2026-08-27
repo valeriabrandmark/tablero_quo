@@ -6,6 +6,7 @@ from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from conexion import crear_engine
+import errores_bd
 
 load_dotenv()
 
@@ -370,6 +371,54 @@ def construir_fact_ventas():
         v = iva_por_sku.get(str(sku))
         return float(v) if v is not None else 21.0   # default 21 si no se encuentra
 
+    # ARANCELES DE LAS PASARELAS DE TIENDA NUBE.
+    #
+    # Tienda Nube no informa la comision en el pedido -- no hay campo con el
+    # monto ni con el neto liquidado --, pero si manda que pasarela y que medio
+    # se uso. Con eso y la tabla de aranceles se calcula.
+    #
+    # Las filas estan versionadas por `vigente_desde` porque los aranceles
+    # cambian y una venta de mayo se liquido con el arancel de mayo. Es el mismo
+    # criterio que costos_historicos, y evita el problema que si tiene el umbral
+    # de envio gratis de Mercado Libre, que es un valor unico para toda la
+    # historia. Ver comisiones_pasarela.sql.
+    try:
+        com = pd.read_sql("""
+            SELECT gateway, metodo, vigente_desde,
+                   tasa_pct * (1 + iva_pct/100) + cpt_pct AS efectiva_pct
+            FROM bronze.comisiones_pasarela
+            ORDER BY gateway, metodo, vigente_desde
+        """, engine)
+    except Exception as e:
+        # La tabla la crea comisiones_pasarela.sql, que puede no haberse
+        # aplicado todavia. Sin ella el canal sigue como estaba -- comision en
+        # cero, que es como venia -- en vez de dejar el modelo sin actualizar.
+        if not errores_bd.es_tabla_inexistente(e):
+            raise
+        print("  (bronze.comisiones_pasarela no existe: Tienda Nube va sin comision)")
+        com = pd.DataFrame(columns=["gateway", "metodo", "vigente_desde", "efectiva_pct"])
+
+    # (gateway, metodo) -> [(vigente_desde, pct), ...] ordenado por fecha
+    aranceles = {}
+    for r in com.itertuples():
+        aranceles.setdefault((r.gateway, r.metodo), []).append(
+            (to_date(r.vigente_desde), float(r.efectiva_pct))
+        )
+
+    def arancel_de(gateway, metodo, fecha):
+        """El % que cobra la pasarela por un pedido, o None si no hay tarifa.
+
+        Devuelve None y no 0 a proposito: 0 significa "no cobra" (un pedido
+        100% bonificado) y None significa "no se cuanto cobra". Confundirlos
+        haria que un medio de pago nuevo entre al tablero como gratis, y nadie
+        se enteraria."""
+        tarifas = aranceles.get((gateway, metodo))
+        if not tarifas or fecha is None:
+            return None
+        # La ultima que ya estaba vigente el dia del pedido.
+        vigentes = [pct for desde, pct in tarifas if desde is not None and desde <= fecha]
+        return vigentes[-1] if vigentes else None
+
     filas = []
 
     # --- 1) SIGMA ---
@@ -541,6 +590,10 @@ def construir_fact_ventas():
     # `partially_refunded`) que tampoco son venta.
     print("Procesando Tienda Nube...")
 
+    # Medios de pago para los que no hay arancel cargado. Se junta durante el
+    # recorrido y se avisa una sola vez al final, en vez de una linea por pedido.
+    medios_sin_arancel = set()
+
     # `envio_costo_tienda` lo empezo a traer tiendanube.py despues, asi que puede
     # no estar todavia: el orquestador corre Tienda Nube cada 12 h pero modelo.py
     # en todas las corridas, y sin este chequeo la primera corrida despues de un
@@ -575,9 +628,24 @@ def construir_fact_ventas():
         """).scalar()
     col_cupon = "cupon" if hay_cupon else "NULL AS cupon"
 
+    # Mismo guard, para el medio de pago crudo con el que se cruza el arancel.
+    with engine.begin() as con:
+        hay_pago = con.exec_driver_sql("""
+            SELECT count(*) = 2 FROM information_schema.columns
+            WHERE table_schema = 'bronze' AND table_name = 'tn_pedidos_items'
+              AND column_name IN ('gateway', 'metodo_pago')
+        """).scalar()
+    if not hay_pago:
+        print("  (bronze.tn_pedidos_items todavia no trae el medio de pago: corre tiendanube.py)")
+    cols_pago = (
+        "gateway, metodo_pago" if hay_pago
+        else "NULL AS gateway, NULL AS metodo_pago"
+    )
+
     tn = pd.read_sql(f"""
         SELECT pedido_id, pedido_numero, fecha, sku, nombre, cantidad, precio,
-               cliente_nombre, subtotal_pedido, descuento, {col_cupon}, {cols_envio}
+               cliente_nombre, subtotal_pedido, descuento, total_pedido,
+               {col_cupon}, {cols_pago}, {cols_envio}
         FROM bronze.tn_pedidos_items
         WHERE estado_pago = 'paid' AND estado <> 'cancelled'
           AND fecha >= '{piso_sql()}'
@@ -701,11 +769,33 @@ def construir_fact_ventas():
         envio_bruto = importe(r["envio_costo_tienda"]) - cobrado_real
         envio_item = (envio_bruto / 1.21) * (valor_item / total) if total > 0 else 0
 
-        # Sin comision: Tienda Nube no la informa en el pedido. Lo que cobra la
-        # pasarela de pago NO esta en ningun campo de la API, asi que se deja en
-        # 0 en vez de inventar un porcentaje. El margen de este canal queda por
-        # eso un poco optimista, y el tablero lo dice.
-        margen = None if costo is None else (precio_neto_real - costo) * cant - envio_item
+        # COMISION DE LA PASARELA.
+        #
+        # Se cobra sobre lo que el cliente PAGO DE VERDAD -- `total_pedido`, que
+        # ya viene con el descuento restado y el envio sumado -- y no sobre el
+        # valor de la mercaderia: la pasarela cobra por mover plata, y le da
+        # igual si esa plata era producto o flete. En el pedido 130 el total fue
+        # $0, asi que la comision da 0 sola, sin ningun caso especial.
+        #
+        # Se prorratea entre las lineas igual que el envio y el descuento, y se
+        # guarda POR UNIDAD porque asi la usa el resto del modelo: Mercado Libre
+        # guarda `comision` por unidad y el margen la multiplica por la cantidad.
+        pct = arancel_de(r["gateway"], r["metodo_pago"], f)
+        if pct is None:
+            # Medio de pago sin arancel cargado. Queda en 0 -- que es como venia
+            # el canal -- pero se avisa: si no, una pasarela nueva entraria al
+            # tablero como gratis y nadie se enteraria.
+            medios_sin_arancel.add((r["gateway"], r["metodo_pago"]))
+            comision_item = 0.0
+        else:
+            cobrado_pedido = importe(r["total_pedido"])
+            comision_item = (cobrado_pedido * pct / 100) * (valor_item / total) if total > 0 else 0.0
+        comision_unidad = comision_item / cant if cant else 0.0
+
+        margen = (
+            None if costo is None
+            else (precio_neto_real - costo - comision_unidad) * cant - envio_item
+        )
         filas.append({
             "canal": "Tienda Nube", "unidad": "Quo", "tipo": "Fiscal",
             "nro_orden": r["pedido_numero"],
@@ -715,7 +805,7 @@ def construir_fact_ventas():
             # y ninguna consulta tiene que acordarse de restar nada. Cuanto se
             # resigno queda en `descuento`, y por que, en `cupon`.
             "cantidad": cant, "precio_unitario": precio_real, "precio_neto": precio_neto_real,
-            "iva_pct": iva, "costo_unitario": costo, "comision": 0,
+            "iva_pct": iva, "costo_unitario": costo, "comision": comision_unidad,
             "envio": round(envio_item, 2),
             "descuento": round(desc_item, 2),
             "cupon": r["cupon"] if isinstance(r["cupon"], str) else None,
@@ -724,6 +814,12 @@ def construir_fact_ventas():
             "marca": marca_de(sku),
             "cliente": r["cliente_nombre"],
         })
+
+    if medios_sin_arancel:
+        detalle = ", ".join(f"{g or '?'}/{m or '?'}" for g, m in sorted(
+            medios_sin_arancel, key=lambda x: (x[0] or "", x[1] or "")))
+        print(f"  OJO: sin arancel cargado, comision en 0 para: {detalle}")
+        print("  Se agregan en bronze.comisiones_pasarela (ver comisiones_pasarela.sql)")
 
 # --- 3) MERCADO LIBRE (en lotes; reparte envio proporcional al precio) ---
     #

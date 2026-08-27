@@ -244,6 +244,13 @@ def extraer_pedidos_y_items():
             "envio_cobrado": pedido.get("shipping_cost_customer"),
             "envio_opcion": pedido.get("shipping_option"),
             "medio_pago": pedido.get("gateway_name"),
+            # `medio_pago` es el nombre lindo ("Pago Nube") y sirve para mostrar.
+            # Estos dos son los valores CRUDOS, que son con los que se cruza la
+            # tabla de aranceles: la comision depende de la pasarela Y del medio
+            # -- una transferencia por Pago Nube cuesta 0,85% y una tarjeta
+            # 2,99%. Sin estos dos campos no hay forma de saber cual aplicar.
+            "gateway": pedido.get("gateway"),
+            "metodo_pago": (pedido.get("payment_details") or {}).get("method"),
             "provincia": direccion.get("province"),
             "ciudad": direccion.get("city"),
         }
