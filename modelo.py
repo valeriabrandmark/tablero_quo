@@ -142,6 +142,19 @@ def es_anulacion_total(r):
     return round(float(r["importePropio"]), 2) == round(-float(r["importeOriginal"]), 2)
 
 
+def importe(valor):
+    """Un importe de un DataFrame como float, y los vacios en 0.
+
+    El `or 0` de siempre no alcanza: pandas no devuelve None para una celda
+    vacia, devuelve NaN -- que es un float y ADEMAS es truthy, asi que pasa el
+    `or` y envenena toda la cuenta que siga. Es el mismo NaN que rompio
+    mercaderia_perdida().
+    """
+    if valor is None or pd.isna(valor):
+        return 0.0
+    return float(valor)
+
+
 # Umbral de envio gratis de Mercado Libre, con IVA, sobre el precio de UNA
 # unidad de la publicacion (no sobre el total de la linea ni del carrito).
 #
@@ -536,28 +549,78 @@ def construir_fact_ventas():
     # en vez de dejar el modelo entero sin actualizar.
     with engine.begin() as con:
         hay_envio = con.exec_driver_sql("""
-            SELECT EXISTS (
-                SELECT 1 FROM information_schema.columns
-                WHERE table_schema = 'bronze' AND table_name = 'tn_pedidos_items'
-                  AND column_name = 'envio_costo_tienda'
-            )
+            SELECT count(*) = 2 FROM information_schema.columns
+            WHERE table_schema = 'bronze' AND table_name = 'tn_pedidos_items'
+              AND column_name IN ('envio_costo_tienda', 'envio_cobrado')
         """).scalar()
     if not hay_envio:
         print("  (bronze.tn_pedidos_items todavia no trae envio: corre tiendanube.py)")
 
-    col_envio = "envio_costo_tienda" if hay_envio else "NULL AS envio_costo_tienda"
+    cols_envio = (
+        "envio_costo_tienda, envio_cobrado" if hay_envio
+        else "NULL AS envio_costo_tienda, NULL AS envio_cobrado"
+    )
     tn = pd.read_sql(f"""
         SELECT pedido_id, pedido_numero, fecha, sku, nombre, cantidad, precio,
-               cliente_nombre, {col_envio}
+               cliente_nombre, {cols_envio}
         FROM bronze.tn_pedidos_items
         WHERE estado_pago = 'paid' AND estado <> 'cancelled'
           AND fecha >= '{piso_sql()}'
     """, engine)
 
-    # `envio_costo_tienda` es lo que paga LA TIENDA por el flete, y viene en la
-    # cabecera del pedido: esta repetido igual en todas sus lineas. Se reparte
-    # entre ellas proporcional al valor de cada una, igual que en Mercado Libre,
-    # para que un pedido de tres productos no cargue el flete entero a uno.
+    # EL FLETE DE TIENDA NUBE ES LA DIFERENCIA, NO EL BRUTO.
+    #
+    # La API manda dos importes de envio y no son lo mismo:
+    #   envio_costo_tienda (shipping_cost_owner)    -> lo que le pagamos al correo
+    #   envio_cobrado      (shipping_cost_customer) -> lo que nos reembolsa el cliente
+    #
+    # Lo que nos cuesta el flete es la RESTA. En el pedido #160 los dos dan
+    # $19.222: el cliente pago el envio entero y a nosotros no nos costo nada.
+    # En el #115 pagamos $16.461 y el cliente $0 -- ahi va "Descuento por envio
+    # gratis" en la pantalla de Tienda Nube -- y esos $16.461 si son costo.
+    #
+    # Antes se restaba el bruto y listo. El reembolso del cliente no se sumaba
+    # por ningun lado: vive en la cabecera del pedido (total = subtotal -
+    # descuento + envio_cobrado) y no en ninguna linea de producto, asi que
+    # nunca entraba a gold.fact_ventas. Resultado: se descontaba un flete que en
+    # la mayoria de los pedidos ya estaba cobrado.
+    #
+    # No se topa en cero a proposito. Si algun dia el cliente paga mas envio del
+    # que nos sale, esa diferencia es ganancia y corresponde que sume margen.
+    # Hoy no pasa en ningun pedido.
+    #
+    # Los dos importes vienen CON IVA, asi que al restarlos el IVA se cancela y
+    # la diferencia se pasa a neto igual que antes.
+    #
+    # POR QUE NETEAR A CERO ES LO CORRECTO Y NO NOS ESTAMOS PERDIENDO UN MARGEN.
+    #
+    # Al cliente se le cobra un recargo sobre el costo del envio para cubrir los
+    # impuestos que nos facturan por ese pago. En el pedido #160 la etiqueta del
+    # correo vale $17.522 y al cliente se le cobraron $19.222: esos $1.700 no son
+    # ganancia, se van en impuestos. El resultado economico real es cero, que es
+    # justo lo que da la resta.
+    #
+    # El valor de la etiqueta NO viaja en la API -- solo se ve en la pantalla de
+    # Tienda Nube; `fulfillments` trae tracking y transportista, nada de plata --
+    # asi que los dos importes de arriba son todo lo que hay, y alcanzan.
+    #
+    # LO QUE ESTO NO ARREGLA, dos cosas, las dos chicas:
+    #
+    # 1) El "Envio local Tucuman" viene en cero de los dos lados. Es reparto
+    #    propio, y lo que cuesta (nafta, cadete) no esta en ningun campo de la
+    #    API. Queda en cero en vez de inventarlo.
+    #
+    # 2) En los pedidos con ENVIO GRATIS absorbemos el precio cotizado, que ya
+    #    trae el recargo adentro. Si lo que realmente sale de caja fuera solo la
+    #    etiqueta, ahi estariamos cargando de mas. Sobre los 3 pedidos con costo
+    #    real de la ventana el techo del error son $7.068 -- contra los $221.041
+    #    que corrige netear, es ruido. Y puede estar bien como esta: cuando
+    #    absorbemos el envio pagamos la etiqueta Y los impuestos.
+    # El importe de envio viene en la CABECERA del pedido, repetido igual en
+    # todas sus lineas. Se reparte entre ellas proporcional al valor de cada
+    # una, para que un pedido de tres productos no le cargue el flete entero a
+    # uno solo. (Aca no aplica la regla por umbral de Mercado Libre: Tienda Nube
+    # no tiene envio gratis por precio de publicacion.)
     valor_pedido = {}
     for _, r in tn.iterrows():
         precio = float(r["precio"]) if r["precio"] else 0
@@ -575,9 +638,9 @@ def construir_fact_ventas():
         precio_neto = precio / (1 + iva / 100)
         costo = costo_de(sku, mc)
 
-        # El envio viene CON IVA, como el de Mercado Libre: se pasa a neto para
-        # poder restarlo de una venta neta.
-        envio_bruto = float(r["envio_costo_tienda"] or 0)
+        # Lo que nos cuesta el flete: lo que pagamos menos lo que nos reembolsa
+        # el cliente. Ver la nota larga arriba.
+        envio_bruto = importe(r["envio_costo_tienda"]) - importe(r["envio_cobrado"])
         valor_item = precio * cant
         total = valor_pedido.get(r["pedido_id"], 0)
         envio_item = (envio_bruto / 1.21) * (valor_item / total) if total > 0 else 0
