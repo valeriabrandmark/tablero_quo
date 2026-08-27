@@ -532,9 +532,30 @@ def construir_fact_ventas():
     # Los dos importes vienen CON IVA, asi que al restarlos el IVA se cancela y
     # la diferencia se pasa a neto igual que antes.
     #
-    # LO QUE ESTO NO ARREGLA: el "Envio local Tucuman" viene en cero de los dos
-    # lados. Es reparto propio, y lo que cuesta (nafta, cadete) no esta en
-    # ningun campo de la API. Queda en cero en vez de inventarlo.
+    # POR QUE NETEAR A CERO ES LO CORRECTO Y NO NOS ESTAMOS PERDIENDO UN MARGEN.
+    #
+    # Al cliente se le cobra un recargo sobre el costo del envio para cubrir los
+    # impuestos que nos facturan por ese pago. En el pedido #160 la etiqueta del
+    # correo vale $17.522 y al cliente se le cobraron $19.222: esos $1.700 no son
+    # ganancia, se van en impuestos. El resultado economico real es cero, que es
+    # justo lo que da la resta.
+    #
+    # El valor de la etiqueta NO viaja en la API -- solo se ve en la pantalla de
+    # Tienda Nube; `fulfillments` trae tracking y transportista, nada de plata --
+    # asi que los dos importes de arriba son todo lo que hay, y alcanzan.
+    #
+    # LO QUE ESTO NO ARREGLA, dos cosas, las dos chicas:
+    #
+    # 1) El "Envio local Tucuman" viene en cero de los dos lados. Es reparto
+    #    propio, y lo que cuesta (nafta, cadete) no esta en ningun campo de la
+    #    API. Queda en cero en vez de inventarlo.
+    #
+    # 2) En los pedidos con ENVIO GRATIS absorbemos el precio cotizado, que ya
+    #    trae el recargo adentro. Si lo que realmente sale de caja fuera solo la
+    #    etiqueta, ahi estariamos cargando de mas. Sobre los 3 pedidos con costo
+    #    real de la ventana el techo del error son $7.068 -- contra los $221.041
+    #    que corrige netear, es ruido. Y puede estar bien como esta: cuando
+    #    absorbemos el envio pagamos la etiqueta Y los impuestos.
     # El importe de envio viene en la CABECERA del pedido, repetido igual en
     # todas sus lineas. Se reparte entre ellas proporcional al valor de cada
     # una, para que un pedido de tres productos no le cargue el flete entero a
