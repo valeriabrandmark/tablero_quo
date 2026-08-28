@@ -13,12 +13,17 @@
 --
 -- Lo que si es del canal es el abono: se paga todos los meses, se venda o no,
 -- y no cambia con la pasarela. Por eso tiene tabla propia.
+-- UNA FILA POR MES, y la ultima sigue vigente hasta que se cargue otra. Asi si
+-- alguien se olvida de cargar el mes que viene, el tablero arrastra el ultimo
+-- abono conocido en vez de mostrar cero -- que se leeria como que el plan dejo
+-- de costar. En un pais donde el abono sube todos los meses, arrastrar el
+-- anterior se queda corto; mostrar cero miente.
 create table if not exists bronze.costos_plataforma_tn (
   vigente_desde date primary key,
   plan          text not null,
-  -- Nullable a proposito: mientras no tengamos la factura, el tablero muestra
-  -- lo que genera la operacion y avisa que falta el dato, en vez de dar por
-  -- sentado que el plan es gratis.
+  -- Nullable a proposito: mientras no este la factura de ese mes, el tablero
+  -- muestra lo que genera la operacion y avisa que falta el dato, en vez de
+  -- dar por sentado que el plan es gratis.
   abono_mensual numeric,
   nota          text
 );
@@ -26,7 +31,18 @@ create table if not exists bronze.costos_plataforma_tn (
 comment on table bronze.costos_plataforma_tn is
   'Abono mensual del plan de Tienda Nube, versionado por fecha. El costo por transaccion NO va aca: es por cobro y vive en bronze.comisiones_pasarela.cpt_pct.';
 
+-- LOS IMPORTES NO SE VERSIONAN ACA. Este repositorio es publico y lo que se
+-- paga de abono es informacion comercial nuestra, no una lista de precios: los
+-- aranceles de pasarela si estan commiteados porque son publicos, esto no.
+--
+-- Los valores viven cargados en la base. Para agregar el mes que viene:
+--
+--   insert into bronze.costos_plataforma_tn (vigente_desde, plan, abono_mensual, nota)
+--   values ('2026-09-01', 'Escala', <lo que dice la factura>, 'Abono de factura');
+--
+-- La fila semilla queda con el abono en null para que un despliegue limpio
+-- arranque avisando que falta el dato, y no inventando uno.
 insert into bronze.costos_plataforma_tn (vigente_desde, plan, abono_mensual, nota)
 values ('2026-05-01', 'Escala', null,
-        'Abono pendiente de confirmar contra la factura.')
+        'Semilla. El abono real se carga en la base, no se versiona.')
 on conflict (vigente_desde) do nothing;
