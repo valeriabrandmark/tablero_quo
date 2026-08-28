@@ -385,7 +385,8 @@ def construir_fact_ventas():
     try:
         com = pd.read_sql("""
             SELECT gateway, metodo, vigente_desde,
-                   tasa_pct * (1 + iva_pct/100) + cpt_pct AS efectiva_pct
+                   tasa_pct * (1 + iva_pct/100) AS pasarela_pct,
+                   cpt_pct                      AS plataforma_pct
             FROM bronze.comisiones_pasarela
             ORDER BY gateway, metodo, vigente_desde
         """, engine)
@@ -396,22 +397,34 @@ def construir_fact_ventas():
         if not errores_bd.es_tabla_inexistente(e):
             raise
         print("  (bronze.comisiones_pasarela no existe: Tienda Nube va sin comision)")
-        com = pd.DataFrame(columns=["gateway", "metodo", "vigente_desde", "efectiva_pct"])
+        com = pd.DataFrame(columns=["gateway", "metodo", "vigente_desde",
+                                    "pasarela_pct", "plataforma_pct"])
 
-    # (gateway, metodo) -> [(vigente_desde, pct), ...] ordenado por fecha
+    # LA TARIFA SON DOS COSAS SUMADAS, Y SE GUARDAN SEPARADAS.
+    #
+    # Lo que se descuenta de un cobro por Nave son 2,8780%, pero eso no es un
+    # numero: son 1,80% + IVA que cobra Nave por mover la plata, MAS 0,7% que
+    # cobra Tienda Nube por usar la plataforma. Pago Nube bonifica esa segunda
+    # parte, por eso su fila lleva cpt_pct = 0.
+    #
+    # El total no cambia -- se sigue restando lo mismo --, pero partido se
+    # puede ver de donde sale, que es la unica forma de contestar "cuanto me
+    # cuesta cobrar por Nave contra cobrar por Pago Nube".
+    #
+    # (gateway, metodo) -> [(vigente_desde, pasarela, plataforma), ...]
     aranceles = {}
     for r in com.itertuples():
         aranceles.setdefault((r.gateway, r.metodo), []).append(
-            (to_date(r.vigente_desde), float(r.efectiva_pct))
+            (to_date(r.vigente_desde), float(r.pasarela_pct), float(r.plataforma_pct))
         )
 
     def arancel_de(gateway, metodo, fecha):
-        """El % que cobra la pasarela por un pedido, o None si no hay tarifa.
+        """(% de la pasarela, % de la plataforma) del pedido, o None si no hay.
 
-        Devuelve None y no 0 a proposito: 0 significa "no cobra" (un pedido
-        100% bonificado) y None significa "no se cuanto cobra". Confundirlos
-        haria que un medio de pago nuevo entre al tablero como gratis, y nadie
-        se enteraria."""
+        Devuelve None y no (0, 0) a proposito: 0 significa "no cobra" (un
+        pedido 100% bonificado) y None significa "no se cuanto cobra".
+        Confundirlos haria que un medio de pago nuevo entre al tablero como
+        gratis, y nadie se enteraria."""
         # Un pedido sin cobro (`free`) no trae `payment_details`, asi que el
         # medio llega vacio. La tabla lo tiene cargado como "ninguno" con 0%:
         # sin esta traduccion ese pedido no encontraria su fila y saldria
@@ -424,7 +437,8 @@ def construir_fact_ventas():
         if not tarifas or fecha is None:
             return None
         # La ultima que ya estaba vigente el dia del pedido.
-        vigentes = [pct for desde, pct in tarifas if desde is not None and desde <= fecha]
+        vigentes = [(a, b) for desde, a, b in tarifas
+                    if desde is not None and desde <= fecha]
         return vigentes[-1] if vigentes else None
 
     filas = []
@@ -788,21 +802,27 @@ def construir_fact_ventas():
         # Se prorratea entre las lineas igual que el envio y el descuento, y se
         # guarda POR UNIDAD porque asi la usa el resto del modelo: Mercado Libre
         # guarda `comision` por unidad y el margen la multiplica por la cantidad.
-        pct = arancel_de(r["gateway"], r["metodo_pago"], f)
-        if pct is None:
+        tarifa = arancel_de(r["gateway"], r["metodo_pago"], f)
+        if tarifa is None:
             # Medio de pago sin arancel cargado. Queda en 0 -- que es como venia
             # el canal -- pero se avisa: si no, una pasarela nueva entraria al
             # tablero como gratis y nadie se enteraria.
             medios_sin_arancel.add((r["gateway"], r["metodo_pago"]))
-            comision_item = 0.0
+            comision_item = cpt_item = 0.0
         else:
+            pasarela_pct, plataforma_pct = tarifa
             cobrado_pedido = importe(r["total_pedido"])
-            comision_item = (cobrado_pedido * pct / 100) * (valor_item / total) if total > 0 else 0.0
+            parte = (valor_item / total) if total > 0 else 0.0
+            comision_item = cobrado_pedido * pasarela_pct / 100 * parte
+            # NO ES UN COSTO EXTRA: es la otra mitad de la misma tarifa. Lo que
+            # se descuenta en total es lo mismo que antes de separarlas.
+            cpt_item = cobrado_pedido * plataforma_pct / 100 * parte
         comision_unidad = comision_item / cant if cant else 0.0
+        cpt_unidad = cpt_item / cant if cant else 0.0
 
         margen = (
             None if costo is None
-            else (precio_neto_real - costo - comision_unidad) * cant - envio_item
+            else (precio_neto_real - costo - comision_unidad - cpt_unidad) * cant - envio_item
         )
         filas.append({
             "canal": "Tienda Nube", "unidad": "Quo", "tipo": "Fiscal",
@@ -814,6 +834,7 @@ def construir_fact_ventas():
             # resigno queda en `descuento`, y por que, en `cupon`.
             "cantidad": cant, "precio_unitario": precio_real, "precio_neto": precio_neto_real,
             "iva_pct": iva, "costo_unitario": costo, "comision": comision_unidad,
+            "costo_transaccion": cpt_unidad,
             "envio": round(envio_item, 2),
             "descuento": round(desc_item, 2),
             "cupon": r["cupon"] if isinstance(r["cupon"], str) else None,
@@ -995,7 +1016,8 @@ def construir_fact_ventas():
                 '  ADD COLUMN IF NOT EXISTS descuento double precision, '
                 '  ADD COLUMN IF NOT EXISTS cupon text, '
                 '  ADD COLUMN IF NOT EXISTS pasarela text, '
-                '  ADD COLUMN IF NOT EXISTS metodo_pago text'
+                '  ADD COLUMN IF NOT EXISTS metodo_pago text, '
+                '  ADD COLUMN IF NOT EXISTS costo_transaccion double precision'
             )
 
     # EL BORRADO Y LA INSERCION VAN EN LA MISMA TRANSACCION.
