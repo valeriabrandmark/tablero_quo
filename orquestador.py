@@ -257,6 +257,26 @@ PASOS = [
     {"comando": "digip_pedidos.py",            "intentos": 3, "espera": 60,
      "cada_horas": None, "critico": False, "escribe": "digip_pedidos", "techo": 10 * 60},
 
+    # FACTURAS DE COMPRA. Estaba escrito en sigma.py pero comentado, asi que
+    # nunca corrio solo: alguien lo ejecuto a mano una vez y la tabla quedo
+    # congelada el 11/06/2026 -- dos meses y medio sin comprobantes, con la
+    # columna "ultima compra" del tablero de Stock mostrando fechas viejas.
+    #
+    # UNA VEZ POR DIA Y NO EN CADA CORRIDA. Una factura de compra no se carga en
+    # SIGMA a los minutos de pactarla, y la decision que alimenta -- si conviene
+    # recomprar un articulo -- se toma con dias de anticipacion, no con horas.
+    # Pedirla 24 veces por dia serian 23 llamadas para traer lo mismo.
+    #
+    # `primera_del_dia` y no `cada_horas: 24` por lo mismo que el catalogo de
+    # Mercado Libre: con 24 h el paso va corriendose de a poco hasta caer
+    # cualquier tarde; "primera del dia" lo fija a la madrugada.
+    #
+    # La ventana de sigma.py se auto-repara, asi que la primera corrida cierra
+    # sola el agujero de junio a hoy sin que haya que rellenar nada a mano.
+    {"comando": "sigma.py --compras",          "intentos": 2, "espera": 60,
+     "cada_horas": None, "primera_del_dia": True, "critico": False,
+     "escribe": "sigma_compras", "techo": 15 * 60},
+
     # PASA A CORRER EN CADA CORRIDA. Estaba en `cada_horas: 6` de cuando el
     # script consultaba TODOS los pedidos historicos, uno por uno: 9,8 min de
     # mediana, y espaciarlo era la unica forma de que no se comiera el

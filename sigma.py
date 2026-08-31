@@ -43,6 +43,11 @@ HEADERS = {"X-Auth-Token": TOKEN}
 # Fecha de corte ABSOLUTA (piso historico, nunca se pide nada anterior a esto)
 FECHA_INICIO_VENTAS = date(2026, 5, 6)
 
+# Desde cuando hay facturas de compra cargadas. Es el piso de la ventana de
+# compras: si la tabla esta vacia, se pide desde aca y no desde el principio de
+# los tiempos.
+FECHA_INICIO_COMPRAS = date(2026, 1, 1)
+
 # Ventana movil: cada corrida solo re-pide (y reemplaza) los ultimos N dias.
 # El resto del historial en bronze.sigma_ventas queda intacto.
 WINDOW_DAYS = 7
@@ -238,18 +243,61 @@ def extraer_ventas():
     guardar_ventana_en_bd(df, "sigma_ventas", "fecha", cutoff)
 
 
+def _ultima_compra_cargada():
+    """La fecha de la ultima factura de compra que ya esta en bronze.
+
+    Devuelve None si la tabla no existe o esta vacia."""
+    try:
+        engine = _crear_engine()
+        with engine.begin() as con:
+            fila = con.exec_driver_sql(
+                'SELECT max("fechaFactura")::date FROM bronze.sigma_compras'
+            ).scalar()
+        return fila
+    except Exception as e:
+        print(f"  (no se pudo leer la ultima compra cargada: {e})")
+        return None
+
+
 def extraer_compras():
-    """Facturas de compra (a proveedores): tambien por ventana movil."""
+    """Facturas de compra (a proveedores), por ventana movil que se auto-repara.
+
+    LA VENTANA NO ES FIJA, y ese es el punto. Con `hoy - 7` a secas, un dia sin
+    corrida deja un agujero que no se llena NUNCA: la corrida siguiente pide los
+    ultimos 7 dias y lo anterior ya no se vuelve a pedir. Paso: el paso estuvo
+    apagado desde el 11/06/2026 y quedaron dos meses y medio sin comprobantes.
+
+    Asi que la ventana arranca en la mas VIEJA de dos fechas: los ultimos 7 dias,
+    o la ultima factura que hay cargada. En una corrida normal las dos dan casi
+    lo mismo y se piden 7 dias; despues de un corte, se pide todo lo que falto y
+    el agujero se cierra solo en la primera corrida.
+
+    El piso es FECHA_INICIO_COMPRAS para que una tabla vacia no dispare un pedido
+    sin limite."""
     print("\n=== COMPRAS (facturas de compra) ===")
 
     hoy = date.today()
-    cutoff = max(date(hoy.year, 1, 1), hoy - timedelta(days=WINDOW_DAYS))
+    ventana = hoy - timedelta(days=WINDOW_DAYS)
+    ultima = _ultima_compra_cargada()
+    if ultima:
+        print(f"  Ultima compra cargada: {ultima}")
+    cutoff = max(FECHA_INICIO_COMPRAS, min(ventana, ultima or ventana))
+
     dde = cutoff.isoformat()
     hta = hoy.isoformat()
-    print(f"  Ventana: {dde} a {hta}")
+    dias = (hoy - cutoff).days
+    print(f"  Ventana: {dde} a {hta} ({dias} dias)")
 
     datos = llamar_sigma("ExportFacturasCompra", {"dde": dde, "hta": hta})
     print(f"  {len(datos)} facturas de compra en la ventana")
+
+    # SIN RENGLONES NO SE SABE QUE SE COMPRO. El tablero de Stock usa `items`
+    # para saber la ultima compra de cada SKU, asi que conviene ver de una si el
+    # endpoint los esta trayendo: una caida silenciosa de ese campo dejaria la
+    # columna vacia sin que nada falle.
+    if datos:
+        con_items = sum(1 for d in datos if d.get("items"))
+        print(f"  Con detalle de renglones: {con_items} de {len(datos)}")
 
     df = pd.json_normalize(datos)
     guardar_ventana_en_bd(df, "sigma_compras", "fechaFactura", cutoff)
@@ -259,12 +307,15 @@ def extraer_compras():
 #  EJECUCION
 # ============================================================
 
-# Las dos extracciones activas no envejecen igual ni cuestan lo mismo:
+# Las tres extracciones activas no envejecen igual ni cuestan lo mismo:
 #
 #   ventas   -> ventana movil de 7 dias. Es el corazon del tablero y hay que
 #               pedirlo seguido.
 #   catalogo -> los ~8.200 articulos, reescritos enteros. Un articulo nuevo o un
 #               cambio de descripcion no pasa cada dos horas.
+#   compras  -> ventana movil que se auto-repara. Alimenta la columna "ultima
+#               compra" del tablero de Stock; una compra del dia no la espera
+#               nadie, asi que va una vez por dia.
 #
 # Estaban juntos, asi que el catalogo se recargaba entero en cada corrida:
 # 335.816 inserciones acumuladas para tener 8.194 filas vivas, o sea unas 41
@@ -279,10 +330,12 @@ def main():
                         help="Solo las ventas (ventana movil)")
     parser.add_argument("--catalogo", action="store_true",
                         help="Solo el catalogo de articulos")
+    parser.add_argument("--compras", action="store_true",
+                        help="Solo las facturas de compra (ventana movil)")
     args = parser.parse_args()
 
     # Sin flags = todo, para no romper a quien ya lo corre a mano asi.
-    todo = not (args.ventas or args.catalogo)
+    todo = not (args.ventas or args.catalogo or args.compras)
 
     print("URL base:", URL_BASE)
     print("Token cargado:", "SI" if TOKEN else "NO")
@@ -291,12 +344,13 @@ def main():
         extraer_ventas()
     if todo or args.catalogo:
         extraer_articulos()
+    if todo or args.compras:
+        extraer_compras()
 
     # Estos siguen apagados; se activan cuando haga falta, no cada corrida.
     #extraer_clientes()
     #extraer_cuentas_corrientes()
     #extraer_ofertas()
-    #extraer_compras()
     # extraer_stock()  -> el stock ahora viene de DIGIP, no de Sigma
 
     print("\n=== LISTO. Revisa las tablas en Supabase (esquema bronze). ===")

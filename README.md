@@ -61,10 +61,11 @@ esperaba media hora por datos que no usa.
 | 8 | `ml_pulso.py` | **siempre** | `bronze.ml_estado_item`, `ml_precio_item` | no |
 | 9 | `digip.py` | siempre | `bronze.digip_stock`, `digip_stock_detalle` | no |
 | 10 | `digip_pedidos.py` | siempre | `bronze.digip_pedidos` | no |
-| 11 | `digip_preparaciones.py` | 6 h | `bronze.digip_preparaciones` | no |
-| 12 | `prorratear_flete.py` | 12 h | `gold.fact_ventas_flete` | no |
-| 13 | `clasificar_clientes.py` | siempre | `gold.clientes_clasificados` | no |
-| 14 | `mercadolibre.py --catalogo` | **1/día** | `bronze.ml_publicaciones`, `ml_stock_full`, `ml_stock_full_historico` | no |
+| 11 | `sigma.py --compras` | **1/día** | `bronze.sigma_compras` | no |
+| 12 | `digip_preparaciones.py` | siempre | `bronze.digip_preparaciones` | no |
+| 13 | `prorratear_flete.py` | 12 h | `gold.fact_ventas_flete` | no |
+| 14 | `clasificar_clientes.py` | siempre | `gold.clientes_clasificados` | no |
+| 15 | `mercadolibre.py --catalogo` | **1/día** | `bronze.ml_publicaciones`, `ml_stock_full`, `ml_stock_full_historico` | no |
 
 **`ml_pulso.py` es el primero del bloque 2 y no el último, a propósito.** El
 resto de este bloque refresca *fotos*: si un paso se saltea, su tabla conserva
