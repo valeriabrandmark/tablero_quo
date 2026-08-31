@@ -128,6 +128,20 @@ todo.append(check_bool("cubren la historia pedida",
                        (vs[-1][1] - vs[0][0]).days >= DIAS_HISTORIA - 1,
                        f"cubren {(vs[-1][1] - vs[0][0]).days} de {DIAS_HISTORIA}"))
 
+# ---------------------------------------------------------------------------
+# El promedio tiene que contar TAMBIEN las unidades sin explicar. Si no, un
+# articulo con 42 unidades nuevas y 86 viejas promedia "2 dias" y dice justo lo
+# contrario de lo que pasa.
+# ---------------------------------------------------------------------------
+
+r = antiguedad([op(2, 42)], 128, hoy=HOY)   # 42 explicadas, 86 sin explicar
+piso = round((2 * 42 + DIAS_HISTORIA * 86) / 128, 1)
+todo.append(check_bool(
+    f"el promedio cuenta las no explicadas ({r['dias_promedio']} y no 2.0)",
+    r["dias_promedio"] == piso, f"esperado {piso}"))
+todo.append(check_bool("y con eso el promedio deja de ser enga\u00f1oso",
+                       r["dias_promedio"] > 60))
+
 # El caso que rompio: una historia que es multiplo exacto del tamaño de ventana.
 import ml_antiguedad as _m
 _orig = _m.DIAS_HISTORIA

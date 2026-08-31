@@ -309,6 +309,19 @@ def antiguedad(ops, stock_actual, hoy=None):
         else:
             tramos["u_mas_120"] += cant
 
+    # LAS NO EXPLICADAS TAMBIEN CUENTAN EN EL PROMEDIO, con la edad minima que
+    # se les conoce: DIAS_HISTORIA.
+    #
+    # Sin esto el promedio miente y miente FEO. JMEQ05485 tiene 42 unidades de
+    # dos dias y 86 de mas de 120; promediando solo las explicadas daba
+    # "2 dias", que es exactamente lo contrario de lo que pasa. Contandolas da
+    # 81, que si describe el stock que hay.
+    #
+    # Es un PISO: las viejas pueden llevar 400 dias y aca cuentan como 120. Un
+    # piso sirve --dice "por lo menos tanto"--; el promedio de arriba no servia
+    # para nada.
+    dias_por_unidad += [DIAS_HISTORIA] * faltantes
+
     total = sum(tramos.values())
     promedio = round(sum(dias_por_unidad) / len(dias_por_unidad), 1) if dias_por_unidad else None
 
