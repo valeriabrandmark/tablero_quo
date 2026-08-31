@@ -83,6 +83,8 @@ from datetime import date, datetime, timedelta, timezone
 import pandas as pd
 from dotenv import load_dotenv
 
+import requests
+
 from conexion import crear_engine
 from mercadolibre import llamar_ml, renovar_access_token
 
@@ -94,10 +96,11 @@ USER_ID = os.getenv("ML_USER_ID")
 # lleva 300 o 400 dias no cambia ninguna decision.
 DIAS_HISTORIA = 365
 
-# La API acepta rangos largos, pero pedir un año de una para ~1.800 inventarios
-# es mucha respuesta por llamada. En tramos de 90 dias entra comodo y son 5
-# llamadas por inventario.
-DIAS_POR_LLAMADA = 90
+# EL RANGO MAXIMO POR LLAMADA SON 60 DIAS. Con 90 la API contesta 400 en TODAS
+# las llamadas -- probado contra la cuenta real. No es un limite que convenga
+# estirar "por las dudas": es el que dice la documentacion y el que aplica el
+# servidor.
+DIAS_POR_LLAMADA = 60
 
 # Mismo criterio que el stock: rapido sin acercarse al 429. `llamar_ml` ademas
 # reintenta esperando lo que la API pida.
@@ -143,15 +146,47 @@ def inventarios_con_stock(limite=None):
     return pd.read_sql(sql, _engine())
 
 
+def _con_cuerpo(fn):
+    """Ejecuta y, si la API rechaza, agrega el CUERPO de la respuesta al error.
+
+    `raise_for_status()` arma un mensaje con la URL y tira el cuerpo, que es
+    justo donde Mercado Libre explica que parametro esta mal. Sin esto un 400
+    dice "Bad Request for url: ..." y hay que adivinar; con esto dice "The field
+    date_from has an invalid value" y no hay nada que adivinar.
+
+    Nos costo dos vueltas aprenderlo. No se repite.
+    """
+    try:
+        return fn()
+    except requests.HTTPError as e:
+        cuerpo = ""
+        if e.response is not None:
+            cuerpo = e.response.text[:300].replace("\n", " ")
+        raise RuntimeError(f"{e.response.status_code if e.response is not None else '?'} · {cuerpo}") from e
+
+
+def ventanas(hoy=None):
+    """Los tramos de fechas a pedir, del mas viejo al mas nuevo.
+
+    OJO CON EL OFF-BY-ONE: la API cuenta los dos extremos, asi que una ventana
+    de "60 dias" va de D a D+59, no a D+60. Con D+60 son 61 dias y contesta 400.
+    """
+    hoy = hoy or date.today()
+    tramos = []
+    desde = hoy - timedelta(days=DIAS_HISTORIA)
+    while desde <= hoy:
+        hasta = min(hoy, desde + timedelta(days=DIAS_POR_LLAMADA - 1))
+        tramos.append((desde, hasta))
+        desde = hasta + timedelta(days=1)
+    return tramos
+
+
 def operaciones(inv_id, token):
     """Todas las operaciones del inventario en el ultimo año, mas viejas primero."""
-    hoy = date.today()
     filas = []
-    desde = hoy - timedelta(days=DIAS_HISTORIA)
 
-    while desde < hoy:
-        hasta = min(hoy, desde + timedelta(days=DIAS_POR_LLAMADA))
-        datos = llamar_ml(
+    for desde, hasta in ventanas():
+        datos = _con_cuerpo(lambda: llamar_ml(
             "/stock/fulfillment/operations/search",
             token,
             params={
@@ -161,9 +196,8 @@ def operaciones(inv_id, token):
                 "date_to": hasta.isoformat(),
             },
             pausa=False,
-        )
+        ))
         filas += datos.get("results", [])
-        desde = hasta + timedelta(days=1)
 
     # La API pagina con `scroll` y no con offset, asi que puede repetir filas
     # entre ventanas contiguas. El id es unico por operacion: con el alcanza.
@@ -293,7 +327,7 @@ def main():
     if fallados:
         print(f"  ATENCION: {len(fallados)} inventarios fallaron")
         for f in fallados[:5]:
-            print(f"    {f['inventory_id']}: {f['error'][:120]}")
+            print(f"    {f['inventory_id']}: {f['error'][:400]}")
 
     if args.probar:
         for f in buenas:
