@@ -116,7 +116,26 @@ todo.append(check_bool("ninguna ventana se pasa del maximo",
                        f"largos: {largos}"))
 todo.append(check_bool("las ventanas no dejan huecos ni se pisan",
                        all((vs[i+1][0] - vs[i][1]).days == 1 for i in range(len(vs)-1))))
-todo.append(check_bool("cubren toda la historia pedida",
-                       (vs[-1][1] - vs[0][0]).days == DIAS_HISTORIA))
+# LA REGLA QUE FALTABA, y la que hizo fallar los 20 inventarios: la API rechaza
+# una ventana de un solo dia con "date_from can't be greater or equal to
+# date_to". Pasa cuando la historia es multiplo del tamaño de ventana.
+todo.append(check_bool("ninguna ventana es de un solo dia",
+                       all(d < h for d, h in vs),
+                       str([(str(d), str(h)) for d, h in vs if d >= h])))
+todo.append(check_bool("la ventana mas nueva termina hoy",
+                       vs[-1][1] == HOY.date()))
+todo.append(check_bool("cubren la historia pedida",
+                       (vs[-1][1] - vs[0][0]).days >= DIAS_HISTORIA - 1,
+                       f"cubren {(vs[-1][1] - vs[0][0]).days} de {DIAS_HISTORIA}"))
+
+# El caso que rompio: una historia que es multiplo exacto del tamaño de ventana.
+import ml_antiguedad as _m
+_orig = _m.DIAS_HISTORIA
+for h in (60, 120, 180, 240, 365, 61, 119):
+    _m.DIAS_HISTORIA = h
+    v = _m.ventanas(HOY.date())
+    ok = v and all(d < h2 for d, h2 in v) and all((h2 - d).days + 1 <= DIAS_POR_LLAMADA for d, h2 in v)
+    todo.append(check_bool(f"historia de {h} dias: ventanas validas", bool(ok), str(v)))
+_m.DIAS_HISTORIA = _orig
 
 print("\n" + ("TODO OK" if all(todo) else "HAY FALLAS"))
