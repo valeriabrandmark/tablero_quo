@@ -119,7 +119,11 @@ TRAMOS = [(30, "u_0_30"), (60, "u_31_60"), (90, "u_61_90"), (120, "u_91_120")]
 DDL = """
 create table if not exists bronze.ml_stock_antiguedad (
   fecha          date not null,
+  -- La clave es el INVENTARIO porque es la unidad fisica de stock que Mercado
+  -- Libre mueve y factura. `sku` va al lado como atributo, que es lo que hace
+  -- la tabla usable: `LSGZ75310` no le dice nada a nadie, `GL26017` si.
   inventory_id   text not null,
+  sku            text,
   unidades       integer not null,
   dias_promedio  numeric,
   u_0_30         integer not null default 0,
@@ -132,6 +136,13 @@ create table if not exists bronze.ml_stock_antiguedad (
   incompleto     boolean not null default false,
   primary key (fecha, inventory_id)
 );
+-- Para la tabla que ya se haya creado sin la columna: `create table if not
+-- exists` no agrega columnas a una que ya existe, asi que sin esto una base que
+-- corrio la version anterior se quedaria sin `sku` para siempre.
+alter table bronze.ml_stock_antiguedad add column if not exists sku text;
+-- El tablero busca por SKU y por dia, nunca por inventory_id suelto.
+create index if not exists ml_stock_antiguedad_sku_fecha
+  on bronze.ml_stock_antiguedad (sku, fecha desc);
 """
 
 
@@ -140,13 +151,41 @@ def _engine():
 
 
 def inventarios_con_stock(limite=None):
-    """Solo los que HOY tienen unidades. Preguntar por los vacios seria pedir la
-    historia de algo que ya no esta en el deposito."""
+    """Los inventarios que HOY tienen unidades, con SU SKU y su descripcion.
+
+    Preguntar por los vacios seria pedir la historia de algo que ya no esta en
+    el deposito.
+
+    EL `inventory_id` NO ES NUESTRO SKU. Es un codigo interno de Mercado Libre
+    (`LSGZ75310`), y guardar la antiguedad solo con eso deja una tabla que no se
+    puede cruzar con nada: ni con el stock de Tucuman, ni con las ventas, ni con
+    los costos. El SKU vive dentro del array `attributes` de la publicacion, en
+    `SELLER_SKU` -- el mismo rodeo que hace extraer_stock_full, por lo mismo.
+
+    Empalma bien: de los 1.853 inventarios con stock, los 1.853 tienen SKU, y
+    solo 5 SKU usan mas de un inventario.
+    """
     sql = """
-        select inventory_id, available_quantity
-        from bronze.ml_stock_full
-        where available_quantity > 0
-        order by available_quantity desc
+        with mapa as (
+          select p.inventory_id,
+                 max((select a->>'value_name'
+                        from jsonb_array_elements(p.attributes::jsonb) a
+                       where a->>'id' = 'SELLER_SKU'
+                       limit 1)) as sku
+          from bronze.ml_publicaciones p
+          where p."shipping.logistic_type" = 'fulfillment'
+            and p.inventory_id is not null
+          group by p.inventory_id
+        )
+        select f.inventory_id,
+               f.available_quantity,
+               m.sku,
+               art.descripcion as articulo
+        from bronze.ml_stock_full f
+        left join mapa m on m.inventory_id = f.inventory_id
+        left join bronze.sigma_articulos art on trim(art.id) = m.sku
+        where f.available_quantity > 0
+        order by f.available_quantity desc
     """
     if limite:
         sql += f" limit {int(limite)}"
@@ -375,10 +414,12 @@ def main():
                 stock = int(fila.available_quantity)
             r = antiguedad(ops, int(stock))
             r["inventory_id"] = inv_id
+            r["sku"] = fila.sku
             r["operaciones"] = len(ops)
+            r["articulo"] = fila.articulo
         except Exception as e:
             # Como en el stock: el error queda a la vista y no como un cero.
-            r = {"inventory_id": inv_id, "error": str(e)}
+            r = {"inventory_id": inv_id, "sku": fila.sku, "error": str(e)}
         n = next(hechos)
         if n % 200 == 0:
             print(f"    Procesados: {n} de {len(df_inv)}")
@@ -405,9 +446,12 @@ def main():
 
     if args.probar:
         for f in buenas:
-            print(f"\n  {f['inventory_id']}  ({f.pop('operaciones')} operaciones)")
+            ops_n = f.pop("operaciones")
+            art = f.pop("articulo", None) or "(sin maestro)"
+            print(f"\n  {f['sku']}  {art[:44]}")
+            print(f"     ({f['inventory_id']} · {ops_n} operaciones)")
             for k, v in f.items():
-                if k != "inventory_id":
+                if k not in ("inventory_id", "sku"):
                     print(f"     {k:<16} {v}")
         print("\n  (modo prueba: no se guardo nada)")
         return
@@ -416,7 +460,9 @@ def main():
         print("  Sin datos para guardar.")
         return
 
-    df = pd.DataFrame(buenas).drop(columns=["operaciones"], errors="ignore")
+    # `articulo` no se guarda: ya vive en bronze.sigma_articulos y copiarlo aca
+    # seria tener el nombre en dos lados, con uno de los dos siempre viejo.
+    df = pd.DataFrame(buenas).drop(columns=["operaciones", "articulo"], errors="ignore")
     df["fecha"] = date.today()
     incompletos = int(df["incompleto"].sum())
     print(f"  {len(df)} inventarios calculados · {incompletos} con historia incompleta")
