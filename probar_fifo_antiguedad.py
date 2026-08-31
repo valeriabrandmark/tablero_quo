@@ -10,13 +10,19 @@ nada y devolvia 15 unidades donde habia 5.
 """
 
 from datetime import datetime, timedelta, timezone
-from ml_antiguedad import antiguedad
+from ml_antiguedad import DIAS_HISTORIA, DIAS_POR_LLAMADA, antiguedad, ventanas
 
 HOY = datetime(2026, 8, 31, tzinfo=timezone.utc)
 
 def op(dias_atras, delta, tipo="INBOUND_RECEPTION"):
     f = (HOY - timedelta(days=dias_atras)).isoformat().replace("+00:00", "Z")
     return {"date_created": f, "type": tipo, "detail": {"available_quantity": delta}}
+
+def check_bool(nombre, ok, detalle=""):
+    print(("OK  " if ok else "MAL ") + nombre)
+    if not ok and detalle:
+        print("     " + detalle)
+    return ok
 
 def check(nombre, ops, stock, esperado):
     r = antiguedad(ops, stock, hoy=HOY)
@@ -66,5 +72,22 @@ esperado = round((10*3 + 50*1) / 4, 1)
 ok = r["dias_promedio"] == esperado
 print(("OK  " if ok else "MAL ") + f"promedio ponderado ({r['dias_promedio']} vs {esperado})")
 todo.append(ok)
+
+
+# ---------------------------------------------------------------------------
+# Las ventanas de fechas. La API cuenta LOS DOS EXTREMOS, asi que una ventana de
+# "60 dias" va de D a D+59: con D+60 son 61 y contesta 400 en todas las
+# llamadas. Es exactamente lo que paso la primera vez que se corrio.
+# ---------------------------------------------------------------------------
+
+vs = ventanas(HOY.date())
+largos = [(h - d).days + 1 for d, h in vs]
+todo.append(check_bool("ninguna ventana se pasa del maximo",
+                       all(n <= DIAS_POR_LLAMADA for n in largos),
+                       f"largos: {largos}"))
+todo.append(check_bool("las ventanas no dejan huecos ni se pisan",
+                       all((vs[i+1][0] - vs[i][1]).days == 1 for i in range(len(vs)-1))))
+todo.append(check_bool("cubren toda la historia pedida",
+                       (vs[-1][1] - vs[0][0]).days == DIAS_HISTORIA))
 
 print("\n" + ("TODO OK" if all(todo) else "HAY FALLAS"))
