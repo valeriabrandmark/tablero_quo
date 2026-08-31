@@ -10,13 +10,17 @@ nada y devolvia 15 unidades donde habia 5.
 """
 
 from datetime import datetime, timedelta, timezone
-from ml_antiguedad import DIAS_HISTORIA, DIAS_POR_LLAMADA, antiguedad, ventanas
+from ml_antiguedad import (DIAS_HISTORIA, DIAS_POR_LLAMADA, antiguedad,
+                           stock_segun_operaciones, ventanas)
 
 HOY = datetime(2026, 8, 31, tzinfo=timezone.utc)
 
-def op(dias_atras, delta, tipo="INBOUND_RECEPTION"):
+def op(dias_atras, delta, tipo="INBOUND_RECEPTION", saldo=None):
     f = (HOY - timedelta(days=dias_atras)).isoformat().replace("+00:00", "Z")
-    return {"date_created": f, "type": tipo, "detail": {"available_quantity": delta}}
+    o = {"date_created": f, "type": tipo, "detail": {"available_quantity": delta}}
+    if saldo is not None:
+        o["result"] = {"available_quantity": saldo}
+    return o
 
 def check_bool(nombre, ok, detalle=""):
     print(("OK  " if ok else "MAL ") + nombre)
@@ -79,6 +83,31 @@ todo.append(ok)
 # "60 dias" va de D a D+59: con D+60 son 61 y contesta 400 en todas las
 # llamadas. Es exactamente lo que paso la primera vez que se corrio.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Solo INBOUND_RECEPTION arranca el reloj. Una venta cancelada devuelve unidades
+# que YA tenian edad: contarlas como ingreso nuevo rejuvenece stock viejo.
+# ---------------------------------------------------------------------------
+
+todo.append(check("una cancelacion no rejuvenece el stock",
+    [op(200, 10),
+     op(5, -4, "SALE_CONFIRMATION"),
+     op(2, 4, "SALE_CANCELATION")], 10,
+    {"unidades": 10, "u_0_30": 0, "u_mas_120": 10, "incompleto": False}))
+
+todo.append(check("una devolucion tampoco",
+    [op(150, 6), op(10, -6, "SALE_CONFIRMATION"), op(1, 2, "SALE_RETURN")], 2,
+    {"unidades": 2, "u_mas_120": 2, "u_0_30": 0}))
+
+# ---------------------------------------------------------------------------
+# El stock de referencia sale de la ultima operacion, no de la tabla: la tabla
+# la refresca el catalogo una vez por dia y a la tarde ya esta vieja.
+# ---------------------------------------------------------------------------
+
+todo.append(check_bool("el stock sale del saldo de la ultima operacion",
+    stock_segun_operaciones([op(9, 5, saldo=300), op(1, -1, "SALE_CONFIRMATION", saldo=286)]) == 286))
+todo.append(check_bool("sin operaciones no inventa un stock",
+    stock_segun_operaciones([]) is None))
 
 vs = ventanas(HOY.date())
 largos = [(h - d).days + 1 for d, h in vs]

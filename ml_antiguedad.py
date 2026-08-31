@@ -77,6 +77,7 @@ fecha del primer ingreso que vimos lo haria parecer nuevo.
 import argparse
 import itertools
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 
@@ -91,10 +92,13 @@ from mercadolibre import llamar_ml, renovar_access_token
 load_dotenv()
 USER_ID = os.getenv("ML_USER_ID")
 
-# Hasta donde se pide historia. Un año es lo que la API conserva, y de todas
-# formas pasados los 120 dias ya cae en el ultimo tramo del cargo: saber si algo
-# lleva 300 o 400 dias no cambia ninguna decision.
-DIAS_HISTORIA = 365
+# Hasta donde se pide historia.
+#
+# 180 Y NO 365. Pasados los 120 dias ya cae en el ultimo tramo del cargo, asi
+# que saber si algo lleva 200 o 400 dias no cambia ninguna decision -- y cada
+# mes de historia son ~1.800 llamadas mas. Con 180 son 3 ventanas por
+# inventario en vez de 7: menos de la mitad del costo para la misma respuesta.
+DIAS_HISTORIA = 180
 
 # EL RANGO MAXIMO POR LLAMADA SON 60 DIAS. Con 90 la API contesta 400 en TODAS
 # las llamadas -- probado contra la cuenta real. No es un limite que convenga
@@ -102,9 +106,10 @@ DIAS_HISTORIA = 365
 # servidor.
 DIAS_POR_LLAMADA = 60
 
-# Mismo criterio que el stock: rapido sin acercarse al 429. `llamar_ml` ademas
-# reintenta esperando lo que la API pida.
-HILOS = 12
+# CUATRO Y NO DOCE. Este endpoint aguanta MUCHO menos que el de stock: con 12
+# hilos, 21 llamadas (3 inventarios) ya dieron 13 reintentos por 429. Subir los
+# hilos no acelera nada cuando la API frena: sube la espera.
+HILOS = 4
 
 # Los cortes del cargo por almacenamiento de Mercado Libre.
 TRAMOS = [(30, "u_0_30"), (60, "u_31_60"), (90, "u_61_90"), (120, "u_91_120")]
@@ -205,19 +210,46 @@ def operaciones(inv_id, token):
     return sorted(unicas.values(), key=lambda f: f.get("date_created", ""))
 
 
+def stock_segun_operaciones(ops):
+    """El saldo que deja la ultima operacion, o None si no hay ninguna.
+
+    ES MEJOR QUE `bronze.ml_stock_full`, y no por poco. Esa tabla la refresca el
+    catalogo de Mercado Libre una vez por dia (01:05), asi que a la tarde ya
+    esta vieja: para LSGZ75310 decia 303 unidades cuando la API contestaba 286.
+    Mezclar las salidas de HOY con un total de AYER daba 303 unidades repartidas
+    en tramos, 17 mas de las que hay.
+
+    Cada operacion trae en `result` el saldo que quedo despues de aplicarla, asi
+    que la ultima ES el stock actual -- y viene de la misma respuesta que las
+    entradas y las salidas, que es lo que hace que la cuenta cierre.
+    """
+    if not ops:
+        return None
+    return (ops[-1].get("result") or {}).get("available_quantity")
+
+
 def antiguedad(ops, stock_actual, hoy=None):
     """FIFO sobre las operaciones -> cuantas unidades hay en cada tramo de dias."""
     hoy = hoy or datetime.now(timezone.utc)
 
-    entradas = []   # [(fecha, cantidad)] mas viejas primero
+    # SOLO `INBOUND_RECEPTION` ARRANCA EL RELOJ. Los otros deltas positivos son
+    # unidades que VUELVEN --una venta cancelada, una devolucion, una reserva de
+    # retiro que se dio de baja-- y esas ya tenian una edad: contarlas como
+    # ingreso nuevo rejuvenece stock viejo, que es justo el error que no
+    # queremos. Se restan de las salidas, que es lo que en realidad hacen.
+    entradas = []   # [[fecha, cantidad]] mas viejas primero
     salidas = 0
     for op in ops:
         delta = (op.get("detail") or {}).get("available_quantity") or 0
-        if delta > 0:
+        if delta == 0:
+            continue
+        if delta > 0 and op.get("type") == "INBOUND_RECEPTION":
             fecha = datetime.fromisoformat(op["date_created"].replace("Z", "+00:00"))
             entradas.append([fecha, delta])
-        elif delta < 0:
-            salidas += -delta
+        else:
+            salidas += -delta          # delta<0 suma, delta>0 (retorno) resta
+
+    salidas = max(0, salidas)
 
     # Se consumen las entradas mas viejas primero.
     for e in entradas:
@@ -297,6 +329,7 @@ def main():
     args = parser.parse_args()
 
     print("\n=== ANTIGUEDAD DEL STOCK EN FULL ===")
+    arranque = time.monotonic()
     token = renovar_access_token()
 
     df_inv = inventarios_con_stock(args.probar)
@@ -308,7 +341,12 @@ def main():
         inv_id = fila.inventory_id
         try:
             ops = operaciones(inv_id, token)
-            r = antiguedad(ops, int(fila.available_quantity))
+            # El stock sale de la ultima operacion; la tabla es el respaldo para
+            # el inventario que no tuvo ningun movimiento en la ventana.
+            stock = stock_segun_operaciones(ops)
+            if stock is None:
+                stock = int(fila.available_quantity)
+            r = antiguedad(ops, int(stock))
             r["inventory_id"] = inv_id
             r["operaciones"] = len(ops)
         except Exception as e:
@@ -321,6 +359,15 @@ def main():
 
     with ThreadPoolExecutor(max_workers=HILOS) as pool:
         filas = list(pool.map(procesar, df_inv.itertuples(index=False)))
+
+    # El tiempo por inventario es EL dato para decidir si esto entra en la
+    # corrida diaria: multiplicado por los ~1.800 con stock da el techo que hay
+    # que ponerle al paso. Medirlo con --probar sale mucho mas barato que
+    # descubrirlo cuando corta por tiempo en produccion.
+    tardo = time.monotonic() - arranque
+    por_inv = tardo / max(1, len(df_inv))
+    print(f"  Tardo {tardo/60:.1f} min · {por_inv:.1f} s por inventario")
+    print(f"  Proyeccion para 1.845 inventarios: {por_inv * 1845 / 60:.0f} min")
 
     fallados = [f for f in filas if "error" in f]
     buenas = [f for f in filas if "error" not in f]
