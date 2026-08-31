@@ -94,11 +94,13 @@ USER_ID = os.getenv("ML_USER_ID")
 
 # Hasta donde se pide historia.
 #
-# 180 Y NO 365. Pasados los 120 dias ya cae en el ultimo tramo del cargo, asi
-# que saber si algo lleva 200 o 400 dias no cambia ninguna decision -- y cada
-# mes de historia son ~1.800 llamadas mas. Con 180 son 3 ventanas por
-# inventario en vez de 7: menos de la mitad del costo para la misma respuesta.
-DIAS_HISTORIA = 180
+# 120 Y NO 365. Es exactamente lo que hace falta: el ultimo tramo del cargo por
+# almacenamiento es "mas de 120 dias", asi que todo lo que la historia de 120
+# dias no explique YA cae ahi. Pedir mas seria afinar un numero que no cambia
+# ninguna decision, y cada mes de historia son ~1.800 llamadas mas.
+#
+# Son 2 ventanas por inventario en vez de 7.
+DIAS_HISTORIA = 120
 
 # EL RANGO MAXIMO POR LLAMADA SON 60 DIAS. Con 90 la API contesta 400 en TODAS
 # las llamadas -- probado contra la cuenta real. No es un limite que convenga
@@ -173,17 +175,29 @@ def _con_cuerpo(fn):
 def ventanas(hoy=None):
     """Los tramos de fechas a pedir, del mas viejo al mas nuevo.
 
-    OJO CON EL OFF-BY-ONE: la API cuenta los dos extremos, asi que una ventana
-    de "60 dias" va de D a D+59, no a D+60. Con D+60 son 61 dias y contesta 400.
+    SE ARMAN DESDE HOY HACIA ATRAS, y no al reves. Yendo hacia adelante, cuando
+    la historia es multiplo del tamaño de ventana el ultimo tramo queda de UN
+    SOLO DIA -- desde == hasta -- y la API lo rechaza con "The field date_from
+    can't be greater or equal to date_to". Con 180 dias y ventanas de 60 pasaba
+    siempre: fallaban los 20 inventarios de la prueba.
+
+    Hacia atras el sobrante cae en el tramo mas VIEJO, que es el que no importa
+    si queda corto, y el mas nuevo siempre sale entero.
+
+    OJO TAMBIEN CON EL OFF-BY-ONE: la API cuenta los dos extremos, asi que una
+    ventana de "60 dias" va de D a D+59, no a D+60.
     """
     hoy = hoy or date.today()
+    limite = hoy - timedelta(days=DIAS_HISTORIA)
     tramos = []
-    desde = hoy - timedelta(days=DIAS_HISTORIA)
-    while desde <= hoy:
-        hasta = min(hoy, desde + timedelta(days=DIAS_POR_LLAMADA - 1))
+    hasta = hoy
+    while hasta > limite:
+        desde = max(limite, hasta - timedelta(days=DIAS_POR_LLAMADA - 1))
+        if desde >= hasta:
+            break          # un tramo de un dia no lo acepta la API
         tramos.append((desde, hasta))
-        desde = hasta + timedelta(days=1)
-    return tramos
+        hasta = desde - timedelta(days=1)
+    return list(reversed(tramos))
 
 
 def operaciones(inv_id, token):
