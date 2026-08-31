@@ -1,53 +1,117 @@
 """Sondeo: por donde puede venir la ANTIGUEDAD del stock en Full.
 
-POR QUE ESTE SCRIPT. El reporte de Full que se baja a mano tiene la columna
-"Unidades que afectan la metrica Con antiguedad", y el tablero de Stock la
-necesita. Buscamos ese campo en el endpoint que ya usamos y NO esta:
+QUE SE SABE HASTA ACA (corrida del 31/08/2026)
 
-    GET /inventories/{inventory_id}/stock/fulfillment
-    -> total, available_quantity, not_available_quantity,
-       not_available_detail (notSupported, withdrawal, damaged...),
-       external_references
+  GET /inventories/{id}/stock/fulfillment          -> 200, pero NO trae antiguedad
+      total, available_quantity, not_available_quantity,
+      not_available_detail (notSupported, withdrawal, damaged),
+      external_references. Ninguna fecha.
 
-Ni una fecha ni un dia de permanencia. Verificado tambien contra lo que hay
-guardado en bronze.ml_stock_full: ninguna columna dice cuando entro la unidad.
+  GET /stock/fulfillment/operations/search         -> 400 Bad Request
+  GET /marketplace/stock/fulfillment/operations/search -> 403 Forbidden
 
-LA HIPOTESIS QUE ESTE SCRIPT PRUEBA es que la antiguedad no se pide, se DERIVA
-del libro de movimientos del inventario:
+EL 400 ES LA PISTA BUENA. No es 404: la ruta existe y esta rechazando los
+parametros. El 403 de /marketplace/ es otra cosa -- esa familia es de Global
+Selling y esta aplicacion no tiene ese permiso, asi que por ahi no se entra.
 
-    GET /stock/fulfillment/operations/search
-        ?inventory_id=...&date_from=...&date_to=...
+LO QUE FALTABA EN LA VERSION ANTERIOR DE ESTE SCRIPT: usaba el helper comun,
+que hace `raise_for_status()` y tira el cuerpo de la respuesta. Justamente ahi
+Mercado Libre escribe QUE parametro le falta o esta mal. Ahora se llama con
+requests directo y se imprime el cuerpo pase lo que pase.
 
-Cada `inbound_reception` dice cuando entraron unidades. Con eso y las salidas
-(sale_confirmation, withdrawal_*) se reconstruye, por FIFO, hace cuanto esta en
-el deposito cada unidad que todavia queda. Que es exactamente lo que Mercado
-Libre cobra: el cargo por stock antiguo arranca a los 120 dias.
+Se prueba una matriz de variantes porque la documentacion de este endpoint esta
+incompleta y no coincide entre paises: con y sin seller_id, fechas como fecha y
+como timestamp, y los nombres alternativos que aparecen en la doc.
 
-NO ESCRIBE NADA EN LA BASE. Imprime lo que contesta la API para poder decidir
-con el dato a la vista en vez de con la documentacion, que para este endpoint
-esta incompleta.
+NO ESCRIBE NADA EN LA BASE.
 
     python probar_antiguedad_ml.py            # 3 inventarios con stock
-    python probar_antiguedad_ml.py XBIE01052  # uno puntual
+    python probar_antiguedad_ml.py LSGZ75310  # uno puntual
 """
 
 import json
+import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
+import requests
+from dotenv import load_dotenv
 
 from conexion import crear_engine
-from mercadolibre import llamar_ml, renovar_access_token
+from mercadolibre import renovar_access_token
 
-# El rango maximo que acepta el endpoint por llamada. Si se pide mas, contesta
-# error: para cubrir los 120 dias del cargo por antiguedad hay que encadenar
-# tres ventanas, y eso es parte de lo que hay que confirmar aca.
-DIAS_POR_LLAMADA = 60
+load_dotenv()
+USER_ID = os.getenv("ML_USER_ID")
+BASE = "https://api.mercadolibre.com"
+
+HOY = date.today()
+DESDE = HOY - timedelta(days=59)          # 60 dias contando los dos extremos
+HOY_TS = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+DESDE_TS = (datetime.now(timezone.utc) - timedelta(days=59)).replace(
+    microsecond=0).isoformat()
+
+
+def llamar(ruta, params, token):
+    """Llama y MUESTRA lo que conteste, con cuerpo y todo. Devuelve el json si
+    salio 200, o None."""
+    url = BASE + ruta
+    r = requests.get(url, headers={"Authorization": f"Bearer {token}"},
+                     params=params, timeout=30)
+    print(f"\n  {r.status_code}  {ruta}")
+    print(f"     params: {params}")
+    cuerpo = r.text[:900]
+    print(f"     cuerpo: {cuerpo}")
+    if r.status_code == 200:
+        try:
+            return r.json()
+        except Exception:
+            return None
+    return None
+
+
+def variantes(inv_id):
+    """Las combinaciones a probar, de la mas probable a la menos.
+
+    El orden no es capricho: la doc menciona `seller_id` como parametro del
+    endpoint, y un 400 con date_from/date_to ya puestos huele a que falta
+    justamente ese. Las de fecha con hora van despues porque varios endpoints
+    de ML aceptan las dos formas y algunos exigen la larga.
+    """
+    return [
+        ("/stock/fulfillment/operations/search",
+         {"seller_id": USER_ID, "inventory_id": inv_id,
+          "date_from": DESDE.isoformat(), "date_to": HOY.isoformat(), "limit": 50}),
+
+        ("/stock/fulfillment/operations/search",
+         {"seller_id": USER_ID, "inventory_id": inv_id,
+          "date_from": DESDE_TS, "date_to": HOY_TS, "limit": 50}),
+
+        ("/stock/fulfillment/operations/search",
+         {"seller_id": USER_ID, "inventory_id": inv_id, "limit": 50}),
+
+        ("/stock/fulfillment/operations/search",
+         {"seller_id": USER_ID, "limit": 50}),
+
+        # Sin fechas y sin seller: si contesta, el 400 era por un parametro
+        # obligatorio y no por la ruta.
+        ("/stock/fulfillment/operations/search",
+         {"inventory_id": inv_id, "limit": 50}),
+
+        # Variantes de ruta que aparecen en la doc de otros paises.
+        (f"/inventories/{inv_id}/stock/fulfillment/operations",
+         {"date_from": DESDE.isoformat(), "date_to": HOY.isoformat(), "limit": 50}),
+
+        (f"/inventories/{inv_id}/stock/fulfillment/operations/search",
+         {"date_from": DESDE.isoformat(), "date_to": HOY.isoformat(), "limit": 50}),
+
+        # El stock por deposito: en algunos paises trae un desglose mas fino que
+        # el resumen, y es donde podria colarse la antiguedad.
+        (f"/inventories/{inv_id}/stock/fulfillment/warehouses", {}),
+    ]
 
 
 def inventarios_de_prueba(n=3):
-    """Inventarios que HOY tienen stock. Con cero unidades no se ve nada."""
     engine = crear_engine()
     df = pd.read_sql(
         """
@@ -57,84 +121,59 @@ def inventarios_de_prueba(n=3):
         order by available_quantity desc
         limit %(n)s
         """,
-        engine,
-        params={"n": n},
+        engine, params={"n": n},
     )
     return list(df.itertuples(index=False))
 
 
-def mostrar(titulo, dato):
-    print(f"\n--- {titulo} ---")
-    print(json.dumps(dato, indent=2, ensure_ascii=False)[:2500])
-
-
 def sondear(inv_id, token):
-    print("=" * 70)
+    print("=" * 74)
     print(f"INVENTARIO {inv_id}")
-    print("=" * 70)
+    print("=" * 74)
 
-    # 1) Lo que ya usamos, para tenerlo al lado y comparar.
-    try:
-        mostrar(
-            "stock/fulfillment (el que ya usamos)",
-            llamar_ml(f"/inventories/{inv_id}/stock/fulfillment", token),
-        )
-    except Exception as e:
-        print(f"  FALLO: {e}")
+    r = llamar(f"/inventories/{inv_id}/stock/fulfillment", {}, token)
+    if r:
+        print("     (el que ya usamos, para tener al lado)")
 
-    hoy = date.today()
-    desde = hoy - timedelta(days=DIAS_POR_LLAMADA)
-
-    # 2) La apuesta: el libro de movimientos.
-    #
-    # Se prueban las DOS rutas que aparecen en la documentacion. La de
-    # /marketplace/ figura en la doc de Global Selling y la otra en la de MLA;
-    # cual anda para esta cuenta es justamente lo que no sabemos.
-    for ruta in (
-        "/stock/fulfillment/operations/search",
-        "/marketplace/stock/fulfillment/operations/search",
-    ):
-        try:
-            datos = llamar_ml(
-                ruta,
-                token,
-                params={
-                    "inventory_id": inv_id,
-                    "date_from": desde.isoformat(),
-                    "date_to": hoy.isoformat(),
-                    "limit": 50,
-                },
-            )
-            mostrar(f"{ruta}  ({desde} a {hoy})", datos)
-
-            # Lo que de verdad importa: si hay inbound_reception con fecha, la
-            # antiguedad se puede calcular. Si no, no.
-            filas = datos.get("results", datos if isinstance(datos, list) else [])
+    exitos = []
+    for ruta, params in variantes(inv_id):
+        datos = llamar(ruta, params, token)
+        if datos is None:
+            continue
+        exitos.append((ruta, params))
+        print("     >>> CONTESTO 200. Contenido:")
+        print(json.dumps(datos, indent=2, ensure_ascii=False)[:2000])
+        filas = datos.get("results") if isinstance(datos, dict) else datos
+        if isinstance(filas, list) and filas:
             tipos = sorted({f.get("type") for f in filas if isinstance(f, dict)})
-            print(f"  tipos de operacion vistos: {tipos or 'ninguno'}")
-        except Exception as e:
-            print(f"\n--- {ruta} ---\n  FALLO: {e}")
+            print(f"     >>> tipos de operacion: {tipos}")
+    return exitos
 
 
 def main():
     token = renovar_access_token()
+    print("ML User ID:", USER_ID)
+    print(f"Ventana: {DESDE} a {HOY}")
 
-    if len(sys.argv) > 1:
-        for inv_id in sys.argv[1:]:
-            sondear(inv_id, token)
-        return
+    objetivos = sys.argv[1:] or [f.inventory_id for f in inventarios_de_prueba()]
 
-    for fila in inventarios_de_prueba():
-        print(f"\n(stock disponible hoy: {fila.available_quantity})")
-        sondear(fila.inventory_id, token)
+    todos = []
+    for inv_id in objetivos:
+        todos += sondear(inv_id, token)
 
-    print("\n" + "=" * 70)
-    print("QUE MIRAR EN LO DE ARRIBA")
-    print("=" * 70)
-    print("1. Si alguna de las dos rutas de operations contesta 200.")
-    print("2. Si entre los tipos aparece 'inbound_reception' CON fecha.")
-    print("3. Si la fecha mas vieja alcanza para los 120 dias del cargo por")
-    print("   antiguedad, o si hay que encadenar tres ventanas de 60 dias.")
+    print("\n" + "=" * 74)
+    print("RESUMEN")
+    print("=" * 74)
+    if todos:
+        print("Contestaron 200:")
+        for ruta, params in todos:
+            print(f"  {ruta}  con {sorted(params)}")
+    else:
+        print("Ninguna variante contesto 200.")
+        print("Mirar los CUERPOS de los 400 de arriba: ahi Mercado Libre dice")
+        print("que parametro falta o esta mal. Con ese texto se arma la variante")
+        print("que si anda, o se confirma que el endpoint no esta habilitado")
+        print("para esta aplicacion.")
 
 
 if __name__ == "__main__":
