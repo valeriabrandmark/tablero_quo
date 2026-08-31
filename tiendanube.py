@@ -4,6 +4,8 @@ import requests
 import pandas as pd
 from dotenv import load_dotenv
 from conexion import crear_engine
+from contextlib import nullcontext
+from sqlalchemy.engine import Connection
 
 # Cuanto se espera una respuesta de la API: (CONECTAR, LEER), en segundos.
 #
@@ -123,6 +125,54 @@ def agregar_columnas_nuevas(engine, tabla, df):
         print(f"  columnas nuevas en {tabla}: {', '.join(faltan)}")
 
 
+def _sincronizar_columnas(destino, tabla, df):
+    """Agrega a la tabla las columnas que el origen empezo a mandar y no estan.
+
+    POR QUE EXISTE. El 31/08/2026 SIGMA sumo el campo `operacionId` a
+    ExportArticulosVendidos. `to_sql(if_exists="append")` no lo tolera: falla
+    con "Unconsumed column names" y se cae la extraccion ENTERA. Las ventas
+    mayoristas dejaron de actualizarse por una columna nueva que ni siquiera
+    usamos.
+
+    BRONZE ES LA ZONA DE ATERRIZAJE: su trabajo es aguantar lo que el origen
+    mande, no discutirlo. Un campo nuevo tiene que entrar solo; el tipado fino y
+    las reglas de negocio son tarea de gold.
+
+    SE AGREGA Y NO SE DESCARTA. Tirar las columnas desconocidas tambien evitaria
+    el error, pero en silencio: el dia que el origen mande algo que SI importa,
+    nadie se enteraria hasta necesitarlo. Asi queda guardado y avisado en el log.
+
+    Todo como `text`, que acepta cualquier cosa que venga. Convertirlo despues es
+    barato; perder el dato no.
+
+    `destino` PUEDE SER UN ENGINE O UNA CONEXION YA ABIERTA. Cuando el llamador
+    esta dentro de una transaccion hay que pasarle ESA conexion: abrir otra por
+    dentro pediria un ACCESS EXCLUSIVE sobre una tabla que la de afuera ya tiene
+    tomada, y las dos se quedarian esperando para siempre.
+    """
+    ctx = nullcontext(destino) if isinstance(destino, Connection) else destino.begin()
+    faltantes = []
+    with ctx as con:
+        existentes = {
+            f[0] for f in con.exec_driver_sql(
+                """SELECT column_name FROM information_schema.columns
+                   WHERE table_schema = 'bronze' AND table_name = %(t)s""",
+                {"t": tabla},
+            ).fetchall()
+        }
+        if not existentes:
+            return          # la tabla no existe todavia: la crea el to_sql
+        for col in df.columns:
+            if col not in existentes:
+                faltantes.append(col)
+                con.exec_driver_sql(
+                    f'ALTER TABLE bronze."{tabla}" ADD COLUMN IF NOT EXISTS "{col}" text'
+                )
+    if faltantes:
+        print(f"  COLUMNAS NUEVAS en bronze.{tabla}: {', '.join(faltantes)}")
+        print("  (agregadas como text: el origen cambio y quedo registrado)")
+
+
 def guardar_en_bd(df, tabla, modo="replace"):
     if df.empty:
         print(f"  (sin datos para {tabla})")
@@ -169,6 +219,7 @@ def guardar_en_bd(df, tabla, modo="replace"):
             # se nota.
             with engine.begin() as con:
                 con.exec_driver_sql(f'DELETE FROM bronze."{tabla}";')
+                _sincronizar_columnas(con, tabla, df)
                 df.to_sql(tabla, con, schema="bronze", if_exists="append", index=False)
             print(f"  Guardado (reemplazo atomico): bronze.{tabla} ({len(df)} filas)")
             return
@@ -176,6 +227,7 @@ def guardar_en_bd(df, tabla, modo="replace"):
             # La tabla todavia no existe: que la cree el to_sql de abajo.
             print(f"  (no se pudo truncate: {str(e)[:80]}... -> creando tabla)")
 
+    _sincronizar_columnas(engine, tabla, df)
     df.to_sql(tabla, engine, schema="bronze", if_exists=modo, index=False)
     print(f"  Guardado ({modo}): bronze.{tabla} ({len(df)} filas)")
 
