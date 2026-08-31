@@ -67,6 +67,22 @@ esperaba media hora por datos que no usa.
 | 14 | `clasificar_clientes.py` | siempre | `gold.clientes_clasificados` | no |
 | 15 | `mercadolibre.py --catalogo` | **1/día** | `bronze.ml_publicaciones`, `ml_stock_full`, `ml_stock_full_historico` | no |
 
+#### Aparte: `Antiguedad Full` (workflow propio)
+
+`ml_antiguedad.py` **no está en `PASOS`**, y es a propósito. Medido con
+`--probar 20`: 1,1 s por inventario, o sea **~35 min** para los ~1.845 con
+stock. El orquestador tiene 50 minutos de presupuesto para todo el pipeline,
+así que meterlo ahí se comería dos tercios y dejaría a las ventas esperando
+detrás de un dato que nadie mira en el momento.
+
+Corre solo, todos los días a las 03:40 ART, en `.github/workflows/antiguedad.yml`.
+Escribe `bronze.ml_stock_antiguedad`.
+
+Antes de gastar los 35 minutos corre `probar_fifo_antiguedad.py` — 24 casos que
+no tocan red ni base. Si la cuenta FIFO o las ventanas de fechas están rotas,
+mejor enterarse en el primer segundo que después de media hora de llamadas y con
+una foto mal calculada ya guardada.
+
 **`ml_pulso.py` es el primero del bloque 2 y no el último, a propósito.** El
 resto de este bloque refresca *fotos*: si un paso se saltea, su tabla conserva
 la anterior y el dato queda viejo de una corrida, no roto. El pulso no es eso —

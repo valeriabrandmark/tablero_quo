@@ -1,0 +1,79 @@
+name: Antiguedad Full
+
+# ============================================================================
+#  La antiguedad del stock en Mercado Libre Full, en su PROPIO workflow.
+#
+#  POR QUE NO VA ADENTRO DEL ORQUESTADOR. Medido con --probar 20: 1,1 s por
+#  inventario, o sea ~35 min para los ~1.845 con stock. El orquestador tiene un
+#  presupuesto de 50 minutos para TODO el pipeline, asi que meter este paso ahi
+#  se comeria dos tercios y dejaria a las ventas esperando detras de un dato que
+#  nadie mira en el momento.
+#
+#  Aca abajo tiene todo el tiempo que necesite y no compite con nada. Si un dia
+#  tarda 80 minutos, el tablero de ventas ni se entera.
+# ============================================================================
+
+on:
+  # 03:40 de Argentina (06:40 UTC). De madrugada porque son ~3.700 llamadas a la
+  # API de Mercado Libre y el endpoint de operaciones frena rapido: mejor cuando
+  # el resto del pipeline no le esta pidiendo nada.
+  #
+  # El minuto 40 y no el 0 por lo mismo que el orquestador: en las horas
+  # redondas la cola de GitHub esta llena y los atrasos son de media hora.
+  schedule:
+    - cron: '40 6 * * *'
+
+  workflow_dispatch:
+
+# Una corrida por vez, igual que el orquestador. Dos a la vez escribirian la
+# misma foto del dia y ademas se pisarian contra el limite de la API.
+#
+# Grupo PROPIO y no el del orquestador: son procesos independientes y no hay
+# motivo para que uno espere al otro.
+concurrency:
+  group: antiguedad-full
+  cancel-in-progress: false
+
+jobs:
+  correr:
+    runs-on: ubuntu-latest
+    # Holgado a proposito: 35 min es la medicion de hoy con ~1.845 inventarios,
+    # pero eso crece con el catalogo y los 429 son impredecibles. 90 deja lugar
+    # para que un dia malo termine igual, en vez de cortarse a mitad de camino y
+    # guardar una foto incompleta.
+    timeout-minutes: 90
+
+    env:
+      TZ: America/Argentina/Buenos_Aires
+
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASS: ${{ secrets.DB_PASS }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+
+      ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+      ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+      ML_REDIRECT_URI: ${{ secrets.ML_REDIRECT_URI }}
+      ML_USER_ID: ${{ secrets.ML_USER_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      # Corre ANTES de gastar 35 minutos contra la API. Son 24 casos que no
+      # tocan la red ni la base y tardan un segundo: si la cuenta FIFO o las
+      # ventanas de fechas estan rotas, mejor enterarse aca que despues de media
+      # hora de llamadas y con una foto mal calculada guardada en la base.
+      - name: Probar la cuenta antes de correrla
+        run: python probar_fifo_antiguedad.py
+
+      - name: Calcular la antiguedad
+        run: python ml_antiguedad.py
