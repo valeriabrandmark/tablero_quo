@@ -318,6 +318,21 @@ PASOS = [
      "cada_horas": None, "primera_del_dia": True, "critico": False,
      "escribe": "ml_publicaciones, ml_stock_full, ml_stock_full_historico",
      "techo": 20 * 60},
+
+    # El sell in del proveedor, de la planilla de Google. Va al panel de
+    # Compras: es el descuento que termina en la columna FDESCU1 de la orden.
+    #
+    # UNA VEZ POR DIA Y NO CADA CORRIDA. Es una planilla que alguien edita a
+    # mano cuando el proveedor manda las ofertas del mes: pedirla catorce veces
+    # por dia no la haria llegar antes.
+    #
+    # NO ES CRITICO. Si Google no contesta, o si ese dia la planilla esta a
+    # medio cargar, `bronze.sell_in` conserva lo de ayer y las ordenes se
+    # arman con eso. Voltear el pipeline entero por un descuento seria cambiar
+    # un dato viejo por todos.
+    {"comando": "sell_in.py",                  "intentos": 2, "espera": 60,
+     "cada_horas": None, "primera_del_dia": True, "critico": False,
+     "escribe": "sell_in", "techo": 5 * 60},
 ]
 
 CARPETA = os.path.dirname(os.path.abspath(__file__))

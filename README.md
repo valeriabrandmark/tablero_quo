@@ -66,6 +66,7 @@ esperaba media hora por datos que no usa.
 | 13 | `prorratear_flete.py` | 12 h | `gold.fact_ventas_flete` | no |
 | 14 | `clasificar_clientes.py` | siempre | `gold.clientes_clasificados` | no |
 | 15 | `mercadolibre.py --catalogo` | **1/día** | `bronze.ml_publicaciones`, `ml_stock_full`, `ml_stock_full_historico` | no |
+| 16 | `sell_in.py` | **1/día** | `bronze.sell_in` | no |
 
 #### Aparte: `Antiguedad Full` (workflow propio)
 
@@ -283,6 +284,95 @@ afectada porque `modelo.py` descarta duplicados, pero para limpiar la tabla est�
 `limpiar_duplicados_ml_envios.sql`.
 
 ---
+
+## El sell in del proveedor, desde Google Sheets
+
+`sell_in.py` lee la hoja **`Tablero`** del Google Sheet *2026 - Sell In Histórico* y escribe `bronze.sell_in`. De ahí sale el descuento que el panel de Compras pone en la columna `FDESCU1` de la orden.
+
+### Qué NO es
+
+`bronze.costos_historicos.oferta_pct` **no** sirve para esto. Ése es un sell in *calculado a partir de nuestras compras*, para trasladarlo a las ofertas del mes y valorizar el costo real: dice a cuánto nos quedó lo que ya compramos. Usarlo para pedir sería pedirle al proveedor con un descuento inventado, y el error viajaría en un archivo que alguien importa a Sigma sin volver a mirarlo.
+
+### Cómo lee la hoja
+
+Las seis primeras columnas identifican el artículo (`PROVEEDOR`, `MARCA`, `COD PROV`, `SKU`, `EAN`, `DESCRIPCIÓN`). **De ahí en adelante, cada columna es una oferta** y el encabezado dice cuál:
+
+| Encabezado | Se guarda como |
+|---|---|
+| `1/8/2026` | mes `2026-08`, evento vacío — **ésta es la que usa FDESCU1** |
+| `1/7/2026 (Glade)` | mes `2026-07`, evento `Glade` |
+| `HOT SALE` | evento `HOT SALE`, **sin mes** |
+| `3/8/2026` | evento `3/8/2026` — el día no es 1, ver abajo |
+
+Tres decisiones que conviene no revertir sin pensarlo:
+
+- **La fecha es día/mes/año y el día tiene que ser 1.** Con `1/8/2026`, día/mes/año dice agosto y mes/día/año dice enero: las dos lecturas son plausibles. Exigir que el día sea 1 —que es como se escriben las columnas de mes— hace que una fecha rara caiga como evento en vez de quedar en el mes equivocado.
+- **A un evento no se le inventa un mes.** `HOT SALE` está entre las columnas de mayo y junio y sería fácil deducir que es de mayo, pero deducirlo mal significa aplicar el descuento de una promo de tres días a la compra de un mes entero.
+- **Los ceros no se guardan.** La planilla trae `0,00%` en casi todas las celdas. Guardarlos serían cientos de miles de filas que no dicen nada, y además harían que el panel muestre `0` como un dato cargado en vez de «no hay oferta».
+
+Se lee la hoja resumen y no las 25 hojas mensuales a propósito: cada una tiene sus propios encabezados, y leerlas por posición ya desalineó 4.368 valores una vez.
+
+### De dónde llega la hoja: dos caminos, un solo parser
+
+`sell_in.py` puede recibir la hoja por dos vías, y **el código que la interpreta es el mismo en las dos**. La opción `--origen auto` usa la API si hay credencial de Google configurada, y si no, la foto que dejó la planilla.
+
+| Origen | Qué necesita | Quién lo configura |
+|---|---|---|
+| **`script`** — la planilla se manda sola | nada en Google Cloud | quien tenga edición en el Sheet |
+| **`api`** — se le pide a Google | una credencial | un administrador de Google Cloud |
+
+#### Camino 1 — el script adentro de la planilla. Sin administrador
+
+Un Apps Script dentro del Google Sheet lee la hoja una vez por día y la manda a la función `sell-in` del proyecto de Supabase, que la guarda tal cual en `bronze.sell_in_crudo`. Después el orquestador la interpreta con el mismo parser de siempre.
+
+**El Apps Script no interpreta nada, y eso es lo importante.** Manda los textos como se ven (`1/8/2026`, `7,69%`) con `getDisplayValues()` — que es exactamente lo que devuelve la API de Google con `FORMATTED_VALUE`. Las dos rutas entregan lo mismo, así que hay **un** parser con sus pruebas en vez de dos que se van separando.
+
+El código está en `apps_script/sell_in.gs`, con las instrucciones de instalación en el encabezado. Resumido:
+
+1. En la planilla, **Extensiones → Apps Script**, pegar el archivo.
+2. **Configuración del proyecto → Propiedades del script**, agregar `SELL_IN_TOKEN`.
+3. Correr `probar` una vez (Google pide permisos), después `instalarDisparador`.
+
+Del lado del tablero, el mismo valor va en el secreto `SELL_IN_TOKEN` de las Edge Functions de Supabase. La función **falla cerrada**: sin token configurado contesta 503 y no acepta nada.
+
+Ese token es lo único que vive dentro de la planilla, y sólo sirve para esto: quien lo tenga puede mandar filas de sell in, nada más. La clave de la base se queda del lado del servidor.
+
+#### Camino 2 — la credencial de Google
+
+Una cuenta de servicio es un "usuario" que no es una persona: tiene su propio mail, y se le comparte la planilla como a cualquiera.
+
+1. En **console.cloud.google.com**, crear un proyecto y habilitar **Google Sheets API**.
+2. **Credenciales → Crear credenciales → Cuenta de servicio**, nombre `tablero-quo`, sin roles.
+3. Compartir la planilla con el mail de la cuenta (`.iam.gserviceaccount.com`) como **Lector**.
+4. Guardar el secreto `SELL_IN_SHEET_ID` con el id del Sheet.
+
+Y después, **una** de estas dos formas de darle la credencial:
+
+**Sin claves (Workload Identity Federation)** — lo que Google recomienda, y el único camino si la organización tiene la política `iam.disableServiceAccountKeyCreation`, que es lo normal en empresas. Lo hace un administrador del proyecto de Cloud: habilitar **IAM Service Account Credentials API** y **Security Token Service API**; crear un grupo de identidades `github` con un proveedor OIDC de emisor `https://token.actions.githubusercontent.com`, mapeo `google.subject = assertion.sub` y `attribute.repository = assertion.repository`, y condición `assertion.repository == 'valeriabrandmark/tablero_quo'`; y darle a la cuenta de servicio el rol `roles/iam.workloadIdentityUser` sobre
+
+    principalSet://iam.googleapis.com/projects/NUMERO/locations/global/workloadIdentityPools/github/attribute.repository/valeriabrandmark/tablero_quo
+
+Después, dos secretos más en GitHub: `GCP_WIF_PROVIDER` (`projects/NUMERO/.../providers/EL-PROVEEDOR`) y `GCP_SA_EMAIL`. El workflow ya tiene el paso que los usa y **no corre** si están vacíos.
+
+**Con clave descargada** — más simple: **Claves → Agregar clave → JSON**, y el archivo entero en el secreto `GOOGLE_SA_JSON`. Si aparece *"La creación de claves de la cuenta de servicio está inhabilitada"*, la organización lo prohíbe: no hay que pedir que lo apaguen, se usa el camino 1 o el de WIF.
+
+Para probar en una máquina:
+
+    python sell_in.py --probar              # lee, muestra lo que entendió y NO guarda
+    python sell_in.py --origen script       # fuerza la foto que dejó la planilla
+    python sell_in.py                       # lee y guarda
+
+### Qué pasa cuando algo falla
+
+El paso **no es crítico**: si Google no contesta o la planilla está a medio cargar, `bronze.sell_in` conserva lo de ayer y las órdenes se arman con eso. Y si la hoja no devuelve ningún descuento, **no vacía la tabla** — borrar el sell in del mes dejaría todas las órdenes en cero sin que nadie se entere.
+
+Los errores que se van a ver alguna vez, y qué significan:
+
+- **Por la API:** **403** = la planilla no está compartida con la cuenta de servicio; **404** = el `SELL_IN_SHEET_ID` está mal o la hoja no se llama `Tablero`.
+- **Por el Apps Script:** **401** = el `SELL_IN_TOKEN` del script no coincide con el del servidor; **503** = falta cargar el token del lado de Supabase. Los dos llegan por mail al dueño del script, porque el envío tira el error en vez de tragárselo.
+- Si la última foto de la planilla tiene más de tres días, la corrida lo dice en el log: es la única señal de que el disparador se apagó.
+
+`probar_sell_in.py` cubre la parte que puede fallar en silencio —entender el encabezado y el valor— con 40 casos y sin tocar la red.
 
 ## Reglas de negocio que no se deducen del código
 
