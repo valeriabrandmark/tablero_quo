@@ -87,7 +87,7 @@ from dotenv import load_dotenv
 import requests
 
 from conexion import crear_engine
-from mercadolibre import llamar_ml, renovar_access_token
+from mercadolibre import llamar_ml, token_ml
 
 load_dotenv()
 USER_ID = os.getenv("ML_USER_ID")
@@ -396,7 +396,7 @@ def main():
 
     print("\n=== ANTIGUEDAD DEL STOCK EN FULL ===")
     arranque = time.monotonic()
-    token = renovar_access_token()
+    token = token_ml()
 
     df_inv = inventarios_con_stock(args.probar)
     print(f"  {len(df_inv)} inventarios con stock (de a {HILOS})")

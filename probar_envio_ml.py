@@ -1,10 +1,10 @@
 import json
 import requests
-from mercadolibre import renovar_access_token
+from mercadolibre import token_ml
 
 # Usamos tu funcion que ya refresca y guarda el token
 print("=== Refrescando token con tu funcion ===")
-access_token = renovar_access_token()
+access_token = token_ml()
 
 headers = {"Authorization": f"Bearer {access_token}"}
 

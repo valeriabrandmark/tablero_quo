@@ -56,11 +56,17 @@ TIMEOUT_HTTP = (10, 60)
 # Tiene que dar 0. Si da otra cosa, la API empezo a rechazar.
 HILOS_STOCK = 24
 
-# `renovar_access_token` ESCRIBE el archivo de tokens, y Mercado Libre entrega
-# un refresh_token nuevo cada vez. Con varios hilos, dos renovaciones a la vez
-# pisarian ese archivo y podrian dejar guardado un refresh_token que ya no vale
-# -- y ahi hay que rehacer la autorizacion a mano. El candado hace que renueve
-# uno solo por vez.
+# DOS CANDADOS, PARA DOS PROBLEMAS DISTINTOS.
+#
+# Mercado Libre entrega un refresh_token nuevo en cada renovacion y ANULA el
+# anterior. Dos renovaciones a la vez dejan guardado uno que ya no vale, y ahi
+# hay que reautorizar a mano (paso el 20/08/2026).
+#
+# Este de aca es de HILOS y solo cubre los de ESTE proceso. El de verdad esta en
+# `token_ml`: un advisory lock de Postgres, que es el unico lugar donde dos
+# runners de GitHub Actions --el del orquestador y el de la antiguedad, que
+# corren en paralelo-- se pueden poner de acuerdo. Este sigue estando igual
+# porque evita que 24 hilos hagan cola contra la base para lo mismo.
 _CANDADO_TOKEN = threading.Lock()
 
 load_dotenv()
@@ -90,6 +96,14 @@ FECHA_CORTE = date(2026, 5, 6)
 WINDOW_DAYS = 7
 
 
+# Cuanto antes del vencimiento se renueva igual.
+#
+# El access_token de ML dura 6 horas. Sin margen, un paso que arranca justo en
+# el ultimo minuto se queda sin token en el medio; con margen, renueva antes y
+# no hay 401 a mitad de camino.
+MARGEN_TOKEN = timedelta(minutes=15)
+
+
 def cargar_tokens():
     """El token de Mercado Libre. Vive en Postgres, no en un archivo.
 
@@ -103,21 +117,59 @@ def cargar_tokens():
     """
     tokens = estado.leer("ml_tokens")
     if not tokens:
-        raise RuntimeError(
-            "No hay token de Mercado Libre guardado (ops.estado['ml_tokens'])\n"
-            "  ni un ml_tokens.json que importar. Hay que autorizar la app con\n"
-            "  ml_token.py, que ahora lo guarda directo en la base."
-        )
+        raise RuntimeError(FALTA_TOKEN)
     return tokens
 
 
 def guardar_tokens(tokens):
-    estado.guardar("ml_tokens", tokens)
+    estado.guardar("ml_tokens", sellar_vencimiento(tokens))
 
 
-def renovar_access_token():
-    """Usa el refresh_token para obtener un access_token nuevo.
-       OJO: ML devuelve un refresh_token NUEVO cada vez, hay que guardarlo."""
+FALTA_TOKEN = (
+    "No hay token de Mercado Libre guardado (ops.estado['ml_tokens'])\n"
+    "  ni un ml_tokens.json que importar. Hay que autorizar la app con\n"
+    "  ml_token.py, que ahora lo guarda directo en la base."
+)
+
+
+def sellar_vencimiento(tokens, ahora=None):
+    """Le agrega al token la fecha en que vence, calculada de `expires_in`.
+
+    ML informa CUANTO dura ("expires_in": 21600) y no HASTA CUANDO, que es lo
+    unico que sirve para decidir en la corrida siguiente si todavia vale. Sin
+    esto no hay forma de saberlo y no queda otra que renovar siempre --que es
+    justo lo que multiplica las chances de que dos procesos renueven juntos.
+    """
+    ahora = ahora or datetime.datetime.now(datetime.timezone.utc)
+    dura = tokens.get("expires_in")
+    if not dura:
+        return tokens
+    sellado = dict(tokens)
+    sellado["vence_en"] = (ahora + timedelta(seconds=int(dura))).isoformat()
+    return sellado
+
+
+def vigente(tokens, ahora=None):
+    """`True` si el access_token guardado todavia sirve, con margen.
+
+    Un token sin `vence_en` se toma por vencido: es el de antes de este cambio,
+    y no se sabe cuando se pidio. Renovarlo una vez lo deja sellado para
+    siempre; darlo por bueno seria adivinar.
+    """
+    ahora = ahora or datetime.datetime.now(datetime.timezone.utc)
+    if not tokens or not tokens.get("access_token") or not tokens.get("vence_en"):
+        return False
+    try:
+        vence = datetime.datetime.fromisoformat(tokens["vence_en"])
+    except (TypeError, ValueError):
+        return False
+    if vence.tzinfo is None:
+        vence = vence.replace(tzinfo=datetime.timezone.utc)
+    return vence - MARGEN_TOKEN > ahora
+
+
+def _pedir_token_nuevo(tokens):
+    """El intercambio con ML. Solo se llama con el candado tomado."""
     faltan = [v for v in ("ML_CLIENT_ID", "ML_CLIENT_SECRET") if not os.getenv(v)]
     if faltan:
         # Sin esto, `os.getenv` devuelve None, requests lo manda como el texto
@@ -127,7 +179,6 @@ def renovar_access_token():
             f"Faltan variables en el .env de {os.getcwd()}: {', '.join(faltan)}"
         )
 
-    tokens = cargar_tokens()
     r = requests.post(
         "https://api.mercadolibre.com/oauth/token",
         headers={"Accept": "application/json",
@@ -150,16 +201,61 @@ def renovar_access_token():
             f"  Respuesta: {r.text[:300]}\n"
             "  invalid_grant  -> el refresh_token ya se uso o vencio.\n"
             "     ML entrega un refresh_token NUEVO en cada renovacion y anula el\n"
-            "     anterior, asi que dos maquinas no pueden compartir el archivo:\n"
-            "     la que renueva deja a la otra afuera. Se arregla reautorizando\n"
-            "     con ml_token.py, en LA maquina que corre el orquestador.\n"
+            "     anterior. Entre procesos eso lo cubre el candado de `token_ml`;\n"
+            "     si igual aparece, es que alguien renovo por afuera (una corrida\n"
+            "     a mano en otra maquina, o ml_token.py). Se arregla reautorizando\n"
+            "     con ml_token.py.\n"
             "  invalid_client -> revisar ML_CLIENT_ID y ML_CLIENT_SECRET en el .env."
         )
 
-    nuevos = r.json()
-    guardar_tokens(nuevos)        # guardamos el refresh_token nuevo
-    print("  Token renovado OK")
-    return nuevos["access_token"]
+    return sellar_vencimiento(r.json())
+
+
+def token_ml(forzar=False):
+    """Un access_token que sirve. Renueva SOLO si hace falta.
+
+    ============================================================================
+     POR QUE NO RENUEVA SIEMPRE, QUE ES LO QUE HACIA ANTES
+    ============================================================================
+
+    Cada paso arrancaba con una renovacion incondicional: una corrida del
+    orquestador quemaba media docena de refresh_tokens sin necesidad, teniendo
+    uno valido por seis horas. Cada una de esas renovaciones es una chance de
+    cruzarse con la del otro workflow, porque ML anula el refresh_token anterior
+    en cada intercambio: si dos procesos parten del mismo, uno se queda con un
+    `invalid_grant` -- o peor, queda guardado uno anulado y falla la corrida
+    SIGUIENTE, que no tiene nada que ver.
+
+    Ahora hay dos defensas, y las dos hacen falta:
+
+      1. Se reusa el token guardado mientras le queden mas de 15 minutos. Eso
+         baja las renovaciones de una por paso a una cada seis horas.
+      2. La renovacion entera --leer, pedir, guardar-- pasa adentro de un
+         candado de Postgres. Un `threading.Lock` no alcanza: el workflow de la
+         antiguedad y el del orquestador son dos procesos en dos maquinas, y la
+         base es lo unico que comparten.
+
+    Y ADENTRO DEL CANDADO SE VUELVE A LEER, que es la mitad que se olvida: el
+    que estuvo esperando tiene en la mano lo que leyo ANTES de entrar, y para
+    cuando entra el otro ya renovo. Sin releer, renovaria de nuevo y anularia
+    justo el token que el otro acaba de guardar.
+
+    `forzar=True` renueva aunque el guardado parezca vigente. Es para el 401:
+    ahi ML ya dijo que no sirve, y creerle al reloj antes que a la API seria
+    quedarse en un bucle.
+    """
+    with estado.con_candado("ml_tokens") as sesion:
+        tokens = sesion.leer("ml_tokens")
+        if not tokens:
+            raise RuntimeError(FALTA_TOKEN)
+
+        if not forzar and vigente(tokens):
+            return tokens["access_token"]
+
+        nuevos = _pedir_token_nuevo(tokens)
+        sesion.guardar("ml_tokens", nuevos)
+        print("  Token renovado OK")
+        return nuevos["access_token"]
 
 
 def llamar_ml(endpoint, access_token, params=None, max_reintentos=6, pausa=True):
@@ -177,9 +273,16 @@ def llamar_ml(endpoint, access_token, params=None, max_reintentos=6, pausa=True)
         r = requests.get(url, headers=headers, params=params, timeout=TIMEOUT_HTTP)
 
         if r.status_code == 401:      # token vencido: renovar y reintentar
-            print("  401: renovando token...")
+            print("  401: buscando un token nuevo...")
             with _CANDADO_TOKEN:
-                access_token = renovar_access_token()
+                # Primero se mira el guardado SIN forzar: puede que otro proceso
+                # (o el paso anterior) ya haya renovado y el que tenemos en la
+                # mano sea simplemente viejo. Forzar de una gastaria una
+                # renovacion --y una anulacion-- al pedo.
+                nuevo = token_ml()
+                if nuevo == access_token:
+                    nuevo = token_ml(forzar=True)
+                access_token = nuevo
             headers = {"Authorization": f"Bearer {access_token}"}
             r = requests.get(url, headers=headers, params=params, timeout=TIMEOUT_HTTP)
 
@@ -452,7 +555,7 @@ def extraer_ventas_ml():
        al limite de offset 10.000 de la API)."""
     print("\n=== VENTAS MERCADO LIBRE (ventana movil) ===")
 
-    access_token = renovar_access_token()
+    access_token = token_ml()
 
     hoy = date.today()
     cutoff = max(FECHA_CORTE, hoy - timedelta(days=WINDOW_DAYS))
@@ -518,7 +621,7 @@ def extraer_publicaciones_ml():
     """Trae el detalle de TODAS las publicaciones de ML (activas, pausadas, cerradas).
        Catalogo -> se reemplaza entero cada vez que corre."""
     print("\n=== PUBLICACIONES MERCADO LIBRE ===")
-    access_token = renovar_access_token()
+    access_token = token_ml()
 
     ids = obtener_ids_publicaciones(access_token)
     print(f"  Total de publicaciones: {len(ids)}")
@@ -585,7 +688,7 @@ def extraer_stock_full():
     solo en vez de perderse.
     """
     print("\n=== STOCK FULL (fulfillment) ===")
-    access_token = renovar_access_token()
+    access_token = token_ml()
 
     engine = _crear_engine()
     query = """

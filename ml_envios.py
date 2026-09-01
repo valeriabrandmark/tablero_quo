@@ -6,7 +6,7 @@ import pandas as pd
 from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
-from mercadolibre import renovar_access_token
+from mercadolibre import token_ml
 from conexion import crear_engine
 
 load_dotenv()
@@ -91,7 +91,7 @@ def extraer_envios():
         print("Ya estan todos! Nada que hacer.")
         return
 
-    token = renovar_access_token()
+    token = token_ml()
     headers = {"Authorization": f"Bearer {token}"}
     errores = 0
 
@@ -123,7 +123,12 @@ def extraer_envios():
             url = f"https://api.mercadolibre.com/shipments/{ship_id}/costs"
             resp = requests.get(url, headers=headers, timeout=15)
             if resp.status_code == 401:
-                token = renovar_access_token()
+                # Sin forzar primero: puede que otro proceso ya haya renovado y
+                # el que tenemos sea solo viejo. Ver token_ml en mercadolibre.py.
+                nuevo_token = token_ml()
+                if nuevo_token == token:
+                    nuevo_token = token_ml(forzar=True)
+                token = nuevo_token
                 headers = {"Authorization": f"Bearer {token}"}
                 resp = requests.get(url, headers=headers, timeout=15)
             if resp.status_code == 200:

@@ -75,5 +75,13 @@ jobs:
       - name: Probar la cuenta antes de correrla
         run: python probar_fifo_antiguedad.py
 
+      # Este workflow corre EN PARALELO con el del orquestador --grupos de
+      # concurrencia distintos-- y los dos usan el mismo token de Mercado Libre,
+      # que ML anula y reemplaza en cada renovacion. El candado que evita que se
+      # pisen se prueba aca por lo mismo que arriba: si se rompe, no falla esta
+      # corrida sino la siguiente, y con un error que no se parece a la causa.
+      - name: Probar el candado del token
+        run: python probar_candado_token.py
+
       - name: Calcular la antiguedad
         run: python ml_antiguedad.py

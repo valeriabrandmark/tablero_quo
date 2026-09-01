@@ -43,7 +43,7 @@ import pandas as pd
 from sqlalchemy.types import Boolean, Float, Integer, Text
 
 from esquema import asegurar_tablas, crear_engine
-from mercadolibre import HILOS_STOCK, llamar_ml, renovar_access_token
+from mercadolibre import HILOS_STOCK, llamar_ml, token_ml
 
 # Los unicos campos que mira este script. Pedirlos por nombre en vez de traer la
 # publicacion entera es lo que hace que el pulso pueda correr cada 2 horas: el
@@ -410,7 +410,7 @@ def main():
             print("  No hay experimento activo: nada que consultar.")
             return
         print(f"  {len(items)} publicaciones de catalogo (de a {HILOS_STOCK})")
-        buybox = pedir_buybox(renovar_access_token(), items)
+        buybox = pedir_buybox(token_ml(), items)
         with engine.begin() as con:
             _escribir_tramos(
                 con, momento,
@@ -432,7 +432,7 @@ def main():
         return
     print(f"  {len(catalogo)} publicaciones en el catalogo")
 
-    access_token = renovar_access_token()
+    access_token = token_ml()
     estado = pedir_estado(access_token, catalogo["item_id"].tolist())
     if estado.empty:
         print("  ATENCION: ningun lote volvio. No se escribe nada: un pulso vacio "

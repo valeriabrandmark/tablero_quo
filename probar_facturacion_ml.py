@@ -37,7 +37,7 @@ import os
 import requests
 from dotenv import load_dotenv
 
-from mercadolibre import renovar_access_token
+from mercadolibre import token_ml
 
 load_dotenv()
 USER_ID = os.getenv("ML_USER_ID")
@@ -122,7 +122,7 @@ def detalle(clave, token):
 
 
 def main():
-    token = renovar_access_token()
+    token = token_ml()
     print("ML User ID:", USER_ID)
 
     claves = buscar_periodos(token)
