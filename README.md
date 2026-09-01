@@ -312,61 +312,65 @@ Tres decisiones que conviene no revertir sin pensarlo:
 
 Se lee la hoja resumen y no las 25 hojas mensuales a propósito: cada una tiene sus propios encabezados, y leerlas por posición ya desalineó 4.368 valores una vez.
 
-### La cuenta de servicio de Google
+### De dónde llega la hoja: dos caminos, un solo parser
 
-Una cuenta de servicio es un "usuario" que no es una persona: tiene su propio mail, y se le comparte la planilla como se le comparte a cualquiera. Es lo que permite que un runner de GitHub Actions lea el Sheet sin la contraseña de nadie.
+`sell_in.py` puede recibir la hoja por dos vías, y **el código que la interpreta es el mismo en las dos**. La opción `--origen auto` usa la API si hay credencial de Google configurada, y si no, la foto que dejó la planilla.
 
-**Los pasos comunes**, los haga quien los haga:
+| Origen | Qué necesita | Quién lo configura |
+|---|---|---|
+| **`script`** — la planilla se manda sola | nada en Google Cloud | quien tenga edición en el Sheet |
+| **`api`** — se le pide a Google | una credencial | un administrador de Google Cloud |
 
-1. En **console.cloud.google.com**, crear un proyecto (o usar uno que ya exista).
-2. **APIs y servicios → Biblioteca →** habilitar **Google Sheets API**.
-3. **APIs y servicios → Credenciales → Crear credenciales → Cuenta de servicio.** Nombre: `tablero-quo`. Sin roles: el permiso sale de compartir la planilla, no de un rol de Cloud.
-4. Copiar el mail de la cuenta (termina en `.iam.gserviceaccount.com`) y **compartir la planilla con ese mail, como Lector**.
-5. En GitHub, guardar el secreto `SELL_IN_SHEET_ID` con el id del Sheet: en `docs.google.com/spreadsheets/d/`**`ESTO`**`/edit`.
+#### Camino 1 — el script adentro de la planilla. Sin administrador
 
-Y después, **uno** de los dos caminos para la credencial.
+Un Apps Script dentro del Google Sheet lee la hoja una vez por día y la manda a la función `sell-in` del proyecto de Supabase, que la guarda tal cual en `bronze.sell_in_crudo`. Después el orquestador la interpreta con el mismo parser de siempre.
 
-#### Camino A — sin claves (Workload Identity Federation). El recomendado
+**El Apps Script no interpreta nada, y eso es lo importante.** Manda los textos como se ven (`1/8/2026`, `7,69%`) con `getDisplayValues()` — que es exactamente lo que devuelve la API de Google con `FORMATTED_VALUE`. Las dos rutas entregan lo mismo, así que hay **un** parser con sus pruebas en vez de dos que se van separando.
 
-No se crea ninguna clave. GitHub le da al runner un token que dice *"soy la corrida tal, del repo tal"*, Google lo cambia por un permiso de unos minutos, y no queda ningún archivo que robar. Es lo que Google recomienda, y **es el único camino posible si la organización tiene la política `iam.disableServiceAccountKeyCreation`** — que es lo normal en empresas.
+El código está en `apps_script/sell_in.gs`, con las instrucciones de instalación en el encabezado. Resumido:
 
-Lo hace alguien con permisos de administrador en el proyecto de Google Cloud:
+1. En la planilla, **Extensiones → Apps Script**, pegar el archivo.
+2. **Configuración del proyecto → Propiedades del script**, agregar `SELL_IN_TOKEN`.
+3. Correr `probar` una vez (Google pide permisos), después `instalarDisparador`.
 
-1. Habilitar las APIs **IAM Service Account Credentials** y **Security Token Service**.
-2. **IAM y administración → Federación de identidades para cargas de trabajo → Crear grupo.** Nombre `github`.
-3. Agregarle un **proveedor OIDC**: emisor `https://token.actions.githubusercontent.com`, y en el mapeo de atributos `google.subject = assertion.sub` y `attribute.repository = assertion.repository`. En la condición, restringir a este repositorio: `assertion.repository == 'valeriabrandmark/tablero_quo'`.
-4. En la cuenta de servicio `tablero-quo`, dar el rol **Usuario de identidad de carga de trabajo** (`roles/iam.workloadIdentityUser`) al principal:
+Del lado del tablero, el mismo valor va en el secreto `SELL_IN_TOKEN` de las Edge Functions de Supabase. La función **falla cerrada**: sin token configurado contesta 503 y no acepta nada.
 
-       principalSet://iam.googleapis.com/projects/NUMERO/locations/global/workloadIdentityPools/github/attribute.repository/valeriabrandmark/tablero_quo
+Ese token es lo único que vive dentro de la planilla, y sólo sirve para esto: quien lo tenga puede mandar filas de sell in, nada más. La clave de la base se queda del lado del servidor.
 
-5. Guardar en GitHub dos secretos más:
+#### Camino 2 — la credencial de Google
 
-   | Secreto | Qué va adentro |
-   |---|---|
-   | `GCP_WIF_PROVIDER` | `projects/NUMERO/locations/global/workloadIdentityPools/github/providers/EL-PROVEEDOR` |
-   | `GCP_SA_EMAIL` | `tablero-quo@PROYECTO.iam.gserviceaccount.com` |
+Una cuenta de servicio es un "usuario" que no es una persona: tiene su propio mail, y se le comparte la planilla como a cualquiera.
 
-El workflow ya tiene el paso que lo usa (`google-github-actions/auth`) y el permiso `id-token: write`. Si esos dos secretos están vacíos, el paso **no corre** y no molesta a nadie.
+1. En **console.cloud.google.com**, crear un proyecto y habilitar **Google Sheets API**.
+2. **Credenciales → Crear credenciales → Cuenta de servicio**, nombre `tablero-quo`, sin roles.
+3. Compartir la planilla con el mail de la cuenta (`.iam.gserviceaccount.com`) como **Lector**.
+4. Guardar el secreto `SELL_IN_SHEET_ID` con el id del Sheet.
 
-#### Camino B — con clave descargada
+Y después, **una** de estas dos formas de darle la credencial:
 
-Más simple, y por eso es el primero que uno intenta. **En la cuenta de servicio → Claves → Agregar clave → JSON**, y guardar el archivo entero en el secreto `GOOGLE_SA_JSON`.
+**Sin claves (Workload Identity Federation)** — lo que Google recomienda, y el único camino si la organización tiene la política `iam.disableServiceAccountKeyCreation`, que es lo normal en empresas. Lo hace un administrador del proyecto de Cloud: habilitar **IAM Service Account Credentials API** y **Security Token Service API**; crear un grupo de identidades `github` con un proveedor OIDC de emisor `https://token.actions.githubusercontent.com`, mapeo `google.subject = assertion.sub` y `attribute.repository = assertion.repository`, y condición `assertion.repository == 'valeriabrandmark/tablero_quo'`; y darle a la cuenta de servicio el rol `roles/iam.workloadIdentityUser` sobre
 
-Si aparece *"La creación de claves de la cuenta de servicio está inhabilitada"*, la organización tiene la política que lo prohíbe: no hay que pedir que la apaguen, hay que ir por el camino A.
+    principalSet://iam.googleapis.com/projects/NUMERO/locations/global/workloadIdentityPools/github/attribute.repository/valeriabrandmark/tablero_quo
 
-Para probar en una máquina alcanza con `GOOGLE_SA_JSON` y `SELL_IN_SHEET_ID` en el `.env`. `SELL_IN_HOJA` es opcional y sólo hace falta si la hoja deja de llamarse `Tablero`.
+Después, dos secretos más en GitHub: `GCP_WIF_PROVIDER` (`projects/NUMERO/.../providers/EL-PROVEEDOR`) y `GCP_SA_EMAIL`. El workflow ya tiene el paso que los usa y **no corre** si están vacíos.
 
-    python sell_in.py --probar    # lee, muestra lo que entendió y NO guarda
-    python sell_in.py             # lee y guarda
+**Con clave descargada** — más simple: **Claves → Agregar clave → JSON**, y el archivo entero en el secreto `GOOGLE_SA_JSON`. Si aparece *"La creación de claves de la cuenta de servicio está inhabilitada"*, la organización lo prohíbe: no hay que pedir que lo apaguen, se usa el camino 1 o el de WIF.
+
+Para probar en una máquina:
+
+    python sell_in.py --probar              # lee, muestra lo que entendió y NO guarda
+    python sell_in.py --origen script       # fuerza la foto que dejó la planilla
+    python sell_in.py                       # lee y guarda
 
 ### Qué pasa cuando algo falla
 
 El paso **no es crítico**: si Google no contesta o la planilla está a medio cargar, `bronze.sell_in` conserva lo de ayer y las órdenes se arman con eso. Y si la hoja no devuelve ningún descuento, **no vacía la tabla** — borrar el sell in del mes dejaría todas las órdenes en cero sin que nadie se entere.
 
-Los dos errores que se van a ver alguna vez, y qué significan:
+Los errores que se van a ver alguna vez, y qué significan:
 
-- **403** — la planilla no está compartida con la cuenta de servicio.
-- **404** — el `SELL_IN_SHEET_ID` está mal o la hoja no se llama `Tablero`.
+- **Por la API:** **403** = la planilla no está compartida con la cuenta de servicio; **404** = el `SELL_IN_SHEET_ID` está mal o la hoja no se llama `Tablero`.
+- **Por el Apps Script:** **401** = el `SELL_IN_TOKEN` del script no coincide con el del servidor; **503** = falta cargar el token del lado de Supabase. Los dos llegan por mail al dueño del script, porque el envío tira el error en vez de tragárselo.
+- Si la última foto de la planilla tiene más de tres días, la corrida lo dice en el log: es la única señal de que el disparador se apagó.
 
 `probar_sell_in.py` cubre la parte que puede fallar en silencio —entender el encabezado y el valor— con 40 casos y sin tocar la red.
 

@@ -61,6 +61,25 @@ planilla: se comparte como con cualquier persona, usando el mail que termina en
 
     python sell_in.py            lee y guarda
     python sell_in.py --probar   lee, muestra lo que entendio y NO guarda
+
+============================================================================
+ DOS ORIGENES, UN SOLO PARSER
+============================================================================
+
+La hoja puede llegar por dos caminos, y el codigo que la interpreta es el
+mismo en los dos:
+
+  api      se le pide a Google directamente. Necesita credencial, y la
+           credencial necesita que un administrador configure algo.
+  script   la manda la propia planilla. Un Apps Script adentro del Sheet lee
+           las celdas una vez por dia y las deja en bronze.sell_in_crudo, tal
+           cual, sin interpretar. No hace falta ningun permiso especial: corre
+           con el usuario que es dueño de la planilla.
+
+EL APPS SCRIPT NO INTERPRETA NADA a proposito. Manda los textos como se ven
+--"1/8/2026", "7,69%"-- que es exactamente lo que devuelve la API de Google con
+FORMATTED_VALUE. Asi las dos rutas entregan lo mismo y hay UN parser, con sus
+pruebas, en vez de dos que se van separando sin que nadie lo note.
 """
 
 import argparse
@@ -330,6 +349,33 @@ def credenciales():
         ) from e
 
 
+def leer_crudo():
+    """La ultima foto que dejo el Apps Script de la planilla."""
+    engine = crear_engine()
+    with engine.begin() as con:
+        fila = con.exec_driver_sql(
+            "select filas, recibido, hoja from bronze.sell_in_crudo"
+            " order by id desc limit 1"
+        ).fetchone()
+
+    if not fila:
+        raise RuntimeError(
+            "No hay ninguna foto de la planilla en bronze.sell_in_crudo.\n"
+            "  La manda el Apps Script que vive adentro del Google Sheet.\n"
+            "  Si todavia no se instalo, ver apps_script/sell_in.gs y el README."
+        )
+
+    valores, recibido, hoja = fila
+    dias = (datetime.now(recibido.tzinfo) - recibido).days
+    print(f"  Foto de la planilla: hoja '{hoja}', recibida hace {dias} dia(s)")
+    if dias > 3:
+        # No aborta: mejor un sell in de hace una semana que ninguno. Pero se
+        # dice, porque un disparador que se apago no avisa solo.
+        print("  ATENCION: hace mas de 3 dias que la planilla no manda nada."
+              " Revisar el disparador en el Apps Script.")
+    return valores
+
+
 def leer_hoja():
     """La hoja "Tablero" entera, tal como la muestra Google.
 
@@ -386,10 +432,22 @@ def main():
     parser = argparse.ArgumentParser(description="Sell in del proveedor, desde Google Sheets.")
     parser.add_argument("--probar", action="store_true",
                         help="Lee y muestra lo que entendio, sin guardar")
+    parser.add_argument("--origen", choices=["auto", "api", "script"], default="auto",
+                        help="De donde sale la hoja. auto: la API si hay credencial,"
+                             " si no la foto que dejo el Apps Script")
     args = parser.parse_args()
 
     print("\n=== SELL IN DEL PROVEEDOR ===")
-    valores = leer_hoja()
+
+    origen = args.origen
+    if origen == "auto":
+        # Si hay credencial de Google configurada se le pide a la API, que es el
+        # dato del momento. Si no, se usa lo que dejo la planilla.
+        hay_credencial = bool(os.getenv("GOOGLE_SA_JSON") or os.getenv("GCP_WIF_PROVIDER"))
+        origen = "api" if hay_credencial else "script"
+    print(f"  Origen: {origen}")
+
+    valores = leer_hoja() if origen == "api" else leer_crudo()
     print(f"  Hoja leida: {len(valores)} filas")
 
     filas, resumen = filas_de_la_planilla(valores)
