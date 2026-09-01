@@ -83,5 +83,8 @@ jobs:
       - name: Probar el candado del token
         run: python probar_candado_token.py
 
+      - name: Probar los reintentos de la API
+        run: python probar_reintentos_ml.py
+
       - name: Calcular la antiguedad
         run: python ml_antiguedad.py

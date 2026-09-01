@@ -128,6 +128,9 @@ jobs:
       - name: Probar el candado del token
         run: python probar_candado_token.py
 
+      - name: Probar los reintentos de la API
+        run: python probar_reintentos_ml.py
+
       - name: Correr el orquestador
         run: python orquestador.py
 

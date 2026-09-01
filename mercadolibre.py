@@ -258,8 +258,15 @@ def token_ml(forzar=False):
         return nuevos["access_token"]
 
 
-def llamar_ml(endpoint, access_token, params=None, max_reintentos=6, pausa=True):
-    """Llama a la API de ML con el access_token. Reintenta automaticamente en 429.
+def llamar_ml(endpoint, access_token, params=None, max_reintentos=6, pausa=True,
+              reintentos_5xx=3):
+    """Llama a la API de ML con el access_token. Reintenta 429 y 5xx.
+
+    Los dos reintentos se cuentan POR SEPARADO porque son dos cosas distintas:
+    un 429 es "vas muy rapido" --lo dice la API y hasta dice cuanto esperar-- y
+    un 5xx es "me cai", que ni avisa cuanto va a durar. Con un contador
+    compartido, una racha de 429 dejaria sin intentos al primer 500 que llegue
+    despues.
 
     `pausa=False` saltea la espera del final. Se usa cuando las llamadas van en
     PARALELO: ahi el freno lo pone la cantidad de hilos, y dormir ademas dentro
@@ -269,6 +276,7 @@ def llamar_ml(endpoint, access_token, params=None, max_reintentos=6, pausa=True)
     headers = {"Authorization": f"Bearer {access_token}"}
 
     intento = 0
+    intento_5xx = 0
     while True:
         r = requests.get(url, headers=headers, params=params, timeout=TIMEOUT_HTTP)
 
@@ -292,6 +300,34 @@ def llamar_ml(endpoint, access_token, params=None, max_reintentos=6, pausa=True)
                 r.raise_for_status()  # se rindio, que explote como antes
             espera = int(r.headers.get("Retry-After", 0)) or (5 * intento)
             print(f"  429: esperando {espera}s antes de reintentar (intento {intento}/{max_reintentos})...")
+            time.sleep(espera)
+            continue
+
+        # LOS 5xx SON DE ELLOS, NO NUESTROS, Y SE VAN SOLOS.
+        #
+        # Se veian como un error definitivo y no lo son. El 01/09/2026 la
+        # corrida de antiguedad perdio 295 de 1.792 inventarios --el 16 %-- con
+        # "Internal server error" de Mercado Libre, y esos SKU quedaron sin
+        # antiguedad en la foto del dia. Peor que el 16 %: en el tablero se ven
+        # con un guion, que se lee "no esta en Full" y no "Mercado Libre no
+        # contesto por este".
+        #
+        # La espera crece (2, 4, 8) y no es fija: si la API esta caida un rato,
+        # machacarla cada 2 segundos no la levanta antes.
+        #
+        # TRES INTENTOS Y NO SEIS, que es lo que tiene el 429. Los 5xx no vienen
+        # de a uno: si la API se cayo, se cae para todos los inventarios a la
+        # vez. Con seis intentos y esperas que se duplican, 295 inventarios
+        # fallando serian casi una hora de la corrida durmiendo, y el workflow
+        # tiene 90 minutos. Con tres, el peor caso son 14 segundos por
+        # inventario y la corrida entra igual.
+        if r.status_code >= 500:
+            intento_5xx += 1
+            if intento_5xx > reintentos_5xx:
+                r.raise_for_status()  # se rindio de verdad
+            espera = 2 * (2 ** (intento_5xx - 1))
+            print(f"  {r.status_code}: esperando {espera}s antes de reintentar "
+                  f"(intento {intento_5xx}/{reintentos_5xx})...")
             time.sleep(espera)
             continue
 
