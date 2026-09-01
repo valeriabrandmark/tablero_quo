@@ -104,6 +104,13 @@ jobs:
       TN_TOKEN: ${{ secrets.TN_TOKEN }}
       TN_USER_AGENT: ${{ secrets.TN_USER_AGENT }}
 
+      # La planilla de sell in. GOOGLE_SA_JSON es el archivo entero de la
+      # cuenta de servicio; SELL_IN_SHEET_ID, el id que esta en la URL del
+      # Google Sheet. Sin las dos, sell_in.py falla con un mensaje que dice
+      # cual falta -- y como no es critico, el resto del pipeline sigue.
+      GOOGLE_SA_JSON: ${{ secrets.GOOGLE_SA_JSON }}
+      SELL_IN_SHEET_ID: ${{ secrets.SELL_IN_SHEET_ID }}
+
       DIGIP_API_KEY: ${{ secrets.DIGIP_API_KEY }}
       DIGIP_URL_BASE: ${{ secrets.DIGIP_URL_BASE }}
 
@@ -130,6 +137,12 @@ jobs:
 
       - name: Probar los reintentos de la API
         run: python probar_reintentos_ml.py
+
+      # Entender mal un encabezado de la planilla de sell in --guardar la oferta
+      # de agosto como si fuera de enero-- termina en la columna FDESCU1 de una
+      # orden de compra. Son 40 casos sin red ni base, un segundo.
+      - name: Probar el lector de sell in
+        run: python probar_sell_in.py
 
       - name: Correr el orquestador
         run: python orquestador.py

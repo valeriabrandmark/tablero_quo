@@ -66,6 +66,7 @@ esperaba media hora por datos que no usa.
 | 13 | `prorratear_flete.py` | 12 h | `gold.fact_ventas_flete` | no |
 | 14 | `clasificar_clientes.py` | siempre | `gold.clientes_clasificados` | no |
 | 15 | `mercadolibre.py --catalogo` | **1/día** | `bronze.ml_publicaciones`, `ml_stock_full`, `ml_stock_full_historico` | no |
+| 16 | `sell_in.py` | **1/día** | `bronze.sell_in` | no |
 
 #### Aparte: `Antiguedad Full` (workflow propio)
 
@@ -283,6 +284,65 @@ afectada porque `modelo.py` descarta duplicados, pero para limpiar la tabla est�
 `limpiar_duplicados_ml_envios.sql`.
 
 ---
+
+## El sell in del proveedor, desde Google Sheets
+
+`sell_in.py` lee la hoja **`Tablero`** del Google Sheet *2026 - Sell In Histórico* y escribe `bronze.sell_in`. De ahí sale el descuento que el panel de Compras pone en la columna `FDESCU1` de la orden.
+
+### Qué NO es
+
+`bronze.costos_historicos.oferta_pct` **no** sirve para esto. Ése es un sell in *calculado a partir de nuestras compras*, para trasladarlo a las ofertas del mes y valorizar el costo real: dice a cuánto nos quedó lo que ya compramos. Usarlo para pedir sería pedirle al proveedor con un descuento inventado, y el error viajaría en un archivo que alguien importa a Sigma sin volver a mirarlo.
+
+### Cómo lee la hoja
+
+Las seis primeras columnas identifican el artículo (`PROVEEDOR`, `MARCA`, `COD PROV`, `SKU`, `EAN`, `DESCRIPCIÓN`). **De ahí en adelante, cada columna es una oferta** y el encabezado dice cuál:
+
+| Encabezado | Se guarda como |
+|---|---|
+| `1/8/2026` | mes `2026-08`, evento vacío — **ésta es la que usa FDESCU1** |
+| `1/7/2026 (Glade)` | mes `2026-07`, evento `Glade` |
+| `HOT SALE` | evento `HOT SALE`, **sin mes** |
+| `3/8/2026` | evento `3/8/2026` — el día no es 1, ver abajo |
+
+Tres decisiones que conviene no revertir sin pensarlo:
+
+- **La fecha es día/mes/año y el día tiene que ser 1.** Con `1/8/2026`, día/mes/año dice agosto y mes/día/año dice enero: las dos lecturas son plausibles. Exigir que el día sea 1 —que es como se escriben las columnas de mes— hace que una fecha rara caiga como evento en vez de quedar en el mes equivocado.
+- **A un evento no se le inventa un mes.** `HOT SALE` está entre las columnas de mayo y junio y sería fácil deducir que es de mayo, pero deducirlo mal significa aplicar el descuento de una promo de tres días a la compra de un mes entero.
+- **Los ceros no se guardan.** La planilla trae `0,00%` en casi todas las celdas. Guardarlos serían cientos de miles de filas que no dicen nada, y además harían que el panel muestre `0` como un dato cargado en vez de «no hay oferta».
+
+Se lee la hoja resumen y no las 25 hojas mensuales a propósito: cada una tiene sus propios encabezados, y leerlas por posición ya desalineó 4.368 valores una vez.
+
+### La cuenta de servicio de Google
+
+Una cuenta de servicio es un "usuario" que no es una persona: tiene su propio mail y su propia clave, y se le comparte la planilla como se le comparte a cualquiera. Es lo que permite que un runner de GitHub Actions lea el Sheet sin la contraseña de nadie.
+
+1. En **console.cloud.google.com**, crear un proyecto (o usar uno que ya exista).
+2. **APIs y servicios → Biblioteca →** habilitar **Google Sheets API**.
+3. **APIs y servicios → Credenciales → Crear credenciales → Cuenta de servicio.** Nombre: `tablero-quo`. Sin roles: no hace falta ninguno, el permiso sale de compartir la planilla.
+4. Entrar a la cuenta recién creada → **Claves → Agregar clave → Crear nueva → JSON**. Se descarga un archivo. **Ése archivo es la credencial**: no va al repo ni por mail.
+5. Copiar el mail de la cuenta (termina en `.iam.gserviceaccount.com`) y **compartir la planilla con ese mail, como Lector**. Alcanza con lectura.
+6. En GitHub, **Settings → Secrets and variables → Actions → New repository secret**, dos secretos:
+
+   | Secreto | Qué va adentro |
+   |---|---|
+   | `GOOGLE_SA_JSON` | el contenido **entero** del archivo JSON, tal cual |
+   | `SELL_IN_SHEET_ID` | el id del Sheet: en `docs.google.com/spreadsheets/d/`**`ESTO`**`/edit` |
+
+Para probar en una máquina, las mismas dos variables en el `.env`. `SELL_IN_HOJA` es opcional y sólo hace falta si la hoja deja de llamarse `Tablero`.
+
+    python sell_in.py --probar    # lee, muestra lo que entendió y NO guarda
+    python sell_in.py             # lee y guarda
+
+### Qué pasa cuando algo falla
+
+El paso **no es crítico**: si Google no contesta o la planilla está a medio cargar, `bronze.sell_in` conserva lo de ayer y las órdenes se arman con eso. Y si la hoja no devuelve ningún descuento, **no vacía la tabla** — borrar el sell in del mes dejaría todas las órdenes en cero sin que nadie se entere.
+
+Los dos errores que se van a ver alguna vez, y qué significan:
+
+- **403** — la planilla no está compartida con la cuenta de servicio.
+- **404** — el `SELL_IN_SHEET_ID` está mal o la hoja no se llama `Tablero`.
+
+`probar_sell_in.py` cubre la parte que puede fallar en silencio —entender el encabezado y el valor— con 40 casos y sin tocar la red.
 
 ## Reglas de negocio que no se deducen del código
 
