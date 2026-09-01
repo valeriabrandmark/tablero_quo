@@ -1,0 +1,65 @@
+name: Pruebas
+
+# ============================================================================
+#  LO QUE SE PUEDE VERIFICAR ANTES DE MERGEAR, VERIFICADO ANTES DE MERGEAR.
+#
+#  Existe por una corrida perdida: un requirements.txt con `rsa==4.9.2` --una
+#  version que no existe-- se mergeo sin que nada lo notara y tumbo las tres
+#  corridas siguientes del orquestador en el paso de instalar dependencias.
+#  El error tardaba tres segundos en aparecer; lo caro fue que aparecio recien
+#  en produccion.
+#
+#  Esto corre en cada pull request y no toca la base ni la red: instala las
+#  dependencias --que es lo que fallo-- y corre las pruebas que no necesitan
+#  credenciales. Menos de un minuto.
+# ============================================================================
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+# Sin secretos a proposito: si una prueba necesitara credenciales, no es una
+# prueba para este workflow.
+permissions:
+  contents: read
+
+concurrency:
+  group: pruebas-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      # EL PASO QUE HABRIA ATAJADO EL PROBLEMA. Una version inventada en
+      # requirements.txt muere aca, en el pull request, y no en la corrida de
+      # las 3 de la manana.
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Probar la cuenta de la antiguedad
+        run: python probar_fifo_antiguedad.py
+
+      - name: Probar el candado del token
+        run: python probar_candado_token.py
+
+      - name: Probar los reintentos de la API
+        run: python probar_reintentos_ml.py
+
+      - name: Probar el lector de sell in
+        run: python probar_sell_in.py
+
+      # Que todos los scripts al menos compilen. No prueba que anden, pero un
+      # error de sintaxis en un archivo que nadie importa en las pruebas
+      # tambien tumba la corrida, y eso se ve gratis.
+      - name: Que todo compile
+        run: python -m compileall -q .
