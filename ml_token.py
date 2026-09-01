@@ -1,6 +1,7 @@
 import os
 import json
 import estado
+from mercadolibre import sellar_vencimiento
 import requests
 from dotenv import load_dotenv
 
@@ -51,7 +52,10 @@ if "access_token" in data:
     # local dos maquinas se pisan: la que renueva deja a la otra afuera. Ademas
     # es lo que permite que el orquestador corra en GitHub Actions, donde el
     # disco arranca limpio en cada corrida. Ver estado.py.
-    estado.guardar("ml_tokens", data)
+    # Se sella con la fecha de vencimiento, igual que cada renovacion: si se
+    # guardara pelado, el primer paso que lo lea lo tomaria por vencido y
+    # renovaria al pedo un token recien traido. Ver `vigente` en mercadolibre.py.
+    estado.guardar("ml_tokens", sellar_vencimiento(data))
     print("\n=== TOKENS GUARDADOS en la base (ops.estado) ===")
     print("access_token:", data["access_token"][:20], "...")
     print("refresh_token:", data["refresh_token"][:20], "...")

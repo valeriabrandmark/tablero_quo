@@ -120,6 +120,17 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements.txt
 
+      # Un segundo, sin red ni base. El orquestador comparte el token de
+      # Mercado Libre con el workflow de la antiguedad, que corre en paralelo:
+      # si el candado que los ordena se rompe, el sintoma aparece en la corrida
+      # SIGUIENTE, con un invalid_grant que hay que arreglar reautorizando a
+      # mano. Mejor enterarse antes de arrancar.
+      - name: Probar el candado del token
+        run: python probar_candado_token.py
+
+      - name: Probar los reintentos de la API
+        run: python probar_reintentos_ml.py
+
       - name: Correr el orquestador
         run: python orquestador.py
 

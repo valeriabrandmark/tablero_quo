@@ -1,10 +1,10 @@
 import json
 import requests
-from mercadolibre import renovar_access_token
+from mercadolibre import token_ml
 from conexion import crear_engine
 
 print("=== Stock ML Full (Fulfillment) ===")
-token = renovar_access_token()
+token = token_ml()
 headers = {"Authorization": f"Bearer {token}"}
 
 # Primero necesitamos los inventory_id de tus publicaciones Full
