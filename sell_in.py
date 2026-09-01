@@ -43,12 +43,20 @@ una vez.
  QUE HACE FALTA PARA QUE CORRA (ver tambien el README)
 ============================================================================
 
-    SELL_IN_SHEET_ID    el id del Google Sheet (esta en la URL)
-    GOOGLE_SA_JSON      el JSON de la cuenta de servicio, entero
+    SELL_IN_SHEET_ID    el id del Google Sheet (esta en la URL). Obligatorio.
     SELL_IN_HOJA        opcional, por si la hoja deja de llamarse "Tablero"
 
-La cuenta de servicio necesita permiso de LECTURA sobre la planilla: se
-comparte como con cualquier persona, usando el mail que termina en
+Y la credencial, por UNO de los dos caminos:
+
+    sin clave           Workload Identity Federation. El workflow le pide a
+                        Google un permiso de minutos con el token de GitHub.
+                        Es lo recomendado: no existe ninguna clave que robar,
+                        y no hace falta que nadie apague una politica.
+    GOOGLE_SA_JSON      la clave descargada de la cuenta de servicio. Simple,
+                        pero muchas empresas la tienen prohibida por politica.
+
+En los dos casos la cuenta de servicio necesita permiso de LECTURA sobre la
+planilla: se comparte como con cualquier persona, usando el mail que termina en
 .iam.gserviceaccount.com.
 
     python sell_in.py            lee y guarda
@@ -268,6 +276,60 @@ def filas_de_la_planilla(valores):
     return filas, resumen
 
 
+def credenciales():
+    """La credencial de Google, por cualquiera de los dos caminos.
+
+    ============================================================================
+     HAY DOS, Y EL BUENO ES EL SEGUNDO
+    ============================================================================
+
+    1. GOOGLE_SA_JSON -- la clave descargada de una cuenta de servicio. Es la
+       forma directa, pero MUCHAS EMPRESAS LA TIENEN PROHIBIDA por politica de
+       organizacion (`iam.disableServiceAccountKeyCreation`), y con razon: es un
+       archivo que da acceso, no vence nunca, y viaja por mail y por chat.
+
+    2. SIN CLAVE, por Workload Identity Federation. GitHub le da al runner un
+       token OIDC que dice "soy la corrida tal del repo tal", Google lo cambia
+       por un permiso de unos minutos, y no existe ninguna clave que robar.
+       Es lo que Google recomienda y lo que un administrador aprueba sin
+       discutir, porque no le pide que apague nada.
+
+    El codigo no elige: usa la clave si esta, y si no busca la credencial que
+    dejo el runner (ADC). Asi los dos caminos andan sin tocar nada, y el dia
+    que se pase de uno al otro solo cambia el workflow.
+    """
+    from google.oauth2 import service_account
+
+    alcance = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+
+    crudo = os.getenv("GOOGLE_SA_JSON")
+    if crudo:
+        try:
+            info = json.loads(crudo)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(
+                "GOOGLE_SA_JSON no es un JSON valido. Tiene que ser el archivo "
+                "entero que baja Google, no solo el mail ni la clave."
+            ) from e
+        return service_account.Credentials.from_service_account_info(info, scopes=alcance)
+
+    import google.auth
+
+    try:
+        cred, _ = google.auth.default(scopes=alcance)
+        return cred
+    except Exception as e:
+        raise RuntimeError(
+            "No hay credencial de Google. Hay dos formas de darsela:\n"
+            "  1. Workload Identity Federation (recomendada, sin claves): el paso\n"
+            "     google-github-actions/auth en el workflow la deja lista sola.\n"
+            "  2. GOOGLE_SA_JSON con el JSON de una cuenta de servicio.\n"
+            "  En los dos casos, la planilla tiene que estar compartida como\n"
+            "  Lector con el mail de la cuenta (.iam.gserviceaccount.com).\n"
+            f"  Detalle: {e}"
+        ) from e
+
+
 def leer_hoja():
     """La hoja "Tablero" entera, tal como la muestra Google.
 
@@ -275,33 +337,17 @@ def leer_hoja():
     "1/8/2026" --que es lo que se ve y lo que se puede interpretar-- y no como
     el numero de serie 46234, que no dice nada.
     """
-    faltan = [v for v in ("SELL_IN_SHEET_ID", "GOOGLE_SA_JSON") if not os.getenv(v)]
-    if faltan:
+    # Se importa aca adentro y no arriba para que las pruebas del parser anden
+    # en una maquina sin google-auth instalado.
+    from google.auth.transport.requests import AuthorizedSession
+
+    if not os.getenv("SELL_IN_SHEET_ID"):
         raise RuntimeError(
-            f"Faltan variables: {', '.join(faltan)}.\n"
-            "  SELL_IN_SHEET_ID  el id del Google Sheet (esta en la URL).\n"
-            "  GOOGLE_SA_JSON    el JSON de la cuenta de servicio, entero.\n"
-            "  Y la planilla tiene que estar compartida con el mail de esa\n"
-            "  cuenta (termina en .iam.gserviceaccount.com)."
+            "Falta SELL_IN_SHEET_ID: el id del Google Sheet, que esta en la URL "
+            "entre /d/ y /edit."
         )
 
-    # Se importan aca adentro y no arriba para que --probar y las pruebas
-    # anden en una maquina sin google-auth instalado.
-    from google.auth.transport.requests import AuthorizedSession
-    from google.oauth2 import service_account
-
-    try:
-        info = json.loads(os.getenv("GOOGLE_SA_JSON"))
-    except json.JSONDecodeError as e:
-        raise RuntimeError(
-            "GOOGLE_SA_JSON no es un JSON valido. Tiene que ser el archivo "
-            "entero que baja Google, no solo el mail ni la clave."
-        ) from e
-
-    credenciales = service_account.Credentials.from_service_account_info(
-        info, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
-    )
-    sesion = AuthorizedSession(credenciales)
+    sesion = AuthorizedSession(credenciales())
 
     hoja = os.getenv("SELL_IN_HOJA", HOJA_POR_DEFECTO)
     url = (

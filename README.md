@@ -314,21 +314,47 @@ Se lee la hoja resumen y no las 25 hojas mensuales a propósito: cada una tiene 
 
 ### La cuenta de servicio de Google
 
-Una cuenta de servicio es un "usuario" que no es una persona: tiene su propio mail y su propia clave, y se le comparte la planilla como se le comparte a cualquiera. Es lo que permite que un runner de GitHub Actions lea el Sheet sin la contraseña de nadie.
+Una cuenta de servicio es un "usuario" que no es una persona: tiene su propio mail, y se le comparte la planilla como se le comparte a cualquiera. Es lo que permite que un runner de GitHub Actions lea el Sheet sin la contraseña de nadie.
+
+**Los pasos comunes**, los haga quien los haga:
 
 1. En **console.cloud.google.com**, crear un proyecto (o usar uno que ya exista).
 2. **APIs y servicios → Biblioteca →** habilitar **Google Sheets API**.
-3. **APIs y servicios → Credenciales → Crear credenciales → Cuenta de servicio.** Nombre: `tablero-quo`. Sin roles: no hace falta ninguno, el permiso sale de compartir la planilla.
-4. Entrar a la cuenta recién creada → **Claves → Agregar clave → Crear nueva → JSON**. Se descarga un archivo. **Ése archivo es la credencial**: no va al repo ni por mail.
-5. Copiar el mail de la cuenta (termina en `.iam.gserviceaccount.com`) y **compartir la planilla con ese mail, como Lector**. Alcanza con lectura.
-6. En GitHub, **Settings → Secrets and variables → Actions → New repository secret**, dos secretos:
+3. **APIs y servicios → Credenciales → Crear credenciales → Cuenta de servicio.** Nombre: `tablero-quo`. Sin roles: el permiso sale de compartir la planilla, no de un rol de Cloud.
+4. Copiar el mail de la cuenta (termina en `.iam.gserviceaccount.com`) y **compartir la planilla con ese mail, como Lector**.
+5. En GitHub, guardar el secreto `SELL_IN_SHEET_ID` con el id del Sheet: en `docs.google.com/spreadsheets/d/`**`ESTO`**`/edit`.
+
+Y después, **uno** de los dos caminos para la credencial.
+
+#### Camino A — sin claves (Workload Identity Federation). El recomendado
+
+No se crea ninguna clave. GitHub le da al runner un token que dice *"soy la corrida tal, del repo tal"*, Google lo cambia por un permiso de unos minutos, y no queda ningún archivo que robar. Es lo que Google recomienda, y **es el único camino posible si la organización tiene la política `iam.disableServiceAccountKeyCreation`** — que es lo normal en empresas.
+
+Lo hace alguien con permisos de administrador en el proyecto de Google Cloud:
+
+1. Habilitar las APIs **IAM Service Account Credentials** y **Security Token Service**.
+2. **IAM y administración → Federación de identidades para cargas de trabajo → Crear grupo.** Nombre `github`.
+3. Agregarle un **proveedor OIDC**: emisor `https://token.actions.githubusercontent.com`, y en el mapeo de atributos `google.subject = assertion.sub` y `attribute.repository = assertion.repository`. En la condición, restringir a este repositorio: `assertion.repository == 'valeriabrandmark/tablero_quo'`.
+4. En la cuenta de servicio `tablero-quo`, dar el rol **Usuario de identidad de carga de trabajo** (`roles/iam.workloadIdentityUser`) al principal:
+
+       principalSet://iam.googleapis.com/projects/NUMERO/locations/global/workloadIdentityPools/github/attribute.repository/valeriabrandmark/tablero_quo
+
+5. Guardar en GitHub dos secretos más:
 
    | Secreto | Qué va adentro |
    |---|---|
-   | `GOOGLE_SA_JSON` | el contenido **entero** del archivo JSON, tal cual |
-   | `SELL_IN_SHEET_ID` | el id del Sheet: en `docs.google.com/spreadsheets/d/`**`ESTO`**`/edit` |
+   | `GCP_WIF_PROVIDER` | `projects/NUMERO/locations/global/workloadIdentityPools/github/providers/EL-PROVEEDOR` |
+   | `GCP_SA_EMAIL` | `tablero-quo@PROYECTO.iam.gserviceaccount.com` |
 
-Para probar en una máquina, las mismas dos variables en el `.env`. `SELL_IN_HOJA` es opcional y sólo hace falta si la hoja deja de llamarse `Tablero`.
+El workflow ya tiene el paso que lo usa (`google-github-actions/auth`) y el permiso `id-token: write`. Si esos dos secretos están vacíos, el paso **no corre** y no molesta a nadie.
+
+#### Camino B — con clave descargada
+
+Más simple, y por eso es el primero que uno intenta. **En la cuenta de servicio → Claves → Agregar clave → JSON**, y guardar el archivo entero en el secreto `GOOGLE_SA_JSON`.
+
+Si aparece *"La creación de claves de la cuenta de servicio está inhabilitada"*, la organización tiene la política que lo prohíbe: no hay que pedir que la apaguen, hay que ir por el camino A.
+
+Para probar en una máquina alcanza con `GOOGLE_SA_JSON` y `SELL_IN_SHEET_ID` en el `.env`. `SELL_IN_HOJA` es opcional y sólo hace falta si la hoja deja de llamarse `Tablero`.
 
     python sell_in.py --probar    # lee, muestra lo que entendió y NO guarda
     python sell_in.py             # lee y guarda

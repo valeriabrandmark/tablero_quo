@@ -58,6 +58,15 @@ concurrency:
 jobs:
   correr:
     runs-on: ubuntu-latest
+
+    # `id-token: write` es lo que deja que GitHub le emita al runner un token
+    # OIDC --"soy la corrida tal, del repo tal"-- que Google cambia por un
+    # permiso de unos minutos. Es el camino SIN CLAVES, y no hace nada por si
+    # solo: si no esta configurado el proveedor en Google, este permiso no se
+    # usa. `contents: read` va junto porque nombrar permisos apaga el resto.
+    permissions:
+      contents: read
+      id-token: write
     # Una corrida normal son ~6-8 min, y ~21 min la que le toca el catalogo de
     # Mercado Libre. Con este horario esa es SIEMPRE la de las 00:20, que es la
     # primera del dia calendario y la que `primera_del_dia` engancha: el paso
@@ -108,8 +117,17 @@ jobs:
       # cuenta de servicio; SELL_IN_SHEET_ID, el id que esta en la URL del
       # Google Sheet. Sin las dos, sell_in.py falla con un mensaje que dice
       # cual falta -- y como no es critico, el resto del pipeline sigue.
-      GOOGLE_SA_JSON: ${{ secrets.GOOGLE_SA_JSON }}
       SELL_IN_SHEET_ID: ${{ secrets.SELL_IN_SHEET_ID }}
+
+      # DOS CAMINOS PARA LA MISMA CREDENCIAL, y basta con uno.
+      #
+      # El recomendado no usa clave: GCP_WIF_PROVIDER y GCP_SA_EMAIL arman
+      # Workload Identity Federation en el paso de mas abajo. El otro,
+      # GOOGLE_SA_JSON, es la clave descargada -- simple, pero muchas empresas
+      # la tienen prohibida por politica de organizacion, y con razon.
+      GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+      GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
+      GOOGLE_SA_JSON: ${{ secrets.GOOGLE_SA_JSON }}
 
       DIGIP_API_KEY: ${{ secrets.DIGIP_API_KEY }}
       DIGIP_URL_BASE: ${{ secrets.DIGIP_URL_BASE }}
@@ -143,6 +161,18 @@ jobs:
       # orden de compra. Son 40 casos sin red ni base, un segundo.
       - name: Probar el lector de sell in
         run: python probar_sell_in.py
+
+      # Cambia el token de GitHub por una credencial de Google de unos minutos,
+      # y la deja donde google.auth la encuentra sola. NO CORRE si no estan los
+      # secretos: asi el pipeline entero sigue andando igual mientras el camino
+      # sin claves no este configurado, y sell_in.py es el unico que falla --y
+      # no es critico--.
+      - name: Autenticar en Google sin claves
+        if: env.GCP_WIF_PROVIDER != '' && env.GCP_SA_EMAIL != ''
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
+          service_account: ${{ env.GCP_SA_EMAIL }}
 
       - name: Correr el orquestador
         run: python orquestador.py
