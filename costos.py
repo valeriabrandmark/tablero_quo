@@ -73,6 +73,145 @@ def limpiar_numero(valor):
         return None
     
 
+# Cuantas veces tiene que saltar un costo para que sea un error y no un aumento.
+#
+# 50 y no 5: un aumento de precios fuerte es 30 o 40 %, y un cambio de proveedor
+# puede duplicar un costo. Nada de eso llega a 50 veces. Lo que si llega es
+# perder la coma decimal: 10.979,019272 se vuelve 10979019272, que son SEIS
+# ordenes de magnitud.
+SALTO_SOSPECHOSO = 50
+
+# Que proporcion de los articulos tiene que saltar para abortar la carga.
+#
+# Uno solo puede ser un dato mal tipeado y no justifica frenar el mes entero;
+# que salte la quinta parte del catalogo no es un error de carga de nadie, es el
+# archivo que vino mal.
+PROPORCION_PARA_ABORTAR = 0.20
+
+
+def _sin_separador_decimal(viejo, nuevo):
+    """True si `nuevo` es `viejo` con la coma decimal borrada.
+
+    10.979,019272 -> 1097901927 no es un costo nuevo: son los mismos digitos sin
+    el separador. Se prueba multiplicando por potencias de diez porque la
+    cantidad de decimales cambia fila por fila, y por eso el factor no es
+    siempre el mismo -- lo que hace que "esta todo multiplicado por mil" no
+    alcance como explicacion.
+    """
+    if not viejo or viejo <= 0 or not nuevo or nuevo <= 0:
+        return False
+    for k in range(1, 8):
+        # Tolerancia del 1 %: el costo del mes nuevo casi nunca es identico al
+        # del anterior, pero un aumento normal no mueve el orden de magnitud.
+        if abs(nuevo - viejo * (10 ** k)) <= viejo * (10 ** k) * 0.01:
+            return True
+    return False
+
+
+def _mes_anterior(mes):
+    """'2026-09' -> '2026-08'."""
+    anio, m = (int(x) for x in mes.split("-"))
+    total = anio * 12 + (m - 1) - 1
+    return f"{total // 12:04d}-{total % 12 + 1:02d}"
+
+
+def costos_previos(mes, ya_procesados, engine):
+    """Los costos del mes anterior: de esta misma corrida o de la base.
+
+    Primero mira lo que ya se leyo en esta corrida --cuando se cargan todos los
+    archivos de una, el mes anterior todavia no esta en la base-- y si no,
+    consulta lo que hay guardado.
+    """
+    anterior = _mes_anterior(mes)
+
+    for df in ya_procesados:
+        if not df.empty and df["mes_comercial"].iloc[0] == anterior:
+            return dict(zip(df["sku"], df["costo_teorico"]))
+
+    try:
+        previo = pd.read_sql(
+            "select sku, costo_teorico from bronze.costos_historicos "
+            "where mes_comercial = %(m)s",
+            engine, params={"m": anterior},
+        )
+    except Exception:
+        # Primera carga, o la tabla todavia no existe: no hay contra que
+        # comparar y eso no es motivo para frenar nada.
+        return {}
+    return dict(zip(previo["sku"], previo["costo_teorico"]))
+
+
+# La columna de costos casi siempre trae decimales: son precios de lista con
+# cuatro a seis decimales. En julio y agosto de 2026 los tenia el 95,1 %; en el
+# archivo roto de septiembre, el 33 % -- justo los que vinieron como texto con
+# coma, que son los unicos que se leyeron bien.
+#
+# ESTO AVISA, NO CORTA. Es una pista de POR QUE se rompio, y por si sola no
+# alcanza para frenar un mes: un proveedor que redondea sus precios haria bajar
+# esta proporcion sin que nada este mal. El que corta es el salto de importes,
+# que se mide contra la magnitud real.
+CAIDA_DECIMALES_SOSPECHOSA = 0.5   # la mitad de lo que traia el mes anterior
+
+
+def _proporcion_con_decimales(costos):
+    positivos = [c for c in costos if c and c > 0]
+    if not positivos:
+        return None
+    return sum(1 for c in positivos if c % 1 != 0) / len(positivos)
+
+
+def revisar_decimales(nuevos, anteriores):
+    """Avisa si la columna de costos vino sin decimales y antes los tenia.
+
+    Cuando el Excel se exporta con otra configuracion regional, "2.508,975" se
+    guarda como 2508975: los mismos digitos, sin la coma. Todos los costos del
+    mes quedan enteros, que es algo que no pasa nunca con precios de lista.
+    """
+    antes = _proporcion_con_decimales(anteriores.values())
+    ahora = _proporcion_con_decimales(nuevos.values())
+    if antes is None or ahora is None:
+        return {"antes": antes, "ahora": ahora, "sospechoso": False}
+    return {
+        "antes": antes,
+        "ahora": ahora,
+        "sospechoso": ahora < antes * CAIDA_DECIMALES_SOSPECHOSA,
+    }
+
+
+def revisar_saltos(nuevos, anteriores):
+    """Compara los costos nuevos contra los del mes anterior.
+
+    `nuevos` y `anteriores` son dicts {sku: costo_teorico}. Devuelve un informe
+    con cuantos saltaron y algunos ejemplos, sin decidir nada: quien decide es
+    el que llama.
+
+    POR QUE EXISTE. El 07/09/2026 entro un archivo de costos con la coma decimal
+    borrada en el 63 % de los articulos. Nadie lo noto en la carga; se noto en el
+    tablero, con el margen del dia en -$ 42.421 millones. El cargador no puede
+    saber cuanto vale un articulo, pero SI puede saber que un costo no se
+    multiplica por cien de un mes al otro.
+    """
+    comparables = 0
+    saltos = []
+    for sku, nuevo in nuevos.items():
+        viejo = anteriores.get(sku)
+        if not viejo or viejo <= 0 or not nuevo or nuevo <= 0:
+            continue
+        comparables += 1
+        if nuevo >= viejo * SALTO_SOSPECHOSO:
+            saltos.append((sku, viejo, nuevo, _sin_separador_decimal(viejo, nuevo)))
+
+    proporcion = len(saltos) / comparables if comparables else 0.0
+    return {
+        "comparables": comparables,
+        "saltos": len(saltos),
+        "proporcion": proporcion,
+        "sin_separador": sum(1 for s in saltos if s[3]),
+        "ejemplos": saltos[:5],
+        "abortar": comparables > 0 and proporcion >= PROPORCION_PARA_ABORTAR,
+    }
+
+
 def leer_hoja_flexible(archivo, hoja, columnas_necesarias, max_filas_prueba=5):
     """Lee una hoja probando distintas filas de encabezado hasta encontrar
        una donde existan las columnas necesarias. Evita fallar si el export
@@ -147,7 +286,7 @@ def asegurar_columnas(con):
     )
 
 
-def cargar_costos(mes=None):
+def cargar_costos(mes=None, revisar_solo=False):
     """Carga los costos de todos los meses, o de uno solo si se pasa `mes`.
 
     Con `mes` NO se reescribe la tabla entera: se borra unicamente ese mes y se
@@ -223,10 +362,51 @@ def cargar_costos(mes=None):
         costos["desc_propio_pct"] = costos["desc_propio_pct"].fillna(0)
         costos["costo_real"] = costos["costo_teorico"] * (1 - costos["oferta_pct"] / 100)
         costos["mes_comercial"] = nombre
+
+        # --- El archivo, contra el mes anterior -------------------------
+        #
+        # SE CHEQUEA ANTES DE ESCRIBIR NADA. Todo el mes se guarda en una sola
+        # transaccion al final, asi que cortar aca deja la base como estaba: con
+        # los costos viejos, que son viejos pero no absurdos.
+        anteriores = costos_previos(nombre, todos, engine)
+        if anteriores:
+            nuevos = dict(zip(costos["sku"], costos["costo_teorico"]))
+            informe = revisar_saltos(nuevos, anteriores)
+
+            decimales = revisar_decimales(nuevos, anteriores)
+            if decimales["sospechoso"]:
+                print(f"    OJO: solo el {decimales['ahora']:.0%} de los costos tiene "
+                      f"decimales, contra {decimales['antes']:.0%} el mes anterior")
+            if informe["saltos"]:
+                print(f"    OJO: {informe['saltos']} de {informe['comparables']} costos "
+                      f"saltaron {SALTO_SOSPECHOSO}x o mas "
+                      f"({informe['proporcion']:.0%})")
+                for sku, viejo_v, nuevo_v, sin_sep in informe["ejemplos"]:
+                    marca = "  <- parece la coma decimal borrada" if sin_sep else ""
+                    print(f"      {sku:<12} {viejo_v:>14,.4f} -> {nuevo_v:>16,.2f}{marca}")
+            if informe["abortar"] and not revisar_solo:
+                raise RuntimeError(
+                    f"El archivo de {nombre} tiene {informe['saltos']} costos "
+                    f"({informe['proporcion']:.0%}) al menos {SALTO_SOSPECHOSO} veces "
+                    f"mas altos que en el mes anterior, y {informe['sin_separador']} "
+                    "son exactamente los mismos digitos sin la coma decimal.\n"
+                    f"  Y solo el {decimales['ahora']:.0%} de los costos tiene decimales, "
+                    f"contra {decimales['antes']:.0%} el mes anterior.\n"
+                    "  No se cargo NADA: la base queda con los costos de antes.\n"
+                    "  Casi siempre es el Excel exportado con otra configuracion "
+                    "regional: la columna 'Costo Teorico' tiene que venir como "
+                    "numero, o como texto con coma decimal ('2.460,85').\n"
+                    "  Para revisarlo sin cargar: python costos.py " + nombre + " --revisar"
+                )
+
         todos.append(costos)
 
     if not todos:
         print("\n  No se cargo nada.")
+        return
+
+    if revisar_solo:
+        print("\n  (modo revisar: no se guardo nada)")
         return
 
     final = pd.concat(todos, ignore_index=True)
@@ -305,6 +485,8 @@ def main():
                         help="Mes comercial AAAA-MM. Sin esto carga todos.")
     parser.add_argument("--listar", action="store_true",
                         help="Muestra los meses que hay en la carpeta y sale")
+    parser.add_argument("--revisar", action="store_true",
+                        help="Lee los Excel y avisa de los costos raros, sin guardar")
     parser.add_argument("--si-cambio", action="store_true",
                         help="No hace nada si ningun .xlsx cambio desde la ultima vez")
     args = parser.parse_args()
@@ -324,14 +506,14 @@ def main():
     # que reprocesarlos en cada corrida del orquestador es trabajo al pedo: son
     # 31.446 filas reescritas cada dos horas para que quede exactamente lo
     # mismo. Con --si-cambio el orquestador lo llama siempre y el script decide.
-    if args.si_cambio:
+    if args.si_cambio and not args.revisar:
         huella = huella_de_los_excel()
         if huella == huella_guardada():
             print("Ningun Excel de costos cambio desde la ultima carga. No hay nada que hacer.")
             return
         print("Cambio algun Excel de costos: se recarga.")
 
-    cargar_costos(args.mes)
+    cargar_costos(args.mes, revisar_solo=args.revisar)
 
     # La huella se guarda DESPUES de cargar bien: si la carga falla, la proxima
     # corrida tiene que volver a intentarlo y no darlo por hecho.
