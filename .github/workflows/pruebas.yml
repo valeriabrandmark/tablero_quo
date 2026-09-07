@@ -58,6 +58,12 @@ jobs:
       - name: Probar el lector de sell in
         run: python probar_sell_in.py
 
+      # El mes comercial decide que lista de costos se le aplica a cada venta.
+      # Una fecha en el mes equivocado no se ve como un error: se ve como un
+      # margen raro, o como una venta sin costo.
+      - name: Probar el mes comercial
+        run: python probar_mes_comercial.py
+
       # Que todos los scripts al menos compilen. No prueba que anden, pero un
       # error de sintaxis en un archivo que nadie importa en las pruebas
       # tambien tumba la corrida, y eso se ve gratis.

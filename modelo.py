@@ -61,20 +61,82 @@ def vendedor_de(codigo):
     return VENDEDORES.get(str(codigo).strip(), f"Vendedor {codigo}")
 
 
-def mes_comercial(fecha):
-    """Devuelve el mes comercial 'AAAA-MM' segun la regla del 6 al 5.
-       Dia >= 6 -> mes actual. Dia < 6 -> mes anterior."""
-    if fecha is None:
-        return None
-    if fecha.day >= 6:
+# Primer dia del mes comercial. Del 6 de un mes al 5 del siguiente.
+DIA_INICIO_MES_COMERCIAL = 6
+
+# ============================================================================
+#  MESES QUE NO CERRARON EL DIA 5
+# ============================================================================
+#
+# La regla del 6 al 5 vale siempre, MENOS cuando la lista de costos nueva llega
+# tarde o se decide estirar el mes. Ahi el cierre se corre unos dias, y las
+# ventas de esos dias tienen que seguir costeandose con la lista vieja.
+#
+# ESTO NO ES UN AJUSTE COSMETICO. El mes comercial es lo que decide QUE LISTA DE
+# COSTOS se le aplica a cada venta: `costos_historicos` esta indexada por
+# (sku, mes_comercial). Si una venta del 06/09 queda etiquetada 2026-09 y la
+# lista de septiembre todavia no se cargo, esa venta se queda SIN COSTO y su
+# margen aparece inflado -- o directamente en null.
+#
+# El valor es el ULTIMO DIA que pertenece a ese mes comercial, inclusive.
+#
+#   "2026-08": date(2026, 9, 6)   agosto cerro el 06/09 y no el 05/09, asi que
+#                                 las ventas del 06/09 van con costos de agosto.
+#                                 Septiembre arranca el 07/09.
+#
+# Sirve para los dos lados: un mes que se estira se queda con dias del
+# siguiente, y uno que se acorta se los cede.
+#
+# OJO: el tablero tiene esta misma tabla en lib/constantes.ts. Las dos tienen
+# que decir lo mismo, o el filtro "Mes comercial" de la pantalla va a mostrar un
+# rango distinto del que tienen etiquetados los datos.
+CIERRES_EXCEPCION = {
+    "2026-08": date(2026, 9, 6),
+}
+
+
+def _mes_estandar(fecha):
+    """La regla del 6 al 5, sin excepciones."""
+    if fecha.day >= DIA_INICIO_MES_COMERCIAL:
         anio, mes = fecha.year, fecha.month
     else:
-        # mes anterior
         if fecha.month == 1:
             anio, mes = fecha.year - 1, 12
         else:
             anio, mes = fecha.year, fecha.month - 1
     return f"{anio:04d}-{mes:02d}"
+
+
+def _correr_mes(mes, pasos):
+    """'2026-08' mas o menos N meses."""
+    anio, m = (int(x) for x in mes.split("-"))
+    total = anio * 12 + (m - 1) + pasos
+    return f"{total // 12:04d}-{total % 12 + 1:02d}"
+
+
+def mes_comercial(fecha):
+    """El mes comercial 'AAAA-MM' de una fecha, respetando los cierres movidos.
+
+    Del 6 al 5, salvo que ese mes --o el anterior-- tenga un cierre distinto
+    cargado en CIERRES_EXCEPCION.
+    """
+    if fecha is None:
+        return None
+
+    mes = _mes_estandar(fecha)
+
+    # El mes ANTERIOR se estiro y esta fecha todavia le pertenece.
+    anterior = _correr_mes(mes, -1)
+    fin_anterior = CIERRES_EXCEPCION.get(anterior)
+    if fin_anterior is not None and fecha <= fin_anterior:
+        return anterior
+
+    # ESTE mes se acorto y la fecha ya quedo afuera: es del siguiente.
+    fin = CIERRES_EXCEPCION.get(mes)
+    if fin is not None and fecha > fin:
+        return _correr_mes(mes, 1)
+
+    return mes
 
 
 # NOTAS DE CREDITO: DOS PREGUNTAS DISTINTAS, DOS LISTAS.
