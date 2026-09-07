@@ -64,6 +64,12 @@ jobs:
       - name: Probar el mes comercial
         run: python probar_mes_comercial.py
 
+      # De esta tabla sale la pata de INGRESOS de la trazabilidad de Full:
+      # contra ella se compara lo que Mercado Libre declara. Un item contado de
+      # mas hace ver un faltante de ML donde no lo hay.
+      - name: Probar el lector de envios a Full
+        run: python probar_envios_full.py
+
       # Que todos los scripts al menos compilen. No prueba que anden, pero un
       # error de sintaxis en un archivo que nadie importa en las pruebas
       # tambien tumba la corrida, y eso se ve gratis.

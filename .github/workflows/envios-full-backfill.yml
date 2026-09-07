@@ -1,0 +1,62 @@
+name: Backfill envios a Full
+
+# ============================================================================
+#  LA CARGA HACIA ATRAS, UNA SOLA VEZ.
+#
+#  El orquestador corre `digip_envios_full.py` con una ventana de 14 dias, que
+#  alcanza para mantenerse al dia pero no para tener historia. Este workflow
+#  corre el mismo script con `--desde`, para traer todo lo que haya desde el
+#  06/05/2026 --la fecha de corte de Digip-- de una sentada.
+#
+#  Se puede correr las veces que haga falta: el script borra y reinserta por
+#  pedido, asi que repetirlo no duplica nada.
+#
+#  Tarda mas que una corrida normal porque hay que preguntar preparacion por
+#  preparacion: son ~840 llamadas para cuatro meses, unos pocos minutos.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      desde:
+        description: 'Desde qué fecha (YYYY-MM-DD)'
+        required: true
+        default: '2026-05-06'
+
+# Comparte tabla y API con el orquestador. Sin esto, un backfill lanzado a mano
+# mientras corre el paso de las :20 puede borrar la ventana que el otro esta
+# insertando -- que es exactamente como se duplicaron 2.548 ordenes el 21/08.
+concurrency:
+  group: orquestador
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      TZ: America/Argentina/Buenos_Aires
+
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASS: ${{ secrets.DB_PASS }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+
+      DIGIP_API_KEY: ${{ secrets.DIGIP_API_KEY }}
+      DIGIP_URL_BASE: ${{ secrets.DIGIP_URL_BASE }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Traer los envios a Full desde la fecha
+        run: python digip_envios_full.py --desde "${{ inputs.desde }}"
