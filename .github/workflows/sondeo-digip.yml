@@ -1,0 +1,51 @@
+name: Sondeo Digip
+
+# ============================================================================
+#  MIRA, NO TOCA.
+#
+#  Corre `explorar_digip_preparaciones.py`, que le pregunta cosas a la API de
+#  Digip e imprime lo que contesta. NO escribe en la base y NO forma parte del
+#  pipeline: existe para poder definir la tabla de ingresos a Full con nombres
+#  de campo reales en vez de adivinados.
+#
+#  Se dispara A MANO --pestaña Actions, "Run workflow"-- y no por horario:
+#  una vez que se sepa la forma de la respuesta, este workflow no hace falta
+#  mas y se puede borrar.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      dias:
+        description: 'Cuántos días para atrás mirar'
+        required: false
+        default: '30'
+
+jobs:
+  sondear:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      # Mismo motivo que en el orquestador: el runner corre en UTC y la ventana
+      # se arma con date.today().
+      TZ: America/Argentina/Buenos_Aires
+
+      DIGIP_API_KEY: ${{ secrets.DIGIP_API_KEY }}
+      DIGIP_URL_BASE: ${{ secrets.DIGIP_URL_BASE }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      # Sólo lo que este script usa. `requirements.txt` entero traeria pandas y
+      # numpy para nada: el sondeo no arma ningun DataFrame.
+      - name: Instalar dependencias
+        run: pip install requests python-dotenv
+
+      - name: Sondear
+        run: python explorar_digip_preparaciones.py --dias "${{ inputs.dias }}"
