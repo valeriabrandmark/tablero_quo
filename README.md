@@ -480,6 +480,22 @@ título no lo rompe. Renombrar o borrar una de esas cuatro columnas sí: corta c
 `No se encontraron las columnas ...`. Si termina sin error, leyó lo que
 corresponde.
 
+### El archivo se compara contra el mes anterior antes de cargarse
+
+`costos.py` no puede saber cuánto vale un artículo, pero sí puede saber que **un costo no se multiplica por cien de un mes al otro**. Antes de escribir nada compara los costos nuevos con los del mes anterior, y si **más del 20 % saltó 50 veces o más**, corta sin cargar: la base queda con los costos de antes, que son viejos pero no absurdos.
+
+Pasó el 07/09/2026. El Excel de septiembre vino con la **coma decimal borrada** en el 63 % de los artículos —`10.979,019272` cargado como `1.097.901.927`, los mismos dígitos sin la coma— y el margen del día quedó en **−$ 42.421 millones**. El factor no era el mismo para todos (×1.000, ×10.000, ×100.000) porque depende de cuántos decimales tenía cada precio, así que ni siquiera se veía como «está todo multiplicado por mil».
+
+El aviso trae ejemplos y marca los que son exactamente los mismos dígitos sin la coma. Además avisa —sin cortar— cuando la proporción de costos con decimales cae a menos de la mitad: en ese archivo era 33 % contra 95 % el mes anterior.
+
+Para mirar un Excel sin cargarlo:
+
+```bash
+python costos.py 2026-09 --revisar
+```
+
+**Si corta, el archivo se arregla en el origen.** La columna `Costo Teorico` tiene que venir como número, o como texto con coma decimal (`2.460,85`). No se repara sola a propósito: adivinar el precio de un proveedor a partir de los dígitos es peor que no cargarlo.
+
 Al final imprime cuántos SKUs cargó por mes. Vale la pena mirar que el mes nuevo
 tenga un número parecido al anterior; si bajó mucho, algo se movió de lugar en el
 Excel.
