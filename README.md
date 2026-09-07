@@ -463,6 +463,33 @@ canal está por eso algo sobreestimado, y el tablero lo aclara.
 
 ---
 
+## El mes comercial, y los cierres que se corren
+
+El mes comercial va **del 6 de un mes al 5 del siguiente**: una venta del 06/08 y una del 05/09 son las dos de `2026-08`. La función es `mes_comercial` en `modelo.py`.
+
+**No es una etiqueta cosmética: es lo que decide con qué costo se valoriza cada venta.** `bronze.costos_historicos` está indexada por `(sku, mes_comercial)`, así que una venta etiquetada en un mes cuya lista todavía no se cargó queda **sin costo**, con el margen inflado o en `null`.
+
+### Cuando el mes no cierra el día 5
+
+Pasa: la lista nueva llega tarde, o se decide estirar el mes unos días. Esas ventas tienen que seguir costeándose con la lista vieja, así que el cierre se corre — y eso se declara en una tabla, no se parchea a mano:
+
+```python
+# modelo.py
+CIERRES_EXCEPCION = {
+    "2026-08": date(2026, 9, 6),   # agosto cerró el 06/09, no el 05/09
+}
+```
+
+El valor es el **último día que pertenece a ese mes comercial, inclusive**. Sirve para los dos lados: un mes que se estira se queda con días del siguiente, y uno que se acorta se los cede.
+
+**Hay que tocar los dos repos.** El tablero tiene la misma tabla en `lib/constantes.ts` (`CIERRES_MES_COMERCIAL`), porque de ahí sale el rango del filtro *Mes comercial* de la pantalla. Si dicen cosas distintas, el filtro muestra un rango que no coincide con cómo están etiquetados los datos.
+
+**Cuándo se aplica.** `modelo.py` reconstruye los últimos 7 días en cada corrida, así que una excepción cargada dentro de esa ventana se aplica sola en la corrida siguiente, sin hacer nada. Si el día que cambia de mes quedó más atrás, hay que reprocesar a mano: `python modelo.py --dias N` con los días que haga falta, o `--todo` si es más simple.
+
+`probar_mes_comercial.py` cubre la regla y las dos direcciones de la excepción, cambios de año incluidos.
+
+---
+
 ## El Excel de costos
 
 `costos_mensuales/AAAA-MM.xlsx`, uno por mes comercial. **El nombre del archivo
