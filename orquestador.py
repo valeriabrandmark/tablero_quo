@@ -295,6 +295,20 @@ PASOS = [
     {"comando": "digip_preparaciones.py",      "intentos": 2, "espera": 60,
      "cada_horas": None, "critico": False, "escribe": "digip_preparaciones", "techo": 10 * 60},
 
+    # LO QUE MANDAMOS A FULL, articulo por articulo. Es la pata de ingresos con
+    # la que se compara el stock que declara Mercado Libre: sin esto, un envio
+    # que llega y una unidad que ML devuelve se ven exactamente igual.
+    #
+    # Va DESPUES de digip_preparaciones y no antes porque comparte con el la
+    # API de Digip, y encadenarlos deja el pico de llamadas en un solo momento
+    # en vez de repartirlo.
+    #
+    # No critico: si falla, la comparacion se queda con lo de la corrida
+    # anterior. Un dia de atraso en un reclamo no es lo mismo que un tablero
+    # sin ventas.
+    {"comando": "digip_envios_full.py",        "intentos": 2, "espera": 60,
+     "cada_horas": 6, "critico": False, "escribe": "digip_envios_full", "techo": 10 * 60},
+
     # Los fletes se miran por semana: dos veces por dia alcanza y sobra.
     {"comando": "prorratear_flete.py",         "intentos": 2, "espera": 30,
      "cada_horas": 12, "critico": False, "escribe": "gold.fact_ventas_flete", "techo": 10 * 60},
