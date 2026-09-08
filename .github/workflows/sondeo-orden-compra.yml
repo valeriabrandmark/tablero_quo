@@ -14,22 +14,30 @@ name: Sondeo Orden de Compra Sigma
 #
 #  Se dispara A MANO. Cuando sepamos la respuesta, este workflow se borra.
 #
-#  LO UNICO QUE PUEDE ESCRIBIR es el POST con el cuerpo vacio, y esta detras de
-#  DOS puertas: hay que marcar `sondear_vacio` y ademas escribir SI en
-#  `confirmo`. Nunca manda renglones, asi que en el peor caso -- si SIGMA lo
-#  aceptara en vez de rechazarlo -- quedaria una orden sin items para borrar.
+#  LO QUE YA CONTESTO (corrida del 08/09):
+#
+#      GET ImportOrdenDeCompra -> 500 "Parametro content requerido"
+#      OPTIONS                 -> 200
+#
+#  O sea que la ruta existe y pide UN parametro `content` con el contenido
+#  adentro. Falta saber en que formato.
+#
+#  LO UNICO QUE PUEDE ESCRIBIR es el envio de `content`, y esta detras de DOS
+#  puertas: hay que marcar `sondear_formato` y ademas escribir SI en
+#  `confirmo`. Lo que manda no es una grilla valida, asi que no hay orden
+#  posible: en el peor caso SIGMA la rechaza, que es justo lo que se busca.
 # ============================================================================
 
 on:
   workflow_dispatch:
     inputs:
-      sondear_vacio:
-        description: 'Mandar tambien un POST con el cuerpo vacio, para que Sigma diga que campos faltan'
+      sondear_formato:
+        description: 'Mandar tambien `content` con basura, para que Sigma diga que formato espera'
         type: boolean
         required: false
         default: false
       confirmo:
-        description: 'Escribi SI para autorizar ese POST (si lo dejas vacio, no se manda)'
+        description: 'Escribi SI para autorizar ese envio (si lo dejas vacio, no se manda)'
         required: false
         default: ''
 
@@ -60,5 +68,5 @@ jobs:
       - name: Sondear
         run: |
           python probar_sigma_orden_compra.py \
-            ${{ inputs.sondear_vacio && '--sondear-vacio' || '' }} \
+            ${{ inputs.sondear_formato && '--sondear-formato' || '' }} \
             --confirmo "${{ inputs.confirmo }}"
