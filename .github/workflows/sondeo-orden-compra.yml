@@ -1,0 +1,64 @@
+name: Sondeo Orden de Compra Sigma
+
+# ============================================================================
+#  PREGUNTA, NO CARGA.
+#
+#  Corre `probar_sigma_orden_compra.py`, que le pregunta a la API de SIGMA con
+#  que metodo se llama a `importordendecompra` y que campos pide el cuerpo.
+#  Sin esas dos cosas no se puede escribir el boton del tablero que manda la
+#  orden, y la documentacion de la API v10 no es publica.
+#
+#  POR QUE ACA Y NO EN LA COMPU. Las credenciales de SIGMA ya viven en los
+#  secrets de este repo. Correrlo local obliga a copiar el token a un .env a
+#  mano -- mas pasos y una copia mas del token dando vueltas.
+#
+#  Se dispara A MANO. Cuando sepamos la respuesta, este workflow se borra.
+#
+#  LO UNICO QUE PUEDE ESCRIBIR es el POST con el cuerpo vacio, y esta detras de
+#  DOS puertas: hay que marcar `sondear_vacio` y ademas escribir SI en
+#  `confirmo`. Nunca manda renglones, asi que en el peor caso -- si SIGMA lo
+#  aceptara en vez de rechazarlo -- quedaria una orden sin items para borrar.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      sondear_vacio:
+        description: 'Mandar tambien un POST con el cuerpo vacio, para que Sigma diga que campos faltan'
+        type: boolean
+        required: false
+        default: false
+      confirmo:
+        description: 'Escribi SI para autorizar ese POST (si lo dejas vacio, no se manda)'
+        required: false
+        default: ''
+
+jobs:
+  sondear:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      TZ: America/Argentina/Buenos_Aires
+
+      SIGMA_TOKEN: ${{ secrets.SIGMA_TOKEN }}
+      SIGMA_URL_CLIENTE: ${{ secrets.SIGMA_URL_CLIENTE }}
+      SIGMA_ID_CLIENTE: ${{ secrets.SIGMA_ID_CLIENTE }}
+      SIGMA_BASEALIAS: ${{ secrets.SIGMA_BASEALIAS }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Sondear
+        run: |
+          python probar_sigma_orden_compra.py \
+            ${{ inputs.sondear_vacio && '--sondear-vacio' || '' }} \
+            --confirmo "${{ inputs.confirmo }}"
