@@ -14,34 +14,52 @@ name: Sondeo Orden de Compra Sigma
 #
 #  Se dispara A MANO. Cuando sepamos la respuesta, este workflow se borra.
 #
-#  LO QUE YA CONTESTO (corridas del 08/09):
+#  LO QUE YA CONTESTO (08/09), en orden:
 #
-#      GET ImportOrdenDeCompra         -> 500 "Parametro content requerido"
-#      GET  con content en la query    -> 500 "El formato del JSON es incorrecto"
-#      POST con content de formulario  -> 500 "El formato del JSON es incorrecto"
-#      POST con content en JSON        -> 500 "Empresa Obligatoria"
+#      GET ImportOrdenDeCompra    -> 500 "Parametro content requerido"
+#      POST con cuerpo JSON       -> 500 "Empresa Obligatoria"
+#      ...con frecdia: 10         -> 500 invalid input syntax for type date: "10"
+#      ...sin frecdia             -> 500 "Query with RESPONSE_CODE returned no rows"
+#      ...con frecdia como fecha  -> el mismo
+#      ...+ vencimiento           -> el mismo
+#      ...+ usuario               -> el mismo
 #
-#  O sea: la ruta existe, se llama con POST y cuerpo JSON, y con el sobre bien
-#  el servidor pasa a pedir campos de negocio. Cada uno que se agrega destapa
-#  el siguiente, y para eso esta el campo `campos` del formulario.
+#  O sea: la ruta existe, se llama con POST y cuerpo JSON, el cuerpo pasa TODAS
+#  las validaciones documentadas, y aun asi no entra. Ya no hay nada que
+#  deducir del JSON.
 #
-#  LO UNICO QUE PUEDE ESCRIBIR esta detras de DOS puertas: hay que marcar
-#  `sondear_formato` y ademas escribir SI en `confirmo`. Y hay una tercera
-#  garantia que no depende de acordarse: `content` va siempre con una cadena
-#  que no es una orden y NO se puede cambiar desde el formulario, asi que por
-#  mas campos de cabecera que se completen no hay orden que crear.
+#  POR ESO ESTE WORKFLOW AHORA PUEDE MANDAR UNA ORDEN DE VERDAD. Cada hipotesis
+#  que quedaba costaba un merge, un pull y un deploy del tablero para probarse;
+#  aca se prueba apretando "Run workflow", y `campos` permite pisar o SACAR
+#  cualquier campo de la cabecera sin tocar codigo.
+#
+#  LO QUE PUEDE ESCRIBIR sigue detras de DOS puertas: hay que elegir la accion
+#  y escribir SI en `confirmo`. Y mandar una orden no tiene articulo ni precio
+#  por defecto: sin `item` no manda nada. Es a proposito -- un articulo de
+#  ejemplo en un script es la forma mas facil de cargarle a un proveedor algo
+#  que nadie pidio.
+#
+#  SI UNA ORDEN ENTRA, HAY QUE ANULARLA EN SIGMA. Desde aca no se puede borrar.
 # ============================================================================
 
 on:
   workflow_dispatch:
     inputs:
-      sondear_formato:
-        description: 'Mandar tambien `content` con basura, para que Sigma diga que formato espera'
-        type: boolean
-        required: false
-        default: false
+      accion:
+        description: 'Qué hacer'
+        type: choice
+        required: true
+        default: mirar
+        options:
+          - mirar
+          - sondear-formato
+          - mandar-orden
       campos:
-        description: 'Campos extra del cuerpo, separados por ";". Ej: Empresa=ZZZ;Proveedor=XXX'
+        description: 'Pisar campos de cabecera, separados por ";". Vacío = sacar el campo. Ej: frecdia=;estado=S'
+        required: false
+        default: ''
+      item:
+        description: 'El renglón. Ej: articuloId=AL26011;precio=14968.8;cantidad=1;unidadDeCompra=U'
         required: false
         default: ''
       confirmo:
@@ -76,6 +94,8 @@ jobs:
       - name: Sondear
         run: |
           python probar_sigma_orden_compra.py \
-            ${{ inputs.sondear_formato && '--sondear-formato' || '' }} \
+            ${{ inputs.accion == 'sondear-formato' && '--sondear-formato' || '' }} \
+            ${{ inputs.accion == 'mandar-orden' && '--mandar-orden' || '' }} \
             --campos "${{ inputs.campos }}" \
+            --item "${{ inputs.item }}" \
             --confirmo "${{ inputs.confirmo }}"
