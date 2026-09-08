@@ -695,6 +695,69 @@ def extraer_publicaciones_ml():
     df = pd.json_normalize(detalles)
     print(f"  Total con detalle: {len(df)} publicaciones")
     guardar_en_bd(df, "ml_publicaciones", modo="replace")
+    rehacer_mapa_inventario_sku()
+
+
+# El SKU de una publicacion vive DENTRO del array `attributes`, que se guarda
+# como TEXTO: 6.646 caracteres de promedio, 14 MB en total. Sacarlo obliga a
+# convertir todo ese texto a jsonb, y medido da 896 ms.
+#
+# El tablero de Stock hace siete consultas por pantalla y las siete lo repetian:
+# unos seis segundos de puro parseo en cada click de un filtro. La pantalla
+# quedaba sombreada tanto rato que parecia colgada.
+#
+# El mapa cambia UNA VEZ POR DIA --justo aca, cuando se rehacen las
+# publicaciones-- asi que calcularlo en cada consulta es pagar siete veces por
+# dia algo que cambia una. Se calcula aca y el tablero solo lo lee: 0,9 ms.
+DDL_MAPA_INVENTARIO = """
+create table if not exists bronze.ml_inventario_sku (
+    inventory_id text primary key,
+    sku          text,
+    actualizado  timestamptz not null default now()
+);
+"""
+
+
+def rehacer_mapa_inventario_sku():
+    """El mapa inventory_id -> SKU, recalculado despues del catalogo."""
+    print("\n=== Mapa inventory_id -> SKU ===")
+    engine = _crear_engine()
+
+    # TODO EN UNA TRANSACCION. En dos hay un instante con la tabla vacia, y el
+    # tablero la lee en vivo: quien entrara justo ahi veria el stock de Full en
+    # cero. Es la misma trampa que dejo a Tienda Nube sin datos en junio.
+    with engine.begin() as con:
+        con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
+        con.exec_driver_sql(DDL_MAPA_INVENTARIO)
+        con.exec_driver_sql("DELETE FROM bronze.ml_inventario_sku;")
+        con.exec_driver_sql("""
+            INSERT INTO bronze.ml_inventario_sku (inventory_id, sku)
+            SELECT p.inventory_id,
+                   MAX((SELECT a->>'value_name'
+                          FROM jsonb_array_elements(p.attributes::jsonb) a
+                         WHERE a->>'id' = 'SELLER_SKU'
+                         LIMIT 1))
+            FROM bronze.ml_publicaciones p
+            WHERE p."shipping.logistic_type" = 'fulfillment'
+              AND p.inventory_id IS NOT NULL
+            GROUP BY p.inventory_id
+        """)
+
+    fila = pd.read_sql(
+        """select count(*) as inventarios,
+                  count(sku) as con_sku,
+                  count(distinct sku) as skus
+             from bronze.ml_inventario_sku""",
+        engine,
+    ).iloc[0]
+    print(f"  {fila['inventarios']} inventarios, {fila['con_sku']} con SKU "
+          f"({fila['skus']} SKU distintos)")
+
+    # Un mapa vacio no rompe el tablero --la consulta cae al parseo de antes--
+    # pero si vuelve a estar lento y nadie sabria por que. Que quede dicho.
+    if fila["con_sku"] == 0:
+        print("  ATENCION: el mapa quedo sin ningun SKU. El tablero va a andar "
+              "igual pero lento, parseando el JSON como antes.")
 
 
 def extraer_stock_full():
