@@ -1,0 +1,63 @@
+name: Sondeo Meli Full
+
+# ============================================================================
+#  MIRA, NO TOCA.
+#
+#  Corre `explorar_ml_full.py`, que le pregunta a la API de Mercado Libre si
+#  existe algun campo o endpoint que diga si un articulo es APTO para Full.
+#  No escribe en la base y no forma parte del pipeline.
+#
+#  Se dispara A MANO. Cuando sepamos la respuesta, este workflow se borra.
+#
+#  OJO CON EL TOKEN. `token_ml()` comparte el refresh_token con el orquestador
+#  y con el workflow de antiguedad: Mercado Libre emite uno nuevo en cada
+#  renovacion y anula el anterior, asi que dos procesos renovando a la vez
+#  dejan a uno con un token muerto. El candado de `estado.con_candado` lo
+#  ordena, y este workflow ademas comparte el grupo de concurrencia para no
+#  depender solo de eso.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      muestra:
+        description: 'Cuántos artículos de cada grupo comparar'
+        required: false
+        default: '8'
+
+concurrency:
+  group: orquestador
+  cancel-in-progress: false
+
+jobs:
+  sondear:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      TZ: America/Argentina/Buenos_Aires
+
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASS: ${{ secrets.DB_PASS }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+
+      ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+      ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+      ML_REDIRECT_URI: ${{ secrets.ML_REDIRECT_URI }}
+      ML_USER_ID: ${{ secrets.ML_USER_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Sondear
+        run: python explorar_ml_full.py --muestra "${{ inputs.muestra }}"
