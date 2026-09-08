@@ -14,18 +14,22 @@ name: Sondeo Orden de Compra Sigma
 #
 #  Se dispara A MANO. Cuando sepamos la respuesta, este workflow se borra.
 #
-#  LO QUE YA CONTESTO (corrida del 08/09):
+#  LO QUE YA CONTESTO (corridas del 08/09):
 #
-#      GET ImportOrdenDeCompra -> 500 "Parametro content requerido"
-#      OPTIONS                 -> 200
+#      GET ImportOrdenDeCompra         -> 500 "Parametro content requerido"
+#      GET  con content en la query    -> 500 "El formato del JSON es incorrecto"
+#      POST con content de formulario  -> 500 "El formato del JSON es incorrecto"
+#      POST con content en JSON        -> 500 "Empresa Obligatoria"
 #
-#  O sea que la ruta existe y pide UN parametro `content` con el contenido
-#  adentro. Falta saber en que formato.
+#  O sea: la ruta existe, se llama con POST y cuerpo JSON, y con el sobre bien
+#  el servidor pasa a pedir campos de negocio. Cada uno que se agrega destapa
+#  el siguiente, y para eso esta el campo `campos` del formulario.
 #
-#  LO UNICO QUE PUEDE ESCRIBIR es el envio de `content`, y esta detras de DOS
-#  puertas: hay que marcar `sondear_formato` y ademas escribir SI en
-#  `confirmo`. Lo que manda no es una grilla valida, asi que no hay orden
-#  posible: en el peor caso SIGMA la rechaza, que es justo lo que se busca.
+#  LO UNICO QUE PUEDE ESCRIBIR esta detras de DOS puertas: hay que marcar
+#  `sondear_formato` y ademas escribir SI en `confirmo`. Y hay una tercera
+#  garantia que no depende de acordarse: `content` va siempre con una cadena
+#  que no es una orden y NO se puede cambiar desde el formulario, asi que por
+#  mas campos de cabecera que se completen no hay orden que crear.
 # ============================================================================
 
 on:
@@ -36,6 +40,10 @@ on:
         type: boolean
         required: false
         default: false
+      campos:
+        description: 'Campos extra del cuerpo, separados por ";". Ej: Empresa=ZZZ;Proveedor=XXX'
+        required: false
+        default: ''
       confirmo:
         description: 'Escribi SI para autorizar ese envio (si lo dejas vacio, no se manda)'
         required: false
@@ -69,4 +77,5 @@ jobs:
         run: |
           python probar_sigma_orden_compra.py \
             ${{ inputs.sondear_formato && '--sondear-formato' || '' }} \
+            --campos "${{ inputs.campos }}" \
             --confirmo "${{ inputs.confirmo }}"
