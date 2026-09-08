@@ -10,23 +10,33 @@ dice: con que metodo HTTP se llama al endpoint, y que forma tiene el cuerpo.
 Soporte de SIGMA confirmo el nombre: `importordendecompra`. Este script
 averigua el resto preguntandole al servidor, que es la unica fuente confiable.
 
+LO QUE YA SABEMOS
+-----------------
+La primera corrida contesto esto:
+
+    GET ImportOrdenDeCompra -> 500 "Parametro content requerido"
+    OPTIONS                 -> 200
+
+O sea: la ruta se llama `ImportOrdenDeCompra`, existe, y no pide un JSON con
+campos sueltos sino UN parametro llamado `content` con el contenido adentro.
+Falta saber en que formato viene ese contenido.
+
 NO CREA NINGUNA ORDEN
 ---------------------
-Las tres primeras etapas son inofensivas: preguntan como se llama al endpoint,
-no que haga algo. La cuarta manda un cuerpo VACIO, que es la que suele
-contestar con la lista de campos obligatorios -- y la unica que, en teoria,
-podria escribir algo. Por eso:
+Las dos primeras etapas son inofensivas: preguntan como se llama al endpoint,
+no que haga algo. La tercera manda `content` con una cadena que NO puede ser
+una orden, para que el servidor conteste que formato esperaba. Por eso:
 
-  * no corre sola: hay que pasarle --sondear-vacio;
+  * no corre sola: hay que pasarle --sondear-formato;
   * antes de mandar imprime exactamente que va a mandar y pide confirmacion;
-  * nunca manda renglones, asi que en el peor caso seria una orden sin items.
+  * lo que manda no es una grilla valida, asi que no hay orden posible.
 
 Para MANDAR UNA ORDEN DE VERDAD no alcanza con este script y es a proposito:
 eso va en el tablero, con la confirmacion de la persona que compra delante.
 
 USO
     python probar_sigma_orden_compra.py
-    python probar_sigma_orden_compra.py --sondear-vacio
+    python probar_sigma_orden_compra.py --sondear-formato
 
 DESDE GITHUB ACTIONS no hay teclado con quien confirmar, asi que la
 confirmacion se escribe en el formulario del workflow y llega por --confirmo.
@@ -34,7 +44,6 @@ Es el mismo permiso, pedido en el unico lugar donde se puede pedir.
 """
 
 import argparse
-import json
 import os
 import sys
 
@@ -58,6 +67,8 @@ HEADERS = {"X-Auth-Token": os.getenv("SIGMA_TOKEN", "")}
 
 # El nombre que dio soporte, y las variantes de mayusculas que suelen aceptar
 # estos servidores. La primera que no conteste 404 es la buena.
+# `ImportOrdenDeCompra` es el que contesto en la primera corrida. Las otras
+# quedan por si algun dia cambia.
 NOMBRES = ["ImportOrdenDeCompra", "importordendecompra", "ImportOrdenCompra"]
 
 
@@ -121,43 +132,64 @@ def _confirmado(confirmo):
     return input("\n    Escribi SI para mandarla: ").strip().upper() == "SI"
 
 
-def sondear_vacio(nombre, confirmo=None):
-    """Etapa 3: POST con el cuerpo vacio, para que el servidor diga que falta.
+# Lo que se manda en `content` para preguntar el formato. Tiene que ser algo
+# que NO pueda confundirse con una orden: si el servidor lo pudiera parsear,
+# esto crearia una orden de verdad en vez de contestar un error.
+BASURA = "SONDEO_TABLERO_ESTO_NO_ES_UNA_ORDEN"
 
-    Es la unica llamada de este script que escribe, y por eso pide permiso.
+
+def sondear_formato(nombre, confirmo=None):
+    """Etapa 3: mandar `content` con basura, para que diga que formato espera.
+
+    El GET de la etapa 1 ya contesto "Parametro content requerido", asi que el
+    endpoint no pide un JSON con campos sueltos: pide UN parametro con el
+    contenido adentro -- muy probablemente la misma grilla que hoy se importa a
+    mano. Lo que falta saber es como viene esa grilla y si ademas hay que
+    mandar la cabecera (proveedor, fecha) por separado.
+
+    Se prueba por los tres caminos posibles porque no sabemos cual es: query
+    string, formulario y JSON.
+
+    ES LA UNICA PARTE QUE PODRIA ESCRIBIR, y por eso pide permiso. El riesgo es
+    bajo por construccion: `BASURA` no es una grilla valida, asi que en el peor
+    caso el servidor la rechaza. Nunca se manda un renglon de verdad.
     """
-    cuerpo = {}
-    print(f"\n=== POST {nombre} ===")
-    print(f"    URL:    {URL_BASE + nombre}")
-    print(f"    Cuerpo: {json.dumps(cuerpo)}")
-    print("\n    Esto le pide a SIGMA que cree una orden SIN datos. Lo normal es")
-    print("    que la rechace y diga que campos faltan, que es justo lo que se")
-    print("    quiere averiguar. Si en cambio la aceptara, quedaria una orden")
-    print("    vacia para borrar a mano.")
+    print(f"\n=== content con basura, en {nombre} ===")
+    print(f"    URL:      {URL_BASE + nombre}")
+    print(f"    content:  {BASURA}")
+    print("\n    No es una grilla valida, asi que SIGMA deberia rechazarla")
+    print("    diciendo que formato esperaba -- que es lo que se quiere leer.")
     if not _confirmado(confirmo):
         print("    Cancelado, no se mando nada.")
         return
-    try:
-        r = requests.post(
-            URL_BASE + nombre, headers=HEADERS, json=cuerpo, timeout=TIMEOUT_HTTP
-        )
-    except Exception as e:  # noqa: BLE001
-        print(f"    -> error de red: {e}")
-        return
-    _mostrar(r)
+
+    intentos = [
+        ("GET  con content en la query", lambda u: requests.get(
+            u, headers=HEADERS, params={"content": BASURA}, timeout=TIMEOUT_HTTP)),
+        ("POST con content de formulario", lambda u: requests.post(
+            u, headers=HEADERS, data={"content": BASURA}, timeout=TIMEOUT_HTTP)),
+        ("POST con content en JSON", lambda u: requests.post(
+            u, headers=HEADERS, json={"content": BASURA}, timeout=TIMEOUT_HTTP)),
+    ]
+    for etiqueta, llamar in intentos:
+        print(f"\n  --- {etiqueta} ---")
+        try:
+            _mostrar(llamar(URL_BASE + nombre))
+        except Exception as e:  # noqa: BLE001
+            print(f"    -> error de red: {e}")
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
-        "--sondear-vacio",
+        "--sondear-formato",
         action="store_true",
-        help="ademas, mandar un POST con cuerpo vacio (pide confirmacion)",
+        help="ademas, mandar `content` con basura para que diga el formato",
     )
     ap.add_argument(
         "--confirmo",
         default=None,
-        help='la confirmacion del POST, para cuando no hay teclado. Vale "SI".',
+        help='la confirmacion del envio, para cuando no hay teclado. Vale "SI".',
     )
     args = ap.parse_args()
 
@@ -183,11 +215,11 @@ def main():
 
     print(f"\nLa ruta que responde es: {encontrado}")
     opciones(encontrado)
-    if args.sondear_vacio:
-        sondear_vacio(encontrado, args.confirmo)
+    if args.sondear_formato:
+        sondear_formato(encontrado, args.confirmo)
     else:
-        print("\nPara que ademas conteste que campos pide, correr:")
-        print("    python probar_sigma_orden_compra.py --sondear-vacio")
+        print("\nPara que ademas conteste que formato espera, correr:")
+        print("    python probar_sigma_orden_compra.py --sondear-formato")
 
 
 if __name__ == "__main__":
