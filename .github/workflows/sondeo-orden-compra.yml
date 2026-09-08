@@ -19,17 +19,19 @@ name: Sondeo Orden de Compra Sigma
 #      GET ImportOrdenDeCompra         -> 500 "Parametro content requerido"
 #      GET  con content en la query    -> 500 "El formato del JSON es incorrecto"
 #      POST con content de formulario  -> 500 "El formato del JSON es incorrecto"
-#      POST con content en JSON        -> 500 "Empresa Obligatoria"
+#      POST {"content": basura}        -> 500 "Empresa Obligatoria"
+#      POST {"content": basura,
+#            "Empresa": "ZZZ"}         -> 500 "Empresa Obligatoria"  <-- igual
 #
-#  O sea: la ruta existe, se llama con POST y cuerpo JSON, y con el sobre bien
-#  el servidor pasa a pedir campos de negocio. Cada uno que se agrega destapa
-#  el siguiente, y para eso esta el campo `campos` del formulario.
+#  O sea: la ruta existe y se llama con POST y cuerpo JSON. Y `Empresa` no va
+#  al lado de `content` -- ponerlo ahi no cambio nada-- sino ADENTRO. Falta
+#  saber si `content` viaja como cadena JSON o como objeto, y que mas pide.
 #
 #  LO UNICO QUE PUEDE ESCRIBIR esta detras de DOS puertas: hay que marcar
-#  `sondear_formato` y ademas escribir SI en `confirmo`. Y hay una tercera
-#  garantia que no depende de acordarse: `content` va siempre con una cadena
-#  que no es una orden y NO se puede cambiar desde el formulario, asi que por
-#  mas campos de cabecera que se completen no hay orden que crear.
+#  `sondear_formato` y ademas escribir SI en `confirmo`. Y la garantia de
+#  fondo: `campos` llena SOLO cabecera, nunca renglones, y los valores van
+#  inventados. Una orden de compra sin articulos y con una empresa que no
+#  existe no es una compra que SIGMA pueda crear.
 # ============================================================================
 
 on:
@@ -41,7 +43,7 @@ on:
         required: false
         default: false
       campos:
-        description: 'Campos extra del cuerpo, separados por ";". Ej: Empresa=ZZZ;Proveedor=XXX'
+        description: 'Campos de CABECERA, separados por ";". Ej: Empresa=ZZZ;Deposito=ZZZ'
         required: false
         default: ''
       confirmo:

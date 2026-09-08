@@ -16,19 +16,23 @@ LO QUE YA SABEMOS
     OPTIONS                              -> 200
     GET  con content en la query         -> 500 "El formato recibido del JSON es incorrecto"
     POST con content de formulario       -> 500 "El formato recibido del JSON es incorrecto"
-    POST con content en JSON             -> 500 "Empresa Obligatoria"
+    POST {"content": basura}             -> 500 "Empresa Obligatoria"
+    POST {"content": basura,
+          "Empresa": "ZZZ"}              -> 500 "Empresa Obligatoria"  <-- igual
 
-Las tres cosas que eso resuelve:
+De ahi salen tres cosas:
 
   1. La ruta se llama `ImportOrdenDeCompra` y existe.
   2. SE LLAMA CON POST Y CUERPO JSON. Los otros dos caminos ni miran el
      contenido: se quejan del sobre.
-  3. Con el sobre bien, el servidor pasa a quejarse DE NEGOCIO -- "Empresa
-     Obligatoria" -- que es lo que se venia a buscar. Cada campo que se agrega
-     destapa el siguiente que falta.
+  3. `Empresa` NO ES HERMANO DE `content`. Ponerlo al lado no cambio nada: el
+     servidor lo ignoro y volvio a pedirlo. Lo unico que queda es que vaya
+     ADENTRO de `content` -- que entonces no es texto suelto sino la orden
+     entera, cabecera incluida.
 
-Falta la lista completa de campos, y por eso este script toma `--campos`: se
-agregan los que va pidiendo, sin tocar el codigo en cada vuelta.
+Falta saber si `content` viaja como cadena JSON o como objeto anidado, y que
+mas pide adentro. Por eso este script prueba las dos formas y toma `--campos`:
+se agregan los que va nombrando, sin tocar el codigo en cada vuelta.
 
 NO CREA NINGUNA ORDEN
 ---------------------
@@ -38,9 +42,13 @@ una orden, para que el servidor conteste que formato esperaba. Por eso:
 
   * no corre sola: hay que pasarle --sondear-formato;
   * antes de mandar imprime exactamente que va a mandar y pide confirmacion;
-  * `content` SIEMPRE va con basura y no se puede cambiar desde afuera. Es la
-    garantia que no depende de que nadie se acuerde: sin renglones validos no
-    hay orden que crear, por mas campos de cabecera que se completen.
+  * NO SE MANDA NUNCA UN RENGLON. `--campos` llena la cabecera y nada mas: una
+    orden de compra sin articulos no es una compra.
+
+    OJO QUE ESTO CAMBIO. Antes `content` iba con una cadena impagable y esa era
+    toda la garantia. Ahora, para poder preguntar que campos pide adentro, hay
+    que mandarle algo que pueda leer -- asi que la garantia pasa a ser otra: los
+    valores van inventados (`ZZZ`), que no existen en SIGMA, y sin renglones.
 
 Para MANDAR UNA ORDEN DE VERDAD no alcanza con este script y es a proposito:
 eso va en el tablero, con la confirmacion de la persona que compra delante.
@@ -171,43 +179,59 @@ def _parsear_campos(texto):
 
 
 def sondear_formato(nombre, confirmo=None, texto_campos=""):
-    """Etapa 3: POST con cuerpo JSON, para que diga que campo le falta ahora.
+    """Etapa 3: probar donde van los campos, para que diga cual falta ahora.
 
-    SE MANDA SOLO POR JSON porque los otros dos caminos ya contestaron: tanto
-    el GET con `content` en la query como el POST de formulario devuelven "El
-    formato recibido del JSON es incorrecto", o sea que ni llegan a mirar el
-    contenido. El unico sobre que el servidor abre es un POST con cuerpo JSON.
+    LO QUE YA SE DESCARTO. Mandar `Empresa` al lado de `content` no cambio la
+    respuesta: siguio siendo "Empresa Obligatoria". Si estuviera leyendo ese
+    campo, con el puesto tendria que haber pasado al siguiente reclamo. No lo
+    hizo, asi que no lo mira ahi.
 
-    LA IDEA ES PELAR LA CEBOLLA. Con `{"content": ...}` contesto "Empresa
-    Obligatoria". Se agrega Empresa, vuelve a correr, y dice cual falta
-    despues. Los campos entran por `--campos` justamente para no tener que
-    tocar el codigo en cada vuelta.
+    QUEDAN DOS LUGARES POSIBLES, y se prueban los dos en la misma corrida
+    porque cuesta lo mismo y evita una vuelta entera:
 
-    LOS VALORES VAN A PROPOSITO INVENTADOS. No se busca que la llamada salga
-    bien: se busca leer el proximo error. Un valor que no existe en SIGMA
-    destapa el nombre del campo igual que uno bueno, y no puede crear nada.
+      A. `content` es una CADENA con JSON adentro -- lo mas comun en endpoints
+         que se llaman "import": el cuerpo lleva el archivo serializado.
+      B. `content` es un OBJETO anidado.
+
+    El tercer intento repite la forma vieja como control: si volviera a decir
+    exactamente lo mismo que A o B, sabriamos que no estamos midiendo nada.
+
+    NUNCA SE MANDA UN RENGLON. `--campos` llena cabecera, y una orden de compra
+    sin articulos no es una compra. Sumado a que los valores son inventados,
+    no hay orden que SIGMA pueda crear con esto.
     """
-    cuerpo = {"content": BASURA}
-    cuerpo.update(_parsear_campos(texto_campos))
+    campos = _parsear_campos(texto_campos)
+
+    formas = [
+        ("A · content = cadena con JSON adentro", {"content": json.dumps(campos, ensure_ascii=False)}),
+        ("B · content = objeto anidado", {"content": campos}),
+        ("C · control: campos al lado de content", {"content": BASURA, **campos}),
+    ]
 
     print(f"\n=== POST JSON a {nombre} ===")
-    print(f"    URL:    {URL_BASE + nombre}")
-    print(f"    Cuerpo: {json.dumps(cuerpo, ensure_ascii=False)}")
-    print("\n    `content` no es una orden valida, asi que SIGMA no puede crear")
-    print("    nada: lo unico que puede hacer es decir que le falta.")
+    print(f"    URL: {URL_BASE + nombre}")
+    for etiqueta, cuerpo in formas:
+        print(f"    {etiqueta}")
+        print(f"      {json.dumps(cuerpo, ensure_ascii=False)}")
+    print("\n    Cabecera con valores inventados y CERO renglones: no hay orden")
+    print("    que crear con esto.")
     if not _confirmado(confirmo):
         print("    Cancelado, no se mando nada.")
         return
 
-    try:
-        r = requests.post(
-            URL_BASE + nombre, headers=HEADERS, json=cuerpo, timeout=TIMEOUT_HTTP
-        )
-    except Exception as e:  # noqa: BLE001
-        print(f"    -> error de red: {e}")
-        return
-    _mostrar(r)
-    print("\n    Si dice que falta otro campo, agregalo y volve a correr:")
+    for etiqueta, cuerpo in formas:
+        print(f"\n  --- {etiqueta} ---")
+        try:
+            r = requests.post(
+                URL_BASE + nombre, headers=HEADERS, json=cuerpo, timeout=TIMEOUT_HTTP
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"    -> error de red: {e}")
+            continue
+        _mostrar(r)
+
+    print("\n    La forma que conteste algo DISTINTO de las otras es la buena.")
+    print("    Si nombra otro campo, agregalo y volve a correr:")
     print('      --campos "Empresa=ZZZ;ElQuePidio=ZZZ"')
 
 
