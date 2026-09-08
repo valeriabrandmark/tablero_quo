@@ -27,11 +27,16 @@ eso va en el tablero, con la confirmacion de la persona que compra delante.
 USO
     python probar_sigma_orden_compra.py
     python probar_sigma_orden_compra.py --sondear-vacio
+
+DESDE GITHUB ACTIONS no hay teclado con quien confirmar, asi que la
+confirmacion se escribe en el formulario del workflow y llega por --confirmo.
+Es el mismo permiso, pedido en el unico lugar donde se puede pedir.
 """
 
 import argparse
 import json
 import os
+import sys
 
 import requests
 from dotenv import load_dotenv
@@ -99,7 +104,24 @@ def opciones(nombre):
     _mostrar(r)
 
 
-def sondear_vacio(nombre):
+def _confirmado(confirmo):
+    """El permiso para mandar el POST, del teclado o del formulario.
+
+    SIN TERMINAL NO SE PREGUNTA NADA. En GitHub Actions `input()` no espera:
+    lee un stdin vacio y devuelve "", que comparado con "SI" da False. O sea
+    que en el mejor caso cancela sola y en el peor -- si alguien invirtiera la
+    comparacion -- mandaria sin permiso. Se resuelve mirando si hay terminal:
+    si no la hay, el unico permiso valido es el que vino por --confirmo.
+    """
+    if confirmo is not None:
+        return confirmo.strip().upper() == "SI"
+    if not sys.stdin.isatty():
+        print("    Sin terminal para confirmar. Pasar --confirmo SI.")
+        return False
+    return input("\n    Escribi SI para mandarla: ").strip().upper() == "SI"
+
+
+def sondear_vacio(nombre, confirmo=None):
     """Etapa 3: POST con el cuerpo vacio, para que el servidor diga que falta.
 
     Es la unica llamada de este script que escribe, y por eso pide permiso.
@@ -112,7 +134,7 @@ def sondear_vacio(nombre):
     print("    que la rechace y diga que campos faltan, que es justo lo que se")
     print("    quiere averiguar. Si en cambio la aceptara, quedaria una orden")
     print("    vacia para borrar a mano.")
-    if input("\n    Escribi SI para mandarla: ").strip().upper() != "SI":
+    if not _confirmado(confirmo):
         print("    Cancelado, no se mando nada.")
         return
     try:
@@ -131,6 +153,11 @@ def main():
         "--sondear-vacio",
         action="store_true",
         help="ademas, mandar un POST con cuerpo vacio (pide confirmacion)",
+    )
+    ap.add_argument(
+        "--confirmo",
+        default=None,
+        help='la confirmacion del POST, para cuando no hay teclado. Vale "SI".',
     )
     args = ap.parse_args()
 
@@ -157,7 +184,7 @@ def main():
     print(f"\nLa ruta que responde es: {encontrado}")
     opciones(encontrado)
     if args.sondear_vacio:
-        sondear_vacio(encontrado)
+        sondear_vacio(encontrado, args.confirmo)
     else:
         print("\nPara que ademas conteste que campos pide, correr:")
         print("    python probar_sigma_orden_compra.py --sondear-vacio")
