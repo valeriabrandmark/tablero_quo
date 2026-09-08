@@ -59,6 +59,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import date
 
 import requests
 from dotenv import load_dotenv
@@ -211,6 +212,137 @@ def sondear_formato(nombre, confirmo=None, texto_campos=""):
     print('      --campos "Empresa=ZZZ;ElQuePidio=ZZZ"')
 
 
+# ---------------------------------------------------------------------------
+# LA ORDEN DE PRUEBA
+# ---------------------------------------------------------------------------
+
+# La cabecera que hoy manda el tablero, con los codigos de la OC 00000371.
+# Cada corrida puede pisar cualquiera de estos con --campos, o SACAR uno
+# poniendolo vacio (`frecdia=`), que es lo que hace falta para probar hipotesis
+# sin tocar el codigo del tablero.
+CABECERA_BASE = {
+    "empresa": "0001",
+    "proveedorId": "00239",
+    "fusuari": 0,
+    "usuario": 3,
+    "depositoRecepcion": "13",
+    "tipoOrden": "01",
+    "estado": "P",
+    "condicionPago": "04",
+    "codigoSucursal": "0002",
+    "moneda": "1",
+    "cotizacion": 1,
+    "vencimiento": "",          # se completa con la fecha de hoy
+    "frecdia": "",              # idem
+    "observaciones": "PRUEBA TABLERO - ANULAR",
+    "observacionInterna": "",
+}
+
+# UN renglon, con los cinco descuentos obligatorios en cero. Sin valores por
+# defecto de articulo ni precio A PROPOSITO: ver `armar_orden`.
+ITEM_BASE = {
+    "descuento1": 0,
+    "descuento2": 0,
+    "descuento3": 0,
+    "descuento4": 0,
+    "descuento5": 0,
+    "descuento6": 0,
+    "unidadDeCompra": "U",
+    "cantidad": 1,
+}
+
+
+# Los UNICOS campos que la documentacion declara `numeric`. Todo lo demas es
+# TEXTO, y la diferencia no es cosmetica: los codigos de SIGMA llevan ceros
+# adelante ("0001", "01") y adivinar por la pinta del valor convertiria
+# `depositoRecepcion: "13"` en `13` y `moneda: "1"` en `1` -- que es mandar algo
+# distinto de lo que manda el tablero, justo en un script cuyo trabajo es
+# reproducirlo exactamente.
+NUMERICOS = {
+    "cotizacion", "fusuari", "usuario",
+    "precio", "cantidad",
+    "descuento1", "descuento2", "descuento3",
+    "descuento4", "descuento5", "descuento6",
+}
+
+
+def _tipar(clave, v):
+    """Convierte a numero solo lo que la documentacion dice que es numero."""
+    if clave not in NUMERICOS or not isinstance(v, str) or v == "":
+        return v
+    try:
+        return int(v) if v.lstrip("-").isdigit() else float(v)
+    except ValueError:
+        return v
+
+
+def armar_orden(texto_campos, texto_item):
+    """La orden completa, con lo que la corrida haya pisado.
+
+    UN CAMPO VACIO SE OMITE, no se manda vacio: `--campos "frecdia="` saca
+    `frecdia` del cuerpo. Es la unica forma de probar "y si no lo mandamos" sin
+    editar el codigo, que es justo lo que este script viene a evitar.
+
+    EL ARTICULO Y EL PRECIO NO TIENEN VALOR POR DEFECTO. La documentacion avisa
+    que una orden sin items se registra igual, vacia y sin error; y un articulo
+    puesto "de ejemplo" en un script es la forma mas facil de cargarle a un
+    proveedor algo que nadie pidio. Si no vienen, no se manda nada.
+    """
+    hoy = date.today().isoformat()
+
+    cabecera = dict(CABECERA_BASE)
+    cabecera["fechaCarga"] = hoy
+    cabecera["fechaPedido"] = hoy
+    cabecera["vencimiento"] = hoy
+    cabecera["frecdia"] = hoy
+    cabecera.update(_parsear_campos(texto_campos))
+
+    item = dict(ITEM_BASE)
+    item.update(_parsear_campos(texto_item))
+
+    faltan = [c for c in ("articuloId", "precio") if not item.get(c)]
+    if faltan:
+        print(f"    Falta {' y '.join(faltan)} en --item. No se manda nada.")
+        return None
+
+    # Lo vacio se saca; el resto se convierte a numero cuando corresponde.
+    cuerpo = {k: _tipar(k, v) for k, v in cabecera.items() if v != ""}
+    cuerpo["items"] = [{k: _tipar(k, v) for k, v in item.items() if v != ""}]
+    return cuerpo
+
+
+def mandar_orden(nombre, confirmo, texto_campos, texto_item):
+    """Manda UNA orden de compra de verdad.
+
+    Es lo unico de este archivo que crea algo en el ERP, y por eso pide permiso
+    igual que el sondeo. Si sale bien hay que ANULAR LA ORDEN EN SIGMA: no hay
+    forma de borrarla desde acá.
+    """
+    cuerpo = armar_orden(texto_campos, texto_item)
+    if cuerpo is None:
+        return
+
+    print(f"\n=== POST {nombre} · ORDEN DE VERDAD ===")
+    print(f"    URL: {URL_BASE + nombre}")
+    print(json.dumps(cuerpo, indent=2, ensure_ascii=False))
+    print("\n    ESTO CREA UNA ORDEN DE COMPRA REAL. Si entra, hay que anularla")
+    print("    en Sigma: desde acá no se puede borrar.")
+    if not _confirmado(confirmo):
+        print("    Cancelado, no se mando nada.")
+        return
+
+    try:
+        r = requests.post(
+            URL_BASE + nombre, headers=HEADERS, json=cuerpo, timeout=TIMEOUT_HTTP
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"    -> error de red: {e}")
+        return
+    _mostrar(r)
+    if r.status_code == 200:
+        print("\n    ENTRO. Buscala en Sigma, verificá el renglón y ANULALA.")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -222,6 +354,16 @@ def main():
         "--campos",
         default="",
         help='campos extra del cuerpo, separados por ";". Ej: "Empresa=ZZZ"',
+    )
+    ap.add_argument(
+        "--mandar-orden",
+        action="store_true",
+        help="mandar una orden de compra DE VERDAD (pide confirmacion)",
+    )
+    ap.add_argument(
+        "--item",
+        default="",
+        help='el renglon. Ej: "articuloId=AL26011;precio=14968.8;cantidad=1"',
     )
     ap.add_argument(
         "--confirmo",
@@ -252,7 +394,9 @@ def main():
 
     print(f"\nLa ruta que responde es: {encontrado}")
     opciones(encontrado)
-    if args.sondear_formato:
+    if args.mandar_orden:
+        mandar_orden(encontrado, args.confirmo, args.campos, args.item)
+    elif args.sondear_formato:
         sondear_formato(encontrado, args.confirmo, args.campos)
     else:
         print("\nPara que ademas conteste que formato espera, correr:")
