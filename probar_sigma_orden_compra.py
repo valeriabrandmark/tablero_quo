@@ -12,14 +12,23 @@ averigua el resto preguntandole al servidor, que es la unica fuente confiable.
 
 LO QUE YA SABEMOS
 -----------------
-La primera corrida contesto esto:
+    GET ImportOrdenDeCompra              -> 500 "Parametro content requerido"
+    OPTIONS                              -> 200
+    GET  con content en la query         -> 500 "El formato recibido del JSON es incorrecto"
+    POST con content de formulario       -> 500 "El formato recibido del JSON es incorrecto"
+    POST con content en JSON             -> 500 "Empresa Obligatoria"
 
-    GET ImportOrdenDeCompra -> 500 "Parametro content requerido"
-    OPTIONS                 -> 200
+Las tres cosas que eso resuelve:
 
-O sea: la ruta se llama `ImportOrdenDeCompra`, existe, y no pide un JSON con
-campos sueltos sino UN parametro llamado `content` con el contenido adentro.
-Falta saber en que formato viene ese contenido.
+  1. La ruta se llama `ImportOrdenDeCompra` y existe.
+  2. SE LLAMA CON POST Y CUERPO JSON. Los otros dos caminos ni miran el
+     contenido: se quejan del sobre.
+  3. Con el sobre bien, el servidor pasa a quejarse DE NEGOCIO -- "Empresa
+     Obligatoria" -- que es lo que se venia a buscar. Cada campo que se agrega
+     destapa el siguiente que falta.
+
+Falta la lista completa de campos, y por eso este script toma `--campos`: se
+agregan los que va pidiendo, sin tocar el codigo en cada vuelta.
 
 NO CREA NINGUNA ORDEN
 ---------------------
@@ -29,7 +38,9 @@ una orden, para que el servidor conteste que formato esperaba. Por eso:
 
   * no corre sola: hay que pasarle --sondear-formato;
   * antes de mandar imprime exactamente que va a mandar y pide confirmacion;
-  * lo que manda no es una grilla valida, asi que no hay orden posible.
+  * `content` SIEMPRE va con basura y no se puede cambiar desde afuera. Es la
+    garantia que no depende de que nadie se acuerde: sin renglones validos no
+    hay orden que crear, por mas campos de cabecera que se completen.
 
 Para MANDAR UNA ORDEN DE VERDAD no alcanza con este script y es a proposito:
 eso va en el tablero, con la confirmacion de la persona que compra delante.
@@ -37,6 +48,7 @@ eso va en el tablero, con la confirmacion de la persona que compra delante.
 USO
     python probar_sigma_orden_compra.py
     python probar_sigma_orden_compra.py --sondear-formato
+    python probar_sigma_orden_compra.py --sondear-formato --campos "Empresa=ZZZ" 
 
 DESDE GITHUB ACTIONS no hay teclado con quien confirmar, asi que la
 confirmacion se escribe en el formulario del workflow y llega por --confirmo.
@@ -44,6 +56,7 @@ Es el mismo permiso, pedido en el unico lugar donde se puede pedir.
 """
 
 import argparse
+import json
 import os
 import sys
 
@@ -138,45 +151,64 @@ def _confirmado(confirmo):
 BASURA = "SONDEO_TABLERO_ESTO_NO_ES_UNA_ORDEN"
 
 
-def sondear_formato(nombre, confirmo=None):
-    """Etapa 3: mandar `content` con basura, para que diga que formato espera.
+def _parsear_campos(texto):
+    """"Empresa=ZZZ;Proveedor=XXX" -> {"Empresa": "ZZZ", "Proveedor": "XXX"}.
 
-    El GET de la etapa 1 ya contesto "Parametro content requerido", asi que el
-    endpoint no pide un JSON con campos sueltos: pide UN parametro con el
-    contenido adentro -- muy probablemente la misma grilla que hoy se importa a
-    mano. Lo que falta saber es como viene esa grilla y si ademas hay que
-    mandar la cabecera (proveedor, fecha) por separado.
-
-    Se prueba por los tres caminos posibles porque no sabemos cual es: query
-    string, formulario y JSON.
-
-    ES LA UNICA PARTE QUE PODRIA ESCRIBIR, y por eso pide permiso. El riesgo es
-    bajo por construccion: `BASURA` no es una grilla valida, asi que en el peor
-    caso el servidor la rechaza. Nunca se manda un renglon de verdad.
+    Punto y coma y no coma: los valores de SIGMA tienen comas adentro
+    (descripciones, razones sociales) y partir por coma los cortaria al medio.
     """
-    print(f"\n=== content con basura, en {nombre} ===")
-    print(f"    URL:      {URL_BASE + nombre}")
-    print(f"    content:  {BASURA}")
-    print("\n    No es una grilla valida, asi que SIGMA deberia rechazarla")
-    print("    diciendo que formato esperaba -- que es lo que se quiere leer.")
+    campos = {}
+    for parte in (texto or "").split(";"):
+        parte = parte.strip()
+        if not parte:
+            continue
+        if "=" not in parte:
+            print(f"    Ignorado (sin '='): {parte!r}")
+            continue
+        clave, valor = parte.split("=", 1)
+        campos[clave.strip()] = valor.strip()
+    return campos
+
+
+def sondear_formato(nombre, confirmo=None, texto_campos=""):
+    """Etapa 3: POST con cuerpo JSON, para que diga que campo le falta ahora.
+
+    SE MANDA SOLO POR JSON porque los otros dos caminos ya contestaron: tanto
+    el GET con `content` en la query como el POST de formulario devuelven "El
+    formato recibido del JSON es incorrecto", o sea que ni llegan a mirar el
+    contenido. El unico sobre que el servidor abre es un POST con cuerpo JSON.
+
+    LA IDEA ES PELAR LA CEBOLLA. Con `{"content": ...}` contesto "Empresa
+    Obligatoria". Se agrega Empresa, vuelve a correr, y dice cual falta
+    despues. Los campos entran por `--campos` justamente para no tener que
+    tocar el codigo en cada vuelta.
+
+    LOS VALORES VAN A PROPOSITO INVENTADOS. No se busca que la llamada salga
+    bien: se busca leer el proximo error. Un valor que no existe en SIGMA
+    destapa el nombre del campo igual que uno bueno, y no puede crear nada.
+    """
+    cuerpo = {"content": BASURA}
+    cuerpo.update(_parsear_campos(texto_campos))
+
+    print(f"\n=== POST JSON a {nombre} ===")
+    print(f"    URL:    {URL_BASE + nombre}")
+    print(f"    Cuerpo: {json.dumps(cuerpo, ensure_ascii=False)}")
+    print("\n    `content` no es una orden valida, asi que SIGMA no puede crear")
+    print("    nada: lo unico que puede hacer es decir que le falta.")
     if not _confirmado(confirmo):
         print("    Cancelado, no se mando nada.")
         return
 
-    intentos = [
-        ("GET  con content en la query", lambda u: requests.get(
-            u, headers=HEADERS, params={"content": BASURA}, timeout=TIMEOUT_HTTP)),
-        ("POST con content de formulario", lambda u: requests.post(
-            u, headers=HEADERS, data={"content": BASURA}, timeout=TIMEOUT_HTTP)),
-        ("POST con content en JSON", lambda u: requests.post(
-            u, headers=HEADERS, json={"content": BASURA}, timeout=TIMEOUT_HTTP)),
-    ]
-    for etiqueta, llamar in intentos:
-        print(f"\n  --- {etiqueta} ---")
-        try:
-            _mostrar(llamar(URL_BASE + nombre))
-        except Exception as e:  # noqa: BLE001
-            print(f"    -> error de red: {e}")
+    try:
+        r = requests.post(
+            URL_BASE + nombre, headers=HEADERS, json=cuerpo, timeout=TIMEOUT_HTTP
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"    -> error de red: {e}")
+        return
+    _mostrar(r)
+    print("\n    Si dice que falta otro campo, agregalo y volve a correr:")
+    print('      --campos "Empresa=ZZZ;ElQuePidio=ZZZ"')
 
 
 def main():
@@ -185,6 +217,11 @@ def main():
         "--sondear-formato",
         action="store_true",
         help="ademas, mandar `content` con basura para que diga el formato",
+    )
+    ap.add_argument(
+        "--campos",
+        default="",
+        help='campos extra del cuerpo, separados por ";". Ej: "Empresa=ZZZ"',
     )
     ap.add_argument(
         "--confirmo",
@@ -216,7 +253,7 @@ def main():
     print(f"\nLa ruta que responde es: {encontrado}")
     opciones(encontrado)
     if args.sondear_formato:
-        sondear_formato(encontrado, args.confirmo)
+        sondear_formato(encontrado, args.confirmo, args.campos)
     else:
         print("\nPara que ademas conteste que formato espera, correr:")
         print("    python probar_sigma_orden_compra.py --sondear-formato")
