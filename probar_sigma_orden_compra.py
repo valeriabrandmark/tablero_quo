@@ -221,26 +221,31 @@ def sondear_formato(nombre, confirmo=None, texto_campos=""):
 # poniendolo vacio (`frecdia=`), que es lo que hace falta para probar hipotesis
 # sin tocar el codigo del tablero.
 CABECERA_BASE = {
-    "empresa": "0001",
     "proveedorId": "00239",
+    "fechaCarga": "",           # se completa con la fecha de hoy
+    "fechaPedido": "",          # idem
     "fusuari": 0,
     "usuario": 3,
-    "depositoRecepcion": "13",
-    "tipoOrden": "01",
+    "observaciones": "PRUEBA TABLERO - ANULAR",
     "estado": "P",
+    "tipoOrden": "01",
+    "depositoRecepcion": "13",
     "condicionPago": "04",
+    "vencimiento": "",          # idem
+    "observacionInterna": "",
     "codigoSucursal": "0002",
     "moneda": "1",
+    "empresa": "0001",
     "cotizacion": 1,
-    "vencimiento": "",          # se completa con la fecha de hoy
     "frecdia": "",              # idem
-    "observaciones": "PRUEBA TABLERO - ANULAR",
-    "observacionInterna": "",
 }
 
 # UN renglon, con los cinco descuentos obligatorios en cero. Sin valores por
 # defecto de articulo ni precio A PROPOSITO: ver `armar_orden`.
 ITEM_BASE = {
+    "articuloId": "",           # sin valor por defecto: ver `armar_orden`
+    "cantidad": 1,
+    "precio": "",               # idem
     "descuento1": 0,
     "descuento2": 0,
     "descuento3": 0,
@@ -248,7 +253,6 @@ ITEM_BASE = {
     "descuento5": 0,
     "descuento6": 0,
     "unidadDeCompra": "U",
-    "cantidad": 1,
 }
 
 
@@ -279,9 +283,20 @@ def _tipar(clave, v):
 def armar_orden(texto_campos, texto_item):
     """La orden completa, con lo que la corrida haya pisado.
 
-    UN CAMPO VACIO SE OMITE, no se manda vacio: `--campos "frecdia="` saca
-    `frecdia` del cuerpo. Es la unica forma de probar "y si no lo mandamos" sin
-    editar el codigo, que es justo lo que este script viene a evitar.
+    LAS CLAVES VAN EN EL ORDEN DEL EJEMPLO DE LA DOCUMENTACION. En JSON el
+    orden no significa nada, pero lo pidio soporte y este endpoint ya
+    contradijo su propia documentacion tres veces, asi que sale gratis
+    descartarlo bien en vez de por deduccion. El tablero manda el mismo orden.
+
+    "VACIO" QUIERE DECIR DOS COSAS DISTINTAS, y hay que separarlas. Escribir
+    `--campos "frecdia="` es pedir que ese campo NO SE MANDE: es la unica forma
+    de probar "y si lo sacamos" sin editar codigo. Pero `observacionInterna` va
+    vacia de verdad --el tablero manda ""-- y tratarla igual la borraria del
+    cuerpo, o sea que este script mandaria algo distinto del tablero justo
+    cuando su trabajo es reproducirlo.
+
+    Asi que se omite SOLO lo que vino vacio POR --campos, no lo que ya estaba
+    vacio en la base.
 
     EL ARTICULO Y EL PRECIO NO TIENEN VALOR POR DEFECTO. La documentacion avisa
     que una orden sin items se registra igual, vacia y sin error; y un articulo
@@ -290,24 +305,30 @@ def armar_orden(texto_campos, texto_item):
     """
     hoy = date.today().isoformat()
 
-    cabecera = dict(CABECERA_BASE)
-    cabecera["fechaCarga"] = hoy
-    cabecera["fechaPedido"] = hoy
-    cabecera["vencimiento"] = hoy
-    cabecera["frecdia"] = hoy
-    cabecera.update(_parsear_campos(texto_campos))
+    pisados = _parsear_campos(texto_campos)
+    a_omitir = {k for k, v in pisados.items() if v == ""}
 
+    # Pisar una clave que YA EXISTE no cambia su posicion en un dict de Python,
+    # asi que completar las fechas y aplicar --campos mantiene el orden de
+    # CABECERA_BASE. Un campo nuevo que venga por --campos si va al final, y
+    # esta bien: no esta en el ejemplo.
+    cabecera = dict(CABECERA_BASE)
+    for clave in ("fechaCarga", "fechaPedido", "vencimiento", "frecdia"):
+        cabecera[clave] = hoy
+    cabecera.update(pisados)
+
+    pisados_item = _parsear_campos(texto_item)
+    a_omitir |= {k for k, v in pisados_item.items() if v == ""}
     item = dict(ITEM_BASE)
-    item.update(_parsear_campos(texto_item))
+    item.update(pisados_item)
 
     faltan = [c for c in ("articuloId", "precio") if not item.get(c)]
     if faltan:
         print(f"    Falta {' y '.join(faltan)} en --item. No se manda nada.")
         return None
 
-    # Lo vacio se saca; el resto se convierte a numero cuando corresponde.
-    cuerpo = {k: _tipar(k, v) for k, v in cabecera.items() if v != ""}
-    cuerpo["items"] = [{k: _tipar(k, v) for k, v in item.items() if v != ""}]
+    cuerpo = {k: _tipar(k, v) for k, v in cabecera.items() if k not in a_omitir}
+    cuerpo["items"] = [{k: _tipar(k, v) for k, v in item.items() if k not in a_omitir}]
     return cuerpo
 
 
