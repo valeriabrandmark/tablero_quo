@@ -22,6 +22,14 @@ CUTOFF = max(FECHA_CORTE, date.today() - timedelta(days=WINDOW_DAYS))
 
 
 # Mapeo de codigo de vendedor a nombre (tabla de Sigma, no se extrae por API)
+#
+# EL NOMBRE LO PONEMOS NOSOTROS. Sigma manda el codigo ("007") y nada mas, asi
+# que este diccionario es la unica fuente del nombre en todo el sistema. Por eso
+# renombrar a alguien se hace aca... pero NO ALCANZA CON ESTO: gold.fact_ventas
+# se reescribe por ventana movil (los ultimos WINDOW_DAYS dias), asi que cambiar
+# el nombre aca sin tocar lo viejo parte el historial de la persona en dos
+# nombres. El 09/09/2026, al pasar RAMON a GERMAN, hizo falta ademas un UPDATE
+# de una sola vez sobre gold.fact_ventas y gold.objetivos.
 VENDEDORES = {
     "001": "CASA CENTRAL",
     "002": "AGENCIA",
@@ -29,7 +37,7 @@ VENDEDORES = {
     "004": "IGNACIO",
     "005": "IVANA",
     "006": "SILVIO",
-    "007": "RAMON",
+    "007": "GERMAN",
     "008": "PABLO",
     "009": "MELI",
     "010": "ALEJANDRO",
