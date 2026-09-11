@@ -64,6 +64,19 @@ jobs:
       - name: Probar el mes comercial
         run: python probar_mes_comercial.py
 
+      # Las tres de la carga de costos. La primera frena un Excel con la coma
+      # decimal borrada; la segunda cuida desde que dia rige cada lista y desde
+      # cuando hay que recalcular gold; la tercera, que el paso que existe para
+      # NO recargar de gusto siga decidiendo bien.
+      - name: Probar el control de costos que saltan
+        run: python probar_costos_saltos.py
+
+      - name: Probar las vigencias de costos
+        run: python probar_costos_vigencia.py
+
+      - name: Probar la huella de los Excel
+        run: python probar_huella_costos.py
+
       # De esta tabla sale la pata de INGRESOS de la trazabilidad de Full:
       # contra ella se compara lo que Mercado Libre declara. Un item contado de
       # mas hace ver un faltante de ML donde no lo hay.

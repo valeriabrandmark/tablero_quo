@@ -299,21 +299,42 @@ def leer_hoja_flexible(archivo, hoja, columnas_necesarias, max_filas_prueba=5):
 
 
 
+# De a un mega por vez: son cinco archivos de hasta 4 MB y no hay ninguna razon
+# para tenerlos enteros en memoria a la vez.
+TROZO_HUELLA = 1024 * 1024
+
+
 def huella_de_los_excel():
     """Una firma de los .xlsx: cambia si cambia cualquiera de ellos.
 
-    Se usan tamano + fecha de modificacion y no el contenido entero porque los
-    cuatro archivos pesan 11 MB juntos: leerlos para hashearlos costaria casi lo
-    mismo que procesarlos, que es lo que se quiere evitar.
+    ES EL CONTENIDO, NO LA FECHA DE MODIFICACION.
 
-    Ademas entra VERSION_ESQUEMA, porque un cambio en este script tambien
-    cambia lo que hay que escribir aunque los Excel esten iguales.
+    Antes entraban tamano + mtime, con el argumento de que leer los archivos
+    para hashearlos costaria casi lo mismo que procesarlos. No es cierto:
+    hashear los 18 MB son 0,06 s con los archivos en cache y ~1 s leyendolos del
+    disco, contra los ~50 s que tarda pandas en parsearlos.
+
+    Y donde mas hacia falta no funcionaba. GitHub Actions hace checkout limpio
+    en cada corrida, asi que los cinco .xlsx aparecen con la fecha de ESE
+    momento: la huella daba distinta siempre y el paso que existe para no
+    recargar de gusto recargaba los cinco meses cada dos horas. Se vio en la
+    corrida 418 del 11/09/2026.
+
+    EL NOMBRE TAMBIEN ENTRA, y desde las vigencias no es un detalle: renombrar
+    2026-09.xlsx a 2026-09-11.xlsx cambia desde cuando rige esa lista aunque el
+    contenido sea identico. El tamano va al lado del nombre para que el hash no
+    dependa de donde separa un archivo del siguiente.
+
+    Y entra VERSION_ESQUEMA, porque un cambio en este script tambien cambia lo
+    que hay que escribir aunque los Excel esten iguales.
     """
     h = hashlib.sha256()
     h.update(f"v{VERSION_ESQUEMA}|".encode())
     for archivo in sorted(glob.glob(os.path.join(CARPETA_COSTOS, "*.xlsx"))):
-        st = os.stat(archivo)
-        h.update(f"{os.path.basename(archivo)}:{st.st_size}:{int(st.st_mtime)}|".encode())
+        h.update(f"{os.path.basename(archivo)}:{os.path.getsize(archivo)}|".encode())
+        with open(archivo, "rb") as f:
+            for trozo in iter(lambda: f.read(TROZO_HUELLA), b""):
+                h.update(trozo)
     return h.hexdigest()
 
 
