@@ -185,9 +185,18 @@ terminó bien cada paso. Si la computadora estuvo apagada tres días, el paso
 vencido corre en la primera pasada — no espera un horario fijo que ya pasó.
 
 `costos.py --si-cambio` es la excepción: se lo llama en **cada** corrida y el que
-decide es el script, comparando una huella (nombre + tamaño + fecha) de los
+decide es el script, comparando una huella (nombre + **contenido**) de los
 `.xlsx`. Si ninguno se movió, no hace nada y termina en un segundo. Así un Excel
 corregido entra en la corrida siguiente sin que haya que acordarse de nada.
+
+**Es el contenido y no la fecha de modificación**, y eso importa en la nube:
+GitHub Actions hace `checkout` limpio en cada corrida, así que los archivos
+aparecen con la fecha de ese momento. Con la fecha adentro, la huella daba
+distinta siempre y los cinco meses se recargaban cada dos horas. Hashear los
+18 MB son 0,06 s con los archivos en caché —~1 s leyéndolos del disco— contra
+los ~50 s que tarda pandas en parsearlos. `probar_huella_costos.py` cubre las
+dos direcciones: que tocar la fecha **no** la cambie, y que el contenido, el
+nombre y `VERSION_ESQUEMA` **sí**.
 
 Los pasos que no cortan el pipeline son extracciones sueltas: que se quede vieja
 una parte es mejor que no actualizar nada.
