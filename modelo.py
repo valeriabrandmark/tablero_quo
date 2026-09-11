@@ -6,6 +6,8 @@ from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from conexion import crear_engine
+from calendario import mes_comercial
+import estado
 import errores_bd
 
 load_dotenv()
@@ -19,6 +21,44 @@ FECHA_CORTE = date(2026, 5, 6)
 # Todo lo anterior a esa ventana en gold.fact_ventas queda intacto (no se vuelve a tocar).
 WINDOW_DAYS = 7
 CUTOFF = max(FECHA_CORTE, date.today() - timedelta(days=WINDOW_DAYS))
+
+# ============================================================================
+#  LA VENTANA SE ESTIRA SOLA CUANDO CAMBIA UN COSTO VIEJO
+# ============================================================================
+#
+# La ventana movil de 7 dias alcanza para las ventas nuevas, pero NO para un
+# costo que se corrige hacia atras: si el 20/09 se cambia el costo vigente desde
+# el 08/09, las lineas del 8 al 13 ya estan escritas en gold.fact_ventas con el
+# costo viejo y esta ventana no vuelve a mirarlas nunca.
+#
+# Por eso costos.py deja anotada la vigencia mas vieja que toco --y solo si el
+# costo cambio de verdad, no cada vez que alguien abre un Excel-- y este script
+# estira el CUTOFF hasta ahi antes de reconstruir. La anotacion se borra recien
+# despues de guardar bien: si la corrida se cae, la proxima la vuelve a levantar.
+#
+# El orquestador corre costos.py ANTES que modelo.py, asi que en la practica un
+# costo corregido entra en la misma corrida.
+CLAVE_COSTOS_PENDIENTES = "costos_reconstruir_desde"
+
+
+def vigencia_pendiente():
+    """La vigencia mas vieja que costos.py toco y gold todavia no recalculo."""
+    valor = estado.leer(CLAVE_COSTOS_PENDIENTES, None)
+    if not valor:
+        return None
+    try:
+        return date.fromisoformat(valor)
+    except (TypeError, ValueError):
+        print(f"  (aviso: {CLAVE_COSTOS_PENDIENTES} ilegible: {valor!r}, se ignora)")
+        return None
+
+
+def limpiar_vigencia_pendiente(usada):
+    """Borra la anotacion, salvo que costos.py haya dejado otra en el medio."""
+    if usada is None:
+        return
+    if estado.leer(CLAVE_COSTOS_PENDIENTES, None) == usada.isoformat():
+        estado.guardar(CLAVE_COSTOS_PENDIENTES, None)
 
 
 # Mapeo de codigo de vendedor a nombre (tabla de Sigma, no se extrae por API)
@@ -69,82 +109,13 @@ def vendedor_de(codigo):
     return VENDEDORES.get(str(codigo).strip(), f"Vendedor {codigo}")
 
 
-# Primer dia del mes comercial. Del 6 de un mes al 5 del siguiente.
-DIA_INICIO_MES_COMERCIAL = 6
-
-# ============================================================================
-#  MESES QUE NO CERRARON EL DIA 5
-# ============================================================================
+# El mes comercial --del 6 al 5, con los cierres movidos-- vive en calendario.py.
+# Se mudo ahi cuando costos.py tambien necesito saber en que dia arranca un mes:
+# este modulo abre la base al importarse, asi que no se lo puede importar desde
+# un script que solo quiere hacer cuentas con fechas.
 #
-# La regla del 6 al 5 vale siempre, MENOS cuando la lista de costos nueva llega
-# tarde o se decide estirar el mes. Ahi el cierre se corre unos dias, y las
-# ventas de esos dias tienen que seguir costeandose con la lista vieja.
-#
-# ESTO NO ES UN AJUSTE COSMETICO. El mes comercial es lo que decide QUE LISTA DE
-# COSTOS se le aplica a cada venta: `costos_historicos` esta indexada por
-# (sku, mes_comercial). Si una venta del 06/09 queda etiquetada 2026-09 y la
-# lista de septiembre todavia no se cargo, esa venta se queda SIN COSTO y su
-# margen aparece inflado -- o directamente en null.
-#
-# El valor es el ULTIMO DIA que pertenece a ese mes comercial, inclusive.
-#
-#   "2026-08": date(2026, 9, 6)   agosto cerro el 06/09 y no el 05/09, asi que
-#                                 las ventas del 06/09 van con costos de agosto.
-#                                 Septiembre arranca el 07/09.
-#
-# Sirve para los dos lados: un mes que se estira se queda con dias del
-# siguiente, y uno que se acorta se los cede.
-#
-# OJO: el tablero tiene esta misma tabla en lib/constantes.ts. Las dos tienen
-# que decir lo mismo, o el filtro "Mes comercial" de la pantalla va a mostrar un
-# rango distinto del que tienen etiquetados los datos.
-CIERRES_EXCEPCION = {
-    "2026-08": date(2026, 9, 6),
-}
-
-
-def _mes_estandar(fecha):
-    """La regla del 6 al 5, sin excepciones."""
-    if fecha.day >= DIA_INICIO_MES_COMERCIAL:
-        anio, mes = fecha.year, fecha.month
-    else:
-        if fecha.month == 1:
-            anio, mes = fecha.year - 1, 12
-        else:
-            anio, mes = fecha.year, fecha.month - 1
-    return f"{anio:04d}-{mes:02d}"
-
-
-def _correr_mes(mes, pasos):
-    """'2026-08' mas o menos N meses."""
-    anio, m = (int(x) for x in mes.split("-"))
-    total = anio * 12 + (m - 1) + pasos
-    return f"{total // 12:04d}-{total % 12 + 1:02d}"
-
-
-def mes_comercial(fecha):
-    """El mes comercial 'AAAA-MM' de una fecha, respetando los cierres movidos.
-
-    Del 6 al 5, salvo que ese mes --o el anterior-- tenga un cierre distinto
-    cargado en CIERRES_EXCEPCION.
-    """
-    if fecha is None:
-        return None
-
-    mes = _mes_estandar(fecha)
-
-    # El mes ANTERIOR se estiro y esta fecha todavia le pertenece.
-    anterior = _correr_mes(mes, -1)
-    fin_anterior = CIERRES_EXCEPCION.get(anterior)
-    if fin_anterior is not None and fecha <= fin_anterior:
-        return anterior
-
-    # ESTE mes se acorto y la fecha ya quedo afuera: es del siguiente.
-    fin = CIERRES_EXCEPCION.get(mes)
-    if fin is not None and fecha > fin:
-        return _correr_mes(mes, 1)
-
-    return mes
+# Se importa con nombre propio porque medio modulo lo usa sin calificar, y
+# porque `from modelo import mes_comercial` es lo que ya escriben las pruebas.
 
 
 # NOTAS DE CREDITO: DOS PREGUNTAS DISTINTAS, DOS LISTAS.
@@ -365,14 +336,50 @@ def piso_sql():
     return (CUTOFF - timedelta(days=1)).isoformat()
 
 
+def costo_vigente(tramos, fecha):
+    """El costo del ultimo tramo que ya habia arrancado esa fecha.
+
+    `tramos` es la lista [(vigente_desde, costo_real)] de un (sku, mes),
+    ordenada por vigencia. Si la fecha cae antes del primer tramo devuelve None
+    --pasa solo si se cargo una lista de media de mes sin la del mes-- que es lo
+    mismo que hacia antes cuando el mes no estaba cargado: sin costo, y el
+    margen en null.
+
+    Es una funcion suelta y no un closure para poder probarla sin base.
+    """
+    if not tramos or fecha is None:
+        return None
+    costo = None
+    for vigente_desde, valor in tramos:
+        if vigente_desde > fecha:
+            break
+        costo = valor
+    return costo
+
+
 def construir_fact_ventas():
     print(f"=== Construyendo fact_ventas (ventana movil: {CUTOFF} en adelante) ===")
 
     # --- Catalogos auxiliares ---
     print("Leyendo costos historicos y IVA...")
-    # Costo real por (sku, mes_comercial)
-    cost = pd.read_sql("SELECT sku, mes_comercial, costo_real FROM bronze.costos_historicos", engine)
-    costo_idx = {(r["sku"], r["mes_comercial"]): r["costo_real"] for _, r in cost.iterrows()}
+    # Los TRAMOS de costo de cada (sku, mes_comercial), ordenados por vigencia.
+    #
+    # Antes era un costo por mes y alcanzaba con un dict. Desde que un proveedor
+    # puede mandar lista nueva a mitad de mes, un mismo mes tiene varios tramos
+    # y hay que elegir el que regia el dia de la venta -- ver `costo_de`.
+    cost = pd.read_sql(
+        "SELECT sku, mes_comercial, vigente_desde, costo_real "
+        "FROM bronze.costos_historicos ORDER BY sku, mes_comercial, vigente_desde",
+        engine,
+    )
+    costo_idx = {}
+    for _, r in cost.iterrows():
+        vig = r["vigente_desde"]
+        if hasattr(vig, "date"):        # pandas devuelve Timestamp
+            vig = vig.date()
+        costo_idx.setdefault((r["sku"], r["mes_comercial"]), []).append(
+            (vig, r["costo_real"])
+        )
 
     # IVA por sku (de sigma_articulos)
     art = pd.read_sql('SELECT id, "ivaPorcentual" FROM bronze.sigma_articulos', engine)
@@ -434,8 +441,16 @@ def construir_fact_ventas():
     envio_de_orden = dict(zip(env["order_id"], env["shipping_id"]))
     costo_de_envio = dict(zip(env["shipping_id"], env["costo_envio"]))
 
-    def costo_de(sku, mc):
-        return costo_idx.get((str(sku), mc))
+    def costo_de(sku, fecha):
+        """El costo que regia ESE DIA, dentro del mes comercial de esa fecha.
+
+        NO SE SALE DEL MES a proposito. Un articulo que dejo de estar en el
+        catalogo sigue sin costo --y su margen en null, como siempre-- en vez de
+        heredar el precio de hace tres meses sin que nadie se entere. Cada Excel
+        mensual es el catalogo COMPLETO, asi que "no esta en el mes" quiere
+        decir que ese mes no se compraba.
+        """
+        return costo_vigente(costo_idx.get((str(sku), mes_comercial(fecha))), fecha)
 
     def iva_de(sku):
         v = iva_por_sku.get(str(sku))
@@ -646,9 +661,11 @@ def construir_fact_ventas():
         if mercaderia_perdida(r["motivoNc"]) and not anula_todo:
             costo = 0.0
         else:
+            # La NC se costea con el costo del dia de la FACTURA ORIGINAL, no
+            # con el del dia en que se emitio la nota: lo que se devuelve
+            # cancela lo que se vendio, y se vendio a aquel costo.
             f_orig = to_date(r["fechaOriginal"])
-            mc_costo = mes_comercial(f_orig) if f_orig is not None else mc
-            costo = costo_de(sku, mc_costo)
+            costo = costo_de(sku, f_orig if f_orig is not None else f)
         margen = None if costo is None else (precio_neto - costo) * cant
         filas.append({
             "canal": "Mayorista", "unidad": unidad, "tipo": tipo, "nro_orden": r["itemPedidoId"],
@@ -811,7 +828,7 @@ def construir_fact_ventas():
         precio = float(r["precio"]) if r["precio"] else 0
         iva = iva_de(sku)
         precio_neto = precio / (1 + iva / 100)
-        costo = costo_de(sku, mc)
+        costo = costo_de(sku, f)
 
         valor_item = precio * cant
         total = valor_pedido.get(r["pedido_id"], 0)
@@ -997,7 +1014,7 @@ def construir_fact_ventas():
                 comision = comision_con_iva / 1.21
                 iva = iva_de(sku)
                 precio_neto = precio / (1 + iva / 100)
-                costo = costo_de(sku, mc)
+                costo = costo_de(sku, f)
 
                 # El envio queda en cero por ahora y el margen sin el: los dos se
                 # completan abajo, una vez repartido el flete del paquete.
@@ -1153,8 +1170,17 @@ def main():
     else:
         CUTOFF = max(FECHA_CORTE, date.today() - timedelta(days=args.dias))
 
+    # Un costo que cambio hacia atras manda sobre la ventana pedida, tambien si
+    # se pidio una corta a mano: si no, la anotacion se borraria sin que nadie
+    # haya recalculado esos dias.
+    pendiente = vigencia_pendiente()
+    if pendiente is not None and pendiente < CUTOFF:
+        CUTOFF = max(FECHA_CORTE, pendiente)
+        print(f"Cambiaron costos vigentes desde {pendiente}: se estira la ventana")
+
     print(f"Ventana a reconstruir: desde {CUTOFF} (hoy es {date.today()})")
     construir_fact_ventas()
+    limpiar_vigencia_pendiente(pendiente)
     print("\n=== LISTO ===")
 
 

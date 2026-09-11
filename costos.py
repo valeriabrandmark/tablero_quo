@@ -1,3 +1,31 @@
+"""Carga los Excel de costos a bronze.costos_historicos.
+
+============================================================================
+ COMO SE LLAMA EL ARCHIVO, QUE ES LO UNICO QUE HAY QUE SABER
+============================================================================
+
+    2026-09.xlsx       la lista del mes. Rige desde que ARRANCA el mes
+                       comercial: el 6, o el dia que corresponda si ese mes
+                       tuvo cierre movido (2026-09 arranca el 7).
+
+    2026-09-18.xlsx    una lista que llego a mitad de mes. Rige DESDE EL 18,
+                       inclusive. Las ventas del 7 al 17 se siguen costeando
+                       con la lista anterior; las del 18 en adelante, con esta.
+
+Los dos archivos conviven. Cada uno es el catalogo COMPLETO --los 8.243
+articulos-- porque asi los exporta Sigma, no hace falta recortar nada: de cada
+uno se toma lo que rige desde su fecha.
+
+POR QUE. Hasta el 11/09/2026 el costo valia el mes comercial entero, asi que
+cuando un proveedor mandaba lista nueva el dia 20 habia que elegir entre dejar
+el costo viejo hasta el 5 o pisarlo y recostear ventas que ya se habian hecho
+al precio anterior. Ninguna de las dos era cierta.
+
+Y sirve tambien para CORREGIR: si un costo entro mal, se vuelve a cargar el
+archivo de esa vigencia y modelo.py recalcula solo los dias que dependian de
+ella.
+"""
+
 import argparse
 import hashlib
 import json
@@ -6,13 +34,19 @@ import os
 import glob
 import re
 import pandas as pd
+from datetime import date
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
+from calendario import inicio_del_mes_comercial, mes_comercial
 from conexion import crear_engine
 
 load_dotenv()
 
 CARPETA_COSTOS = "costos_mensuales"
+
+# Los dos nombres de archivo validos. Ver el encabezado del modulo.
+PATRON_MES = re.compile(r"\d{4}-\d{2}")
+PATRON_DIA = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 # Columna K de la hoja "Ofertas": el descuento que ponemos nosotros, aparte del
 # que da el proveedor (columna J, DESCUENTO TOTAL PROVEEDOR).
@@ -22,7 +56,7 @@ COL_DESC_PROPIO = "DESC PROPIO"
 # nueva, otra cuenta). Entra en la huella para que --si-cambio recargue una vez
 # aunque ningun Excel se haya tocado: sin esto, la columna agregada hoy queda
 # vacia hasta que alguien edite un archivo.
-VERSION_ESQUEMA = 2
+VERSION_ESQUEMA = 3
 
 engine = crear_engine()
 
@@ -108,36 +142,69 @@ def _sin_separador_decimal(viejo, nuevo):
     return False
 
 
-def _mes_anterior(mes):
-    """'2026-09' -> '2026-08'."""
-    anio, m = (int(x) for x in mes.split("-"))
-    total = anio * 12 + (m - 1) - 1
-    return f"{total // 12:04d}-{total % 12 + 1:02d}"
+def _como_fecha(valor):
+    """pandas devuelve las fechas como Timestamp; aca se trabaja con date."""
+    return valor.date() if hasattr(valor, "date") else valor
 
 
-def costos_previos(mes, ya_procesados, engine):
-    """Los costos del mes anterior: de esta misma corrida o de la base.
+def mes_y_vigencia(nombre):
+    """Del nombre del archivo al (mes comercial, dia desde el que rige).
+
+    '2026-09'     -> ('2026-09', date(2026, 9, 7))   el arranque del mes
+    '2026-09-18'  -> ('2026-09', date(2026, 9, 18))  una lista de media de mes
+
+    El arranque del mes NO es siempre el 6: sale de calendario.py, que es el
+    mismo lugar del que sale el mes comercial de cada venta. Escribirlo aca de
+    nuevo serian dos versiones de la misma regla.
+    """
+    if PATRON_MES.fullmatch(nombre):
+        return nombre, inicio_del_mes_comercial(nombre)
+    if PATRON_DIA.fullmatch(nombre):
+        dia = date.fromisoformat(nombre)
+        return mes_comercial(dia), dia
+    raise ValueError(
+        f"'{nombre}' no es AAAA-MM ni AAAA-MM-DD (ej: 2026-09 o 2026-09-18)"
+    )
+
+
+def costos_previos(vigencia, ya_procesados, engine):
+    """Los costos que regian JUSTO ANTES de esta vigencia.
+
+    Es contra lo que se mide el salto de importes. Antes se comparaba contra el
+    mes anterior; ahora contra el TRAMO anterior, que para la lista de un mes es
+    el ultimo del mes pasado --lo mismo de siempre-- y para una lista de media
+    de mes es la que esta reemplazando, que es justo la comparacion que importa.
 
     Primero mira lo que ya se leyo en esta corrida --cuando se cargan todos los
-    archivos de una, el mes anterior todavia no esta en la base-- y si no,
-    consulta lo que hay guardado.
+    archivos de una, el tramo anterior todavia no esta en la base-- y si en la
+    base hay uno mas nuevo que ese, gana el de la base.
     """
-    anterior = _mes_anterior(mes)
-
+    mejor_vig, mejor = None, {}
     for df in ya_procesados:
-        if not df.empty and df["mes_comercial"].iloc[0] == anterior:
-            return dict(zip(df["sku"], df["costo_teorico"]))
+        if df.empty:
+            continue
+        v = _como_fecha(df["vigente_desde"].iloc[0])
+        if v < vigencia and (mejor_vig is None or v > mejor_vig):
+            mejor_vig, mejor = v, dict(zip(df["sku"], df["costo_teorico"]))
 
     try:
         previo = pd.read_sql(
-            "select sku, costo_teorico from bronze.costos_historicos "
-            "where mes_comercial = %(m)s",
-            engine, params={"m": anterior},
+            "select sku, costo_teorico, vigente_desde from bronze.costos_historicos "
+            "where vigente_desde = (select max(vigente_desde) "
+            "                         from bronze.costos_historicos "
+            "                        where vigente_desde < %(v)s)",
+            engine, params={"v": vigencia},
         )
     except Exception:
         # Primera carga, o la tabla todavia no existe: no hay contra que
         # comparar y eso no es motivo para frenar nada.
-        return {}
+        return mejor
+
+    if previo.empty:
+        return mejor
+    v_base = _como_fecha(previo["vigente_desde"].iloc[0])
+    if mejor_vig is not None and mejor_vig >= v_base:
+        return mejor
     return dict(zip(previo["sku"], previo["costo_teorico"]))
 
 
@@ -268,12 +335,43 @@ def guardar_huella(huella):
     estado.guardar("costos", {"huella": huella})
 
 
-def meses_disponibles():
-    """Los meses que hay en la carpeta, por nombre de archivo."""
+def archivos_disponibles():
+    """Los nombres de archivo que hay en la carpeta, sin la extension."""
     return sorted(
         os.path.splitext(os.path.basename(a))[0]
         for a in glob.glob(os.path.join(CARPETA_COSTOS, "*.xlsx"))
     )
+
+
+def archivos_a_cargar(objetivo):
+    """Que archivos entran, y con que mes y vigencia cada uno.
+
+    Devuelve una lista de (nombre, mes_comercial, vigente_desde) ordenada por
+    vigencia, que es el orden en el que hay que leerlos: cada uno se compara
+    contra el anterior.
+
+        None           todos los que haya en la carpeta
+        '2026-09'      la lista del mes Y todas las de media de mes que caigan
+                       adentro de ese mes comercial
+        '2026-09-18'   solo esa
+    """
+    catalogados = []
+    for nombre in archivos_disponibles():
+        try:
+            mes, vigencia = mes_y_vigencia(nombre)
+        except ValueError as e:
+            print(f"  (se ignora {nombre}.xlsx: {e})")
+            continue
+        catalogados.append((nombre, mes, vigencia))
+
+    if objetivo is None:
+        elegidos = catalogados
+    elif PATRON_DIA.fullmatch(objetivo):
+        elegidos = [c for c in catalogados if c[0] == objetivo]
+    else:
+        elegidos = [c for c in catalogados if c[1] == objetivo]
+
+    return sorted(elegidos, key=lambda c: c[2])
 
 
 def asegurar_columnas(con):
@@ -284,37 +382,126 @@ def asegurar_columnas(con):
         "ALTER TABLE bronze.costos_historicos "
         "ADD COLUMN IF NOT EXISTS desc_propio_pct double precision DEFAULT 0"
     )
+    # Sin DEFAULT a proposito: una fila sin vigencia no se sabe desde cuando
+    # rige, y adivinarla es peor que no cargarla. La columna se creo con el
+    # backfill de costos_vigente_desde.sql, que le puso a cada fila vieja el
+    # arranque de su propio mes comercial.
+    con.exec_driver_sql(
+        "ALTER TABLE bronze.costos_historicos "
+        "ADD COLUMN IF NOT EXISTS vigente_desde date"
+    )
 
 
-def cargar_costos(mes=None, revisar_solo=False):
-    """Carga los costos de todos los meses, o de uno solo si se pasa `mes`.
+# La anotacion que deja este script y levanta modelo.py. Los dos nombres tienen
+# que decir lo mismo: alla se llama CLAVE_COSTOS_PENDIENTES.
+CLAVE_RECONSTRUIR = "costos_reconstruir_desde"
 
-    Con `mes` NO se reescribe la tabla entera: se borra unicamente ese mes y se
-    vuelve a insertar. Reescribir todo con un solo mes cargado se llevaria
-    puestos los demas, que es justo lo que uno NO quiere cuando corrige el
-    Excel de un mes suelto.
+
+def _numero(valor):
+    """El costo como float comparable: los NaN y los None se vuelven None.
+
+    NaN nunca es igual a NaN, asi que sin esto un articulo sin costo figuraria
+    como "cambio" en cada carga y mandaria a recalcular gold para nada.
+    """
+    if valor is None:
+        return None
+    try:
+        v = float(valor)
+    except (TypeError, ValueError):
+        return None
+    return None if v != v else round(v, 6)
+
+
+def vigencia_mas_vieja_que_cambia(con, final, borrado, params):
+    """Desde que dia hay que recalcular gold, o None si nada cambio de valor.
+
+    POR QUE NO ALCANZA CON "SE CARGO ALGO". El orquestador llama a este script
+    en cada corrida y recarga TODOS los meses apenas se toca un Excel: si
+    cualquier carga estirara la ventana, cada correccion de una lista de
+    septiembre mandaria a reconstruir gold desde mayo, que son varios minutos
+    de trabajo para escribir exactamente los mismos numeros.
+
+    Asi que se comparan los costos que estan contra los que van a quedar --los
+    que se van tambien cuentan: una linea que se queda sin costo cambia igual--
+    y se devuelve la vigencia mas vieja que de verdad quedo distinta.
+    """
+    filas = con.exec_driver_sql(
+        "SELECT sku, mes_comercial, vigente_desde, costo_real "
+        "FROM bronze.costos_historicos" + borrado,
+        params,
+    ).fetchall()
+    viejas = {
+        (f[0], f[1], _como_fecha(f[2])): _numero(f[3]) for f in filas
+    }
+    nuevas = {
+        (r.sku, r.mes_comercial, _como_fecha(r.vigente_desde)): _numero(r.costo_real)
+        for r in final.itertuples()
+    }
+
+    cambiadas = [
+        clave[2] for clave in set(viejas) | set(nuevas)
+        if viejas.get(clave) != nuevas.get(clave)
+    ]
+    cambiadas = [v for v in cambiadas if v is not None]
+    return min(cambiadas) if cambiadas else None
+
+
+def anotar_para_reconstruir(desde):
+    """Le deja anotado a modelo.py hasta donde tiene que estirar la ventana.
+
+    Se guarda la mas VIEJA de las pendientes: si ya habia una anotacion sin
+    consumir --porque modelo.py todavia no corrio, o se cayo-- pisarla con una
+    fecha mas nueva dejaria dias sin recalcular.
+    """
+    if desde is None:
+        print("  Ningun costo quedo distinto: gold no necesita recalcular nada")
+        return
+
+    anterior = estado.leer(CLAVE_RECONSTRUIR, None)
+    if anterior:
+        try:
+            desde = min(desde, date.fromisoformat(anterior))
+        except (TypeError, ValueError):
+            print(f"  (aviso: {CLAVE_RECONSTRUIR} ilegible: {anterior!r}, se pisa)")
+
+    estado.guardar(CLAVE_RECONSTRUIR, desde.isoformat())
+    print(f"  Cambiaron costos vigentes desde {desde}: "
+          "modelo.py va a recalcular gold desde ahi")
+
+
+def cargar_costos(objetivo=None, revisar_solo=False):
+    """Carga los costos de todos los archivos, o de uno solo si se pasa `objetivo`.
+
+    Con `objetivo` NO se reescribe la tabla entera. Reescribir todo con un solo
+    archivo cargado se llevaria puestos los demas, que es justo lo que uno NO
+    quiere cuando corrige una lista suelta.
+
+        '2026-09'      se rehace ese mes comercial entero, con todas sus
+                       vigencias, a partir de los archivos que haya en la
+                       carpeta. Una vigencia cuyo archivo se borro desaparece.
+        '2026-09-18'   se rehace SOLO ese tramo. Los demas del mes quedan
+                       intactos.
     """
     print("=== Cargando costos historicos con ofertas ===")
 
-    if mes:
-        archivo = os.path.join(CARPETA_COSTOS, f"{mes}.xlsx")
-        if not os.path.exists(archivo):
-            print(f"  No existe {archivo}")
-            print(f"  Meses disponibles: {', '.join(meses_disponibles()) or '(ninguno)'}")
-            return
-        archivos = [archivo]
-        print(f"  Solo el mes {mes} (los demas quedan como estan)")
-    else:
-        archivos = glob.glob(os.path.join(CARPETA_COSTOS, "*.xlsx"))
-
-    if not archivos:
-        print(f"  No hay archivos .xlsx en {CARPETA_COSTOS}/")
+    elegidos = archivos_a_cargar(objetivo)
+    if not elegidos:
+        if objetivo:
+            print(f"  No hay ningun archivo para {objetivo} en {CARPETA_COSTOS}/")
+        else:
+            print(f"  No hay archivos .xlsx en {CARPETA_COSTOS}/")
+        disponibles = ", ".join(archivos_disponibles()) or "(ninguno)"
+        print(f"  Archivos disponibles: {disponibles}")
         return
 
+    if objetivo:
+        cuales = ", ".join(n for n, _, _ in elegidos)
+        print(f"  Solo {cuales} (el resto queda como esta)")
+
     todos = []
-    for archivo in archivos:
-        nombre = os.path.splitext(os.path.basename(archivo))[0]   # ej "2026-06"
-        print(f"\n  === Mes comercial: {nombre} ===")
+    for nombre, mes, vigencia in elegidos:
+        archivo = os.path.join(CARPETA_COSTOS, f"{nombre}.xlsx")
+        print(f"\n  === Mes comercial {mes}, vigente desde {vigencia} ===")
 
         # --- Pestaña COSTOS: encabezados en fila 3 (header=2) ---
         # Columna B = Codigo, Columna AQ = Costo Teorico
@@ -361,14 +548,15 @@ def cargar_costos(mes=None, revisar_solo=False):
         costos["oferta_pct"] = costos["oferta_pct"].fillna(0)
         costos["desc_propio_pct"] = costos["desc_propio_pct"].fillna(0)
         costos["costo_real"] = costos["costo_teorico"] * (1 - costos["oferta_pct"] / 100)
-        costos["mes_comercial"] = nombre
+        costos["mes_comercial"] = mes
+        costos["vigente_desde"] = vigencia
 
         # --- El archivo, contra el mes anterior -------------------------
         #
         # SE CHEQUEA ANTES DE ESCRIBIR NADA. Todo el mes se guarda en una sola
         # transaccion al final, asi que cortar aca deja la base como estaba: con
         # los costos viejos, que son viejos pero no absurdos.
-        anteriores = costos_previos(nombre, todos, engine)
+        anteriores = costos_previos(vigencia, todos, engine)
         if anteriores:
             nuevos = dict(zip(costos["sku"], costos["costo_teorico"]))
             informe = revisar_saltos(nuevos, anteriores)
@@ -386,7 +574,7 @@ def cargar_costos(mes=None, revisar_solo=False):
                     print(f"      {sku:<12} {viejo_v:>14,.4f} -> {nuevo_v:>16,.2f}{marca}")
             if informe["abortar"] and not revisar_solo:
                 raise RuntimeError(
-                    f"El archivo de {nombre} tiene {informe['saltos']} costos "
+                    f"El archivo {nombre}.xlsx tiene {informe['saltos']} costos "
                     f"({informe['proporcion']:.0%}) al menos {SALTO_SOSPECHOSO} veces "
                     f"mas altos que en el mes anterior, y {informe['sin_separador']} "
                     "son exactamente los mismos digitos sin la coma decimal.\n"
@@ -410,61 +598,71 @@ def cargar_costos(mes=None, revisar_solo=False):
         return
 
     final = pd.concat(todos, ignore_index=True)
-    final = final.drop_duplicates(subset=["sku", "mes_comercial"], keep="last")
-    final = final[["sku", "mes_comercial", "costo_teorico", "oferta_pct",
-                   "desc_propio_pct", "costo_real"]]
+    # La clave es (sku, mes, vigencia) y ya no (sku, mes): un mismo mes puede
+    # tener varios tramos. Si dos archivos del mismo mes caen en el mismo dia
+    # --2026-09.xlsx y 2026-09-07.xlsx, que arrancan los dos el 7-- gana el
+    # ultimo leido, que por el orden es el de nombre mas largo.
+    final = final.drop_duplicates(
+        subset=["sku", "mes_comercial", "vigente_desde"], keep="last")
+    final = final[["sku", "mes_comercial", "vigente_desde", "costo_teorico",
+                   "oferta_pct", "desc_propio_pct", "costo_real"]]
 
-    if mes:
-        # Borrar + agregar, para no tocar los otros meses. Si la tabla todavia
-        # no existe, el borrado no aplica y el append la crea.
-        with engine.begin() as con:
-            existe = con.exec_driver_sql("""
-                SELECT EXISTS (
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = 'bronze' AND table_name = 'costos_historicos'
-                )
-            """).scalar()
-            if existe:
-                asegurar_columnas(con)
-                borradas = con.exec_driver_sql(
-                    "DELETE FROM bronze.costos_historicos WHERE mes_comercial = %(mes)s",
-                    {"mes": mes},
-                ).rowcount
-                print(f"\n  Filas viejas de {mes} borradas: {borradas}")
-            # Dentro del `with`: borrar y reinsertar tienen que ser una sola
-            # transaccion, o entre las dos ese mes queda sin costos y modelo.py
-            # -- si corre justo ahi -- calcula margenes sin costo.
-            final.to_sql("costos_historicos", con, schema="bronze",
-                         if_exists="append", index=False)
+    # QUE SE BORRA ANTES DE ESCRIBIR.
+    #
+    # Sin objetivo se rehace la tabla entera. Con un mes, ese mes con todas sus
+    # vigencias (asi desaparece un tramo cuyo archivo se borro de la carpeta).
+    # Con un dia, solo ese tramo: los demas del mes no se tocan.
+    if objetivo is None:
+        borrado, params, que = "", {}, "toda la tabla"
+    elif PATRON_DIA.fullmatch(objetivo):
+        mes, vigencia = mes_y_vigencia(objetivo)
+        borrado = " WHERE mes_comercial = %(mes)s AND vigente_desde = %(vig)s"
+        params, que = {"mes": mes, "vig": vigencia}, f"{mes} desde {vigencia}"
     else:
-        # DELETE + APPEND EN UNA SOLA TRANSACCION, y no `if_exists="replace"`:
-        # replace hace DROP, y el DROP falla si alguien crea una vista encima de
-        # la tabla. (Ver tiendanube.py, que estuvo dos meses roto por esto.)
-        #
-        # Y las dos operaciones juntas para que la tabla no quede vacia en el
-        # medio: modelo.py lee los costos de aca, y si corre justo en ese hueco
-        # arma gold.fact_ventas entero sin margenes.
-        with engine.begin() as con:
-            existe = con.exec_driver_sql("""
-                SELECT EXISTS (
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = 'bronze' AND table_name = 'costos_historicos'
-                )
-            """).scalar()
-            if existe:
-                asegurar_columnas(con)
-                con.exec_driver_sql("DELETE FROM bronze.costos_historicos;")
-            final.to_sql("costos_historicos", con, schema="bronze",
-                         if_exists="append", index=False)
+        borrado = " WHERE mes_comercial = %(mes)s"
+        params, que = {"mes": objetivo}, objetivo
+
+    # DELETE + APPEND EN UNA SOLA TRANSACCION, y no `if_exists="replace"`:
+    # replace hace DROP, y el DROP falla si alguien crea una vista encima de la
+    # tabla. (Ver tiendanube.py, que estuvo dos meses roto por esto.)
+    #
+    # Y las dos operaciones juntas para que la tabla no quede vacia en el medio:
+    # modelo.py lee los costos de aca, y si corre justo en ese hueco arma
+    # gold.fact_ventas entero sin margenes.
+    reconstruir_desde = None
+    with engine.begin() as con:
+        existe = con.exec_driver_sql("""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = 'bronze' AND table_name = 'costos_historicos'
+            )
+        """).scalar()
+        if existe:
+            asegurar_columnas(con)
+            reconstruir_desde = vigencia_mas_vieja_que_cambia(
+                con, final, borrado, params)
+            borradas = con.exec_driver_sql(
+                "DELETE FROM bronze.costos_historicos" + borrado, params
+            ).rowcount
+            print(f"\n  Filas viejas borradas ({que}): {borradas}")
+        final.to_sql("costos_historicos", con, schema="bronze",
+                     if_exists="append", index=False)
+
+    # RECIEN DESPUES DE COMMITEAR. Si la escritura se cae, no hay nada que
+    # recalcular y la anotacion habria mandado a modelo.py a rehacer meses al
+    # pedo.
+    anotar_para_reconstruir(reconstruir_desde)
 
     print(f"\n  Guardado: bronze.costos_historicos ({len(final)} filas de esta corrida)")
     print(f"  Meses cargados ahora: {sorted(final['mes_comercial'].unique())}")
 
-    # Estado de la tabla entera, no solo de lo que se acaba de escribir: con
-    # --mes es el unico numero que dice si los otros meses siguen ahi.
+    # Estado de la tabla entera, no solo de lo que se acaba de escribir: con un
+    # objetivo es el unico numero que dice si lo demas sigue ahi. Las vigencias
+    # van en la misma linea: son lo que hay que mirar para ver si un tramo entro
+    # donde se esperaba.
     resumen = pd.read_sql(
-        "SELECT mes_comercial, count(*) AS skus FROM bronze.costos_historicos "
-        "GROUP BY 1 ORDER BY 1", engine)
+        "SELECT mes_comercial, vigente_desde, count(*) AS skus "
+        "FROM bronze.costos_historicos GROUP BY 1, 2 ORDER BY 1, 2", engine)
     print("\n  Tabla completa:")
     print(resumen.to_string(index=False))
     # Muestra de control
@@ -475,16 +673,25 @@ def cargar_costos(mes=None, revisar_solo=False):
 def main():
     parser = argparse.ArgumentParser(
         description="Carga los costos de costos_mensuales/*.xlsx a bronze.costos_historicos.",
-        epilog="Ejemplos:\n"
-               "  python costos.py            todos los meses\n"
-               "  python costos.py 2026-08    solo agosto\n"
-               "  python costos.py --listar   que meses hay en la carpeta",
+        epilog="COMO SE LLAMA EL ARCHIVO:\n"
+               "  2026-09.xlsx      la lista del mes, rige desde que arranca el\n"
+               "                    mes comercial (el 6, o el dia que sea si ese\n"
+               "                    mes tuvo cierre movido)\n"
+               "  2026-09-18.xlsx   una lista que llego a mitad de mes: rige\n"
+               "                    desde el 18. Lo de antes no se toca.\n"
+               "\n"
+               "Ejemplos:\n"
+               "  python costos.py               todos los archivos\n"
+               "  python costos.py 2026-08       agosto entero, con sus vigencias\n"
+               "  python costos.py 2026-09-18    solo ese tramo\n"
+               "  python costos.py --listar      que hay en la carpeta",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("mes", nargs="?",
-                        help="Mes comercial AAAA-MM. Sin esto carga todos.")
+    parser.add_argument("mes", nargs="?", metavar="MES_O_FECHA",
+                        help="Mes comercial AAAA-MM o vigencia AAAA-MM-DD. "
+                             "Sin esto carga todos.")
     parser.add_argument("--listar", action="store_true",
-                        help="Muestra los meses que hay en la carpeta y sale")
+                        help="Muestra los archivos que hay en la carpeta y sale")
     parser.add_argument("--revisar", action="store_true",
                         help="Lee los Excel y avisa de los costos raros, sin guardar")
     parser.add_argument("--si-cambio", action="store_true",
@@ -492,15 +699,22 @@ def main():
     args = parser.parse_args()
 
     if args.listar:
-        disponibles = meses_disponibles()
-        print("Meses en " + CARPETA_COSTOS + "/: " + (", ".join(disponibles) or "(ninguno)"))
+        catalogados = archivos_a_cargar(None)
+        if not catalogados:
+            print("No hay archivos .xlsx en " + CARPETA_COSTOS + "/")
+            return
+        print("Archivos en " + CARPETA_COSTOS + "/:")
+        for nombre, mes, vigencia in catalogados:
+            print(f"  {nombre}.xlsx   mes {mes}, vigente desde {vigencia}")
         return
 
     # Se valida el formato antes de tocar nada: un mes mal escrito no encuentra
     # el archivo y sin este chequeo el mensaje seria "no existe", que hace
     # pensar que falta el Excel cuando lo que esta mal es lo que se tipeo.
-    if args.mes and not re.fullmatch(r"\d{4}-\d{2}", args.mes):
-        parser.error(f"'{args.mes}' no tiene el formato AAAA-MM (ej: 2026-08)")
+    if args.mes and not (PATRON_MES.fullmatch(args.mes)
+                         or PATRON_DIA.fullmatch(args.mes)):
+        parser.error(f"'{args.mes}' no tiene el formato AAAA-MM ni AAAA-MM-DD "
+                     "(ej: 2026-08 o 2026-09-18)")
 
     # Los Excel viven en el disco y solo cambian cuando alguien los edita, asi
     # que reprocesarlos en cada corrida del orquestador es trabajo al pedo: son

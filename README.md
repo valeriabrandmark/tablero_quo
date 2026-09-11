@@ -204,7 +204,7 @@ Solo tres scripts aceptan argumentos. El resto se corre pelado.
 | `mercadolibre.py` | `--ventas`, `--catalogo` | corre todo |
 | `sigma.py` | `--ventas`, `--catalogo` | corre todo |
 | `orquestador.py` | `--forzar`, `--solo`, `--listar` | respeta frecuencias |
-| `costos.py` | `AAAA-MM` (posicional), `--listar`, `--si-cambio` | todos los meses |
+| `costos.py` | `AAAA-MM` o `AAAA-MM-DD` (posicional), `--listar`, `--si-cambio` | todos los archivos |
 | `ml_envios.py` | — | **siempre incremental** (solo lo que falta) |
 
 `ml_envios.py` no necesita flags: ya resuelve solo su alcance, porque pide
@@ -213,16 +213,18 @@ Solo tres scripts aceptan argumentos. El resto se corre pelado.
 En `costos.py` el mes va suelto, sin `--`:
 
 ```bash
-python costos.py            # los cuatro meses, reescribe la tabla entera
-python costos.py 2026-08    # solo agosto, los otros meses quedan intactos
-python costos.py --listar   # qué meses hay en la carpeta
+python costos.py               # todos los archivos, reescribe la tabla entera
+python costos.py 2026-08       # agosto entero, con todas sus vigencias
+python costos.py 2026-09-18    # solo la lista que rige desde el 18
+python costos.py --listar      # qué hay en la carpeta, y desde cuándo rige cada uno
 ```
 
 Con un mes **no** se reescribe la tabla: se borra ese mes y se vuelve a
 insertar. Reescribir todo teniendo un solo mes cargado se llevaría puestos los
-demás, que es justo lo que uno no quiere al corregir un Excel suelto. Al
-terminar imprime cuántos SKUs quedaron por mes en la tabla completa, que es la
-forma de confirmar que los otros siguen ahí.
+demás, que es justo lo que uno no quiere al corregir un Excel suelto. Con una
+fecha se toca **sólo ese tramo** y el resto del mes queda intacto. Al terminar
+imprime cuántos SKUs quedaron por mes y vigencia en la tabla completa, que es la
+forma de confirmar que lo demás sigue ahí.
 
 ---
 
@@ -232,13 +234,19 @@ forma de confirmar que los otros siguen ahí.
 
 ```bash
 python costos.py 2026-08     # el mes que tocaste
-python modelo.py --dias 30
+python modelo.py
 ```
 
-**El `--dias 30` no es opcional.** El mes comercial va del 6 al 5, así que a mitad
-de mes la ventana de 7 días no llega al principio del mes: las ventas del 6 al 10
-se quedarían con el costo viejo, sin ningún error a la vista. El 18/08 eso eran
-1.617 líneas por $82 M.
+**La ventana se estira sola.** `costos.py` compara lo que había contra lo que
+queda y, si algún costo cambió de verdad, deja anotada la vigencia más vieja que
+tocó; `modelo.py` lee esa anotación y reconstruye `gold.fact_ventas` desde ahí,
+aunque sea más atrás que los 7 días de siempre. La anotación se borra recién
+después de guardar bien, así que una corrida que se cae no se pierde el
+recálculo.
+
+Antes había que acordarse del `--dias 30` a mano, y olvidarlo no daba ningún
+error a la vista: las ventas del principio del mes se quedaban con el costo
+viejo. El 18/08 eso eran 1.617 líneas por $82 M.
 
 ### Poner todo al día después de un parate
 
@@ -377,7 +385,11 @@ Los errores que se van a ver alguna vez, y qué significan:
 ## Reglas de negocio que no se deducen del código
 
 **El mes comercial va del 6 al 5.** Día ≥ 6 → mes actual; día < 6 → mes anterior.
-Está en `mes_comercial()` de `modelo.py` y lo espeja el tablero web.
+Está en `mes_comercial()` de `calendario.py` y lo espeja el tablero web.
+
+**El costo rige desde una fecha, no desde un mes.** Un mes comercial puede tener
+varias listas: `bronze.costos_historicos.vigente_desde` dice desde cuándo rige
+cada una, y cada venta se costea con la que regía **ese día**.
 
 **Piso histórico: 06/05/2026.** Es `FECHA_CORTE`. No hay nada antes, y `--todo`
 llega exactamente hasta ahí.
@@ -465,16 +477,16 @@ canal está por eso algo sobreestimado, y el tablero lo aclara.
 
 ## El mes comercial, y los cierres que se corren
 
-El mes comercial va **del 6 de un mes al 5 del siguiente**: una venta del 06/08 y una del 05/09 son las dos de `2026-08`. La función es `mes_comercial` en `modelo.py`.
+El mes comercial va **del 6 de un mes al 5 del siguiente**: una venta del 06/08 y una del 05/09 son las dos de `2026-08`. La función es `mes_comercial`, en `calendario.py` (la usan `modelo.py` y `costos.py`).
 
-**No es una etiqueta cosmética: es lo que decide con qué costo se valoriza cada venta.** `bronze.costos_historicos` está indexada por `(sku, mes_comercial)`, así que una venta etiquetada en un mes cuya lista todavía no se cargó queda **sin costo**, con el margen inflado o en `null`.
+**No es una etiqueta cosmética: es lo que decide con qué costo se valoriza cada venta.** `bronze.costos_historicos` está indexada por `(sku, mes_comercial, vigente_desde)`, así que una venta etiquetada en un mes cuya lista todavía no se cargó queda **sin costo**, con el margen inflado o en `null`.
 
 ### Cuando el mes no cierra el día 5
 
 Pasa: la lista nueva llega tarde, o se decide estirar el mes unos días. Esas ventas tienen que seguir costeándose con la lista vieja, así que el cierre se corre — y eso se declara en una tabla, no se parchea a mano:
 
 ```python
-# modelo.py
+# calendario.py
 CIERRES_EXCEPCION = {
     "2026-08": date(2026, 9, 6),   # agosto cerró el 06/09, no el 05/09
 }
@@ -482,18 +494,35 @@ CIERRES_EXCEPCION = {
 
 El valor es el **último día que pertenece a ese mes comercial, inclusive**. Sirve para los dos lados: un mes que se estira se queda con días del siguiente, y uno que se acorta se los cede.
 
+De ahí sale también **desde qué día rige la lista de costos de cada mes**: `inicio_del_mes_comercial("2026-09")` da el 07/09 justamente porque agosto se estiró hasta el 6. Está definida en términos de `mes_comercial` —busca el primer día que cae en ese mes— para que no puedan decir cosas distintas.
+
 **Hay que tocar los dos repos.** El tablero tiene la misma tabla en `lib/constantes.ts` (`CIERRES_MES_COMERCIAL`), porque de ahí sale el rango del filtro *Mes comercial* de la pantalla. Si dicen cosas distintas, el filtro muestra un rango que no coincide con cómo están etiquetados los datos.
 
 **Cuándo se aplica.** `modelo.py` reconstruye los últimos 7 días en cada corrida, así que una excepción cargada dentro de esa ventana se aplica sola en la corrida siguiente, sin hacer nada. Si el día que cambia de mes quedó más atrás, hay que reprocesar a mano: `python modelo.py --dias N` con los días que haga falta, o `--todo` si es más simple.
 
-`probar_mes_comercial.py` cubre la regla y las dos direcciones de la excepción, cambios de año incluidos.
+`probar_mes_comercial.py` cubre la regla, las dos direcciones de la excepción y el arranque de cada mes, cambios de año incluidos. `probar_costos_vigencia.py` cubre desde qué día rige cada archivo, qué tramo le toca a una venta y desde cuándo hay que recalcular `gold`.
 
 ---
 
 ## El Excel de costos
 
-`costos_mensuales/AAAA-MM.xlsx`, uno por mes comercial. **El nombre del archivo
-es el mes**, no hay ninguna columna de fecha adentro.
+`costos_mensuales/`. **El nombre del archivo es la fecha**, no hay ninguna
+columna de fecha adentro:
+
+| Archivo | Desde cuándo rige |
+|---|---|
+| `2026-09.xlsx` | desde que **arranca** el mes comercial 2026-09: el 07/09, porque agosto se estiró |
+| `2026-09-18.xlsx` | desde el **18/09**. Del 7 al 17 sigue rigiendo la anterior |
+
+Los dos conviven. Cada uno es el catálogo **completo** —así lo exporta Sigma— y
+de cada uno se toma lo que rige desde su fecha.
+
+**Para qué sirve el segundo.** Pasa seguido que un proveedor manda lista nueva a
+mitad de mes. Antes había que elegir entre dejar el costo viejo hasta el 5 o
+pisarlo y recostear ventas que ya se habían hecho al precio anterior: ninguna de
+las dos era cierta. Y sirve igual para **corregir**: si un costo entró mal, se
+vuelve a cargar el archivo de esa vigencia y `modelo.py` recalcula solo los días
+que dependían de ella.
 
 `costos.py` necesita dos pestañas y cuatro columnas:
 
@@ -507,9 +536,9 @@ título no lo rompe. Renombrar o borrar una de esas cuatro columnas sí: corta c
 `No se encontraron las columnas ...`. Si termina sin error, leyó lo que
 corresponde.
 
-### El archivo se compara contra el mes anterior antes de cargarse
+### El archivo se compara contra el anterior antes de cargarse
 
-`costos.py` no puede saber cuánto vale un artículo, pero sí puede saber que **un costo no se multiplica por cien de un mes al otro**. Antes de escribir nada compara los costos nuevos con los del mes anterior, y si **más del 20 % saltó 50 veces o más**, corta sin cargar: la base queda con los costos de antes, que son viejos pero no absurdos.
+`costos.py` no puede saber cuánto vale un artículo, pero sí puede saber que **un costo no se multiplica por cien de un mes al otro**. Antes de escribir nada compara los costos nuevos con los del **tramo anterior** —el último del mes pasado, o la lista que este archivo está reemplazando— y si **más del 20 % saltó 50 veces o más**, corta sin cargar: la base queda con los costos de antes, que son viejos pero no absurdos.
 
 Pasó el 07/09/2026. El Excel de septiembre vino con la **coma decimal borrada** en el 63 % de los artículos —`10.979,019272` cargado como `1.097.901.927`, los mismos dígitos sin la coma— y el margen del día quedó en **−$ 42.421 millones**. El factor no era el mismo para todos (×1.000, ×10.000, ×100.000) porque depende de cuántos decimales tenía cada precio, así que ni siquiera se veía como «está todo multiplicado por mil».
 

@@ -189,6 +189,11 @@ PASOS = [
     # compara una huella de los archivos y no hace nada si no se movio ninguno.
     # Se lo llama en cada corrida a proposito -- el que decide es el script, asi
     # que un Excel corregido entra en la corrida siguiente sin acordarse de nada.
+    #
+    # VA ANTES QUE modelo.py Y ESO IMPORTA. Si algun costo quedo distinto,
+    # costos.py deja anotada la vigencia mas vieja que toco y modelo.py estira
+    # su ventana hasta ahi. Corriendo en este orden, un costo corregido se
+    # recalcula en la misma corrida.
     # Tampoco critico, por lo mismo: si falla, costos_historicos conserva la
     # ultima carga y los margenes se calculan con los costos de antes. Viejo,
     # no roto.
