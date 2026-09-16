@@ -112,24 +112,47 @@ corrió a las 15 hoy vuelve a las 15 — plena tarde, con gente mirando el table
 es cuando se prende la máquina a la mañana. Y si estuvo apagada tres días, corre
 en la primera que haya: no espera un horario fijo que ya pasó.
 
-### De dónde salen esas frecuencias
+### Cuánto tarda, hoy
 
-Del log de 24 corridas reales, midiendo cuánto tarda cada paso:
+**La corrida entera: 2 min 13 s de mediana.** Medido sobre las 19 corridas del
+16/09/2026 — de 1 min 44 s la más rápida a 4 min 39 s la más lenta, que es la
+única del día que arrastra los pasos de *1 vez por día*.
 
-| Paso | Mediana |
+De esos, ~25 s son de GitHub Actions antes de que el pipeline arranque
+(checkout, instalar dependencias, las tres pruebas). El orquestador propiamente
+dicho tarda **1,1 min** en una corrida normal y **4,2 min** en la nocturna.
+
+Paso por paso, de las corridas 418 (11/09) y 506 (16/09, la nocturna):
+
+| Paso | Tarda |
 |---|---|
-| `mercadolibre.py --catalogo` | ~7 min |
-| `digip_preparaciones.py` | 9,8 min |
-| `sigma.py` (las dos juntas) | 6,9 min |
-| `modelo.py` | 5,9 min |
-| `costos.py` | 1,4 min |
-| el resto | menos de 30 s |
+| **`mercadolibre.py --catalogo`** | **2 min 22 s** ← el único que pesa |
+| `costos.py` (sólo cuando recarga) | ~50 s |
+| `mercadolibre.py --ventas` | 30 s |
+| `digip_preparaciones.py` | 10 s |
+| `digip.py` | 9 s |
+| `ml_pulso.py` | 8 s |
+| `modelo.py` | 5 s |
+| `sigma.py --ventas` / `--compras` / `sell_in.py` | 4 s cada uno |
+| `ml_envios.py`, `digip_pedidos.py`, `clasificar_clientes.py`, `foto_cuentas.py` | 1 s o menos |
 
-`mercadolibre.py --catalogo` no estaba en esa medición porque **nunca había
-llegado a correr**: se midió el 19/08/2026, la primera vez. Son ~4.300 llamadas
-a la API y tardaba **83 minutos**, de los cuales 72 eran el script durmiendo en
-la `PAUSA` de 1 segundo. Bajarla a 0,3 lo dejó en 33 min; **mandar las llamadas
-en paralelo lo dejó en ~2**.
+**Todo cambió respecto de la medición de agosto**, que es la que estaba acá
+antes y decía `modelo.py 5,9 min` y `digip_preparaciones.py 9,8 min`. Hoy la
+corrida COMPLETA tarda menos que lo que esa tabla le asignaba a un solo paso.
+Los dos motivos son los arreglos que se hicieron en el medio: `modelo.py` dejó
+de traerse los cuatro meses enteros de bronze para tirar el 94 % en Python, y el
+catálogo de ML pasó a pedir en paralelo.
+
+Queda una moraleja para la próxima vez que haya que decidir una frecuencia:
+**el presupuesto es de 50 minutos y se están usando 2,5.** Un paso nuevo que
+tarde segundos no necesita `cada_horas` — por eso `foto_cuentas.py` corre en
+todas.
+
+Esos 2 min 22 s del catálogo son el final de una historia. La primera vez que
+llegó a correr —el 19/08/2026— tardó **83 minutos**, de los cuales 72 eran el
+script durmiendo en la `PAUSA` de 1 segundo entre ~4.300 llamadas a la API.
+Bajarla a 0,3 lo dejó en 33 min; **mandar las llamadas en paralelo lo dejó donde
+está hoy**.
 
 ### Por qué el stock Full va en paralelo
 
