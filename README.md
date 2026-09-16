@@ -65,8 +65,9 @@ esperaba media hora por datos que no usa.
 | 12 | `digip_preparaciones.py` | siempre | `bronze.digip_preparaciones` | no |
 | 13 | `prorratear_flete.py` | 12 h | `gold.fact_ventas_flete` | no |
 | 14 | `clasificar_clientes.py` | siempre | `gold.clientes_clasificados` | no |
-| 15 | `mercadolibre.py --catalogo` | **1/día** | `bronze.ml_publicaciones`, `ml_stock_full`, `ml_stock_full_historico` | no |
-| 16 | `sell_in.py` | **1/día** | `bronze.sell_in` | no |
+| 15 | `foto_cuentas.py` | siempre | `bronze.cuentas_corrientes_historial_diario`, `_historial_scoring` | no |
+| 16 | `mercadolibre.py --catalogo` | **1/día** | `bronze.ml_publicaciones`, `ml_stock_full`, `ml_stock_full_historico` | no |
+| 17 | `sell_in.py` | **1/día** | `bronze.sell_in` | no |
 
 #### Aparte: `Antiguedad Full` (workflow propio)
 
@@ -510,6 +511,57 @@ De ahí sale también **desde qué día rige la lista de costos de cada mes**: `
 **Cuándo se aplica.** `modelo.py` reconstruye los últimos 7 días en cada corrida, así que una excepción cargada dentro de esa ventana se aplica sola en la corrida siguiente, sin hacer nada. Si el día que cambia de mes quedó más atrás, hay que reprocesar a mano: `python modelo.py --dias N` con los días que haga falta, o `--todo` si es más simple.
 
 `probar_mes_comercial.py` cubre la regla, las dos direcciones de la excepción y el arranque de cada mes, cambios de año incluidos. `probar_costos_vigencia.py` cubre desde qué día rige cada archivo, qué tramo le toca a una venta y desde cuándo hay que recalcular `gold`.
+
+---
+
+## Cuentas corrientes: una tabla que se pisa no tiene historia
+
+Son cinco tablas en `bronze` y **no son lo mismo**:
+
+| Tabla | Qué es | Quién la escribe |
+|---|---|---|
+| `cuentas_corrientes_scoring` | cómo está cada cliente **hoy** | **a mano**, se pisa entera en cada carga |
+| `cuentas_corrientes_aging` | un renglón por comprobante impago | **a mano**, ídem |
+| `cuentas_corrientes_cancelaciones` | quién salió de mora | **a mano**, ídem |
+| `cuentas_corrientes_historial_diario` | una foto por cliente y por **día** | `foto_cuentas.py` |
+| `cuentas_corrientes_historial_scoring` | una foto por cliente y por **mes** | `foto_cuentas.py` |
+
+Las tres primeras se suben a mano y se pisan enteras: dicen cómo están las
+cosas hoy y no guardan nada de ayer. El gráfico *Evolución del saldo vencido*
+del tablero lee la **mensual**, así que si nadie saca la foto, ese mes no
+existe — y no se puede recuperar después, porque el dato con el que se hubiera
+armado ya fue pisado.
+
+Pasó: las dos de historial se cargaron una sola vez el 26/08/2026 y nadie las
+volvió a tocar. El gráfico mostraba julio y agosto, y septiembre no aparecía.
+No fallaba nada; la foto no existía.
+
+### Cómo se fecha la foto
+
+**Con el `fecha_carga` de `scoring`, no con hoy.** La columna tiene
+`default now()`, así que cada subida manual se estampa sola, y esa es la única
+señal de cuándo son esos números. Con "hoy" en su lugar, una tabla que lleva dos
+semanas sin actualizarse quedaría fotografiada como si fuera de hoy.
+
+De ahí salen dos propiedades que hacen seguro correrlo en cada corrida:
+
+- correrlo diez veces el mismo día escribe **diez veces la misma fila**;
+- si nadie subió nada nuevo, **no aparece ninguna foto nueva**.
+
+### La mensual sale de la diaria
+
+Es la foto **más nueva de cada cliente dentro del mes**, que es el criterio con
+el que estaban armados julio y agosto (129 de 145 clientes con fecha 14/07, 122
+de 146 con fecha 26/08; el resto son los que dejaron de aparecer antes de fin de
+mes y se quedan con su última).
+
+**Sólo se rearma el mes de la foto.** Los meses viejos no se recalculan: la
+tabla diaria arranca el 10/08, así que rearmar julio desde ahí lo borraría.
+
+```bash
+python foto_cuentas.py          # saca la foto
+python foto_cuentas.py --ver    # dice qué haría, sin guardar
+```
 
 ---
 
