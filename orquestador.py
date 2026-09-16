@@ -321,6 +321,21 @@ PASOS = [
     {"comando": "clasificar_clientes.py",      "intentos": 2, "espera": 30,
      "cada_horas": None, "critico": False, "escribe": "gold.clientes_clasificados", "techo": 10 * 60},
 
+    # LA FOTO DE CUENTAS CORRIENTES, y va en CADA corrida a proposito.
+    #
+    # bronze.cuentas_corrientes_scoring se pisa entera cada vez que alguien la
+    # sube: dice como esta cada cliente HOY y no guarda nada de ayer. El que
+    # guarda la historia es este paso, y lo que no fotografio antes de que la
+    # pisen no vuelve a existir.
+    #
+    # Es barato --dos consultas sobre ~114 filas-- y la foto se fecha con el
+    # fecha_carga de scoring, asi que correrlo cada dos horas reescribe la misma
+    # fila en vez de inventar dias. Por eso no tiene "cada_horas": no hay nada
+    # que ahorrar y si hay algo que perder.
+    {"comando": "foto_cuentas.py",             "intentos": 2, "espera": 30,
+     "cada_horas": None, "critico": False,
+     "escribe": "cuentas_corrientes_historial_diario + _scoring", "techo": 5 * 60},
+
     # Ya NO es el paso lento: las ~4.300 llamadas van en paralelo y tarda un par
     # de minutos, no 33. Se deja igual al final y una vez por dia porque sigue
     # siendo el mas pesado en llamadas a la API y nadie lo espera.
