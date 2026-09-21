@@ -1,4 +1,4 @@
-"""Rellena un tramo de bronze.ml_ventas que quedo sin cargar.
+"""Rellena los tramos de bronze.ml_ventas que hayan quedado sin cargar.
 
 ============================================================================
  PARA QUE EXISTE: EL AGUJERO DEL 06/08/2026
@@ -49,7 +49,11 @@ la ventana antes de insertar, que es lo correcto para la corrida de todos los
 dias --una orden cancelada en el origen tiene que desaparecer-- y es
 exactamente lo que no se quiere para una carga hacia atras hecha a mano.
 
+    # tapar el hueco conocido
     python rellenar_ventas_ml.py --desde 2026-08-06 --hasta 2026-08-06
+
+    # revisar TODA la historia, por las dudas
+    python rellenar_ventas_ml.py --desde 2026-05-06 --hasta 2026-09-21
 
 Despues hay que reconstruir gold para esas fechas, que es lo que el tablero
 lee de verdad:
@@ -58,31 +62,74 @@ lee de verdad:
 """
 
 import argparse
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 
 import mercadolibre as ml
 
 
-def _pedir_ordenes(access_token, desde, hasta):
-    """Todas las ordenes creadas entre `desde` y `hasta` (fechas argentinas).
+# EL TOPE DE LA API, Y POR QUE EL RANGO SE PARTE EN TRAMOS
+#
+# `/orders/search` se pagina con offset y NO DEVUELVE NADA PASADO EL 10.000.
+# Un rango que tenga mas ordenes que eso no da error: simplemente se corta, y
+# el resto no existe para quien pregunta.
+#
+# Eso importa justo cuando mas se usa este script. Toda la historia --del
+# 06/05 a hoy-- son ~56.000 ordenes: pedidas de una, la API contestaria las
+# primeras 10.000 y el relleno diria que termino bien habiendo mirado menos de
+# un quinto. Partido en tramos, cada pedido entra holgado bajo el tope.
+#
+# 15 dias son ~6.000 ordenes al ritmo de hoy (~400 por dia). Si algun dia el
+# volumen sube, `_pedir_tramo` parte el tramo al medio solo: el numero de aca
+# es el punto de partida, no un limite que haya que mantener a mano.
+TOPE_OFFSET = 10000
 
-    El rango se arma con offset -03:00 y no con -00:00 como la ventana movil.
-    La ventana pide de mas a proposito --un dia de colchon no le molesta--
-    pero aca los bordes se escriben a mano para tapar un hueco conocido, y
-    conviene que "06/08" signifique el 06/08 de aca.
+# A partir de cuantas ordenes se parte el tramo. No es 10.000 a proposito: las
+# ordenes siguen entrando mientras se pagina, asi que un tramo medido en 9.900
+# puede ser de 10.050 para cuando se lo termina de leer.
+TOPE_SEGURO = 8000
+
+DIAS_POR_TRAMO = 15
+
+
+def _rango_iso(desde, hasta):
+    """Los bordes del rango como los quiere la API, en hora argentina.
+
+    Con offset -03:00 y no -00:00 como la ventana movil. La ventana pide de
+    mas a proposito --un dia de colchon no le molesta-- pero aca los bordes
+    se escriben a mano para tapar un hueco conocido, y conviene que "06/08"
+    signifique el 06/08 de aca.
     """
-    desde_iso = f"{desde.isoformat()}T00:00:00.000-03:00"
-    hasta_iso = f"{hasta.isoformat()}T23:59:59.000-03:00"
-    print(f"  Pidiendo a ML: {desde_iso}  ->  {hasta_iso}")
+    return (f"{desde.isoformat()}T00:00:00.000-03:00",
+            f"{hasta.isoformat()}T23:59:59.000-03:00")
 
+
+def _cuantas_hay(access_token, desde, hasta):
+    """Cuantas ordenes dice la API que hay en el rango, sin bajarlas."""
+    desde_iso, hasta_iso = _rango_iso(desde, hasta)
+    datos = ml.llamar_ml(
+        "/orders/search",
+        access_token,
+        params={
+            "seller": ml.USER_ID,
+            "order.date_created.from": desde_iso,
+            "order.date_created.to": hasta_iso,
+            "offset": 0,
+            "limit": 1,
+        },
+    )
+    return datos.get("paging", {}).get("total", 0)
+
+
+def _paginar(access_token, desde, hasta, esperadas):
+    """Baja las `esperadas` ordenes del rango, de a 50."""
+    desde_iso, hasta_iso = _rango_iso(desde, hasta)
     ordenes = []
-    esperadas = None
     offset = 0
     limit = 50
 
-    while True:
+    while offset < esperadas:
         datos = ml.llamar_ml(
             "/orders/search",
             access_token,
@@ -94,11 +141,6 @@ def _pedir_ordenes(access_token, desde, hasta):
                 "limit": limit,
             },
         )
-        total = datos.get("paging", {}).get("total", 0)
-        if esperadas is None:
-            esperadas = total
-            print(f"  ML dice que hay {esperadas} ordenes en el rango")
-
         resultados = datos.get("results", [])
         if not resultados:
             # UNA PAGINA VACIA ANTES DE TIEMPO NO ES EL FINAL.
@@ -107,31 +149,45 @@ def _pedir_ordenes(access_token, desde, hasta):
             # deja el tramo a medio bajar. En la ventana movil eso se arregla
             # solo a la hora siguiente; aca no hay hora siguiente, asi que se
             # corta con error y se vuelve a correr.
-            if offset < esperadas:
-                raise RuntimeError(
-                    f"ML devolvio una pagina vacia en el offset {offset} de "
-                    f"{esperadas}. El tramo quedaria incompleto: no se guarda nada."
-                )
-            break
-
+            raise RuntimeError(
+                f"ML devolvio una pagina vacia en el offset {offset} de "
+                f"{esperadas} ({desde} a {hasta}). El tramo quedaria "
+                f"incompleto: no se guarda nada."
+            )
         ordenes.extend(resultados)
         offset += limit
-        if offset >= esperadas or offset >= 10000:
-            break
 
-    return ordenes, esperadas
+    return ordenes
 
 
-def rellenar(desde, hasta):
-    print(f"\n=== RELLENO DE VENTAS ML: {desde} a {hasta} ===")
+def _pedir_tramo(access_token, desde, hasta):
+    """Las ordenes del tramo, partiendolo al medio si no entra bajo el tope."""
+    esperadas = _cuantas_hay(access_token, desde, hasta)
 
-    access_token = ml.token_ml()
-    ordenes, esperadas = _pedir_ordenes(access_token, desde, hasta)
-    print(f"  {len(ordenes)} ordenes bajadas")
+    if esperadas > TOPE_SEGURO:
+        if desde == hasta:
+            # Un solo dia con mas ordenes que el tope no se puede partir mas
+            # por fecha. No pasa hoy --el dia mas cargado no llega a 600-- y
+            # si algun dia pasa, hay que partir por hora y no adivinarlo aca.
+            raise RuntimeError(
+                f"El {desde} tiene {esperadas} ordenes y no entra bajo el tope "
+                f"de offset {TOPE_OFFSET} de la API. Hay que partir por hora."
+            )
+        medio = desde + (hasta - desde) // 2
+        print(f"  {desde} a {hasta}: {esperadas} ordenes, se parte al medio")
+        return (_pedir_tramo(access_token, desde, medio)
+                + _pedir_tramo(access_token, medio + timedelta(days=1), hasta))
 
+    print(f"  {desde} a {hasta}: {esperadas} ordenes segun ML", end="", flush=True)
+    ordenes = _paginar(access_token, desde, hasta, esperadas)
+    print(f" -> {len(ordenes)} bajadas")
+    return ordenes
+
+
+def _insertar_las_que_falten(engine, ordenes):
+    """Guarda las ordenes que no esten todavia. Devuelve cuantas entraron."""
     if not ordenes:
-        print("  ML no devolvio ninguna orden en ese rango. No hay nada que hacer.")
-        return
+        return 0
 
     df = pd.json_normalize(ordenes)
     # Misma razon que en la ventana movil: la paginacion por offset puede
@@ -140,7 +196,6 @@ def rellenar(desde, hasta):
         df = df.sort_values("last_updated", na_position="first")
     df = df.drop_duplicates(subset=["id"], keep="last")
 
-    engine = ml._crear_engine()
     ids = [int(x) for x in df["id"].tolist()]
     with engine.begin() as con:
         ya_estan = {
@@ -151,20 +206,56 @@ def rellenar(desde, hasta):
         }
 
     faltan = df[~df["id"].astype("int64").isin(ya_estan)]
-    print(f"  Ya estaban en la base: {len(ya_estan)}")
-    print(f"  A insertar (faltaban): {len(faltan)}")
-
     if faltan.empty:
-        print("  No falta ninguna. La tabla ya estaba completa para ese rango.")
-        return
+        return 0
 
     faltan = ml._listas_a_texto(faltan)
     with engine.begin() as con:
         ml._sincronizar_columnas(con, "ml_ventas", faltan)
         faltan.to_sql("ml_ventas", con, schema="bronze",
                       if_exists="append", index=False)
+    return len(faltan)
 
-    print(f"  Insertadas {len(faltan)} ordenes en bronze.ml_ventas")
+
+def _tramos(desde, hasta, dias):
+    """Parte el rango en pedazos de `dias`, con los dos bordes incluidos."""
+    inicio = desde
+    while inicio <= hasta:
+        fin = min(inicio + timedelta(days=dias - 1), hasta)
+        yield inicio, fin
+        inicio = fin + timedelta(days=1)
+
+
+def rellenar(desde, hasta, dias_por_tramo=DIAS_POR_TRAMO):
+    print(f"\n=== RELLENO DE VENTAS ML: {desde} a {hasta} ===")
+
+    access_token = ml.token_ml()
+    engine = ml._crear_engine()
+
+    # SE INSERTA TRAMO POR TRAMO Y NO TODO JUNTO AL FINAL.
+    #
+    # Por memoria --toda la historia son ~130 MB de JSON, y normalizarla de una
+    # sola vez en un DataFrame no hace falta-- y sobre todo porque lo que ya
+    # entro queda entrado: si el tramo 8 se cae, los 7 anteriores estan
+    # guardados y volver a correr el script los saltea solos (ya no faltan).
+    total_bajadas = 0
+    total_insertadas = 0
+
+    for tramo_desde, tramo_hasta in _tramos(desde, hasta, dias_por_tramo):
+        ordenes = _pedir_tramo(access_token, tramo_desde, tramo_hasta)
+        insertadas = _insertar_las_que_falten(engine, ordenes)
+        total_bajadas += len(ordenes)
+        total_insertadas += insertadas
+        if insertadas:
+            print(f"    FALTABAN {insertadas} -> insertadas")
+
+    print(f"\n  Revisadas: {total_bajadas} ordenes")
+    print(f"  Insertadas (faltaban): {total_insertadas}")
+
+    if not total_insertadas:
+        print("  No faltaba ninguna. La tabla ya estaba completa para ese rango.")
+        return
+
     print("\n  FALTA UN PASO: gold todavia no las tiene. Correr")
     print("      python modelo.py --dias N")
     print("  con un N que llegue hasta la fecha mas vieja que se acaba de cargar.")
@@ -185,6 +276,9 @@ def main():
                         help="Primer dia a revisar (YYYY-MM-DD, hora argentina)")
     parser.add_argument("--hasta", type=_fecha, required=True,
                         help="Ultimo dia a revisar, inclusive (YYYY-MM-DD)")
+    parser.add_argument("--dias-por-tramo", type=int, default=DIAS_POR_TRAMO,
+                        help=f"De a cuantos dias se le pide a la API "
+                             f"(por defecto {DIAS_POR_TRAMO})")
     args = parser.parse_args()
 
     if args.hasta < args.desde:
@@ -194,8 +288,10 @@ def main():
                      f"que es el piso historico del tablero")
     if args.hasta > date.today():
         parser.error("--hasta no puede ser futuro")
+    if args.dias_por_tramo < 1:
+        parser.error("--dias-por-tramo tiene que ser al menos 1")
 
-    rellenar(args.desde, args.hasta)
+    rellenar(args.desde, args.hasta, args.dias_por_tramo)
     print("\n=== LISTO ===")
 
 

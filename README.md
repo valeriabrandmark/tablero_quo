@@ -146,6 +146,21 @@ falta sin duplicar ni pisar nada. Se lanza desde Actions →
 `gold` después — sin ese segundo paso las ventas entran a `bronze` y la pantalla
 sigue igual.
 
+**Sirve también para barrer toda la historia de una**, para quedarse tranquilo de
+que no hay otro hueco: del `2026-05-06` a hoy. Son ~56.000 órdenes, unos 15
+minutos de llamadas.
+
+Eso obliga a **partir el rango en tramos**, y no es un detalle de performance.
+`/orders/search` **no devuelve nada pasado el offset 10.000**: no da error, se
+corta. Pedida de una sola vez, toda la historia volvería con las primeras 10.000
+órdenes y el relleno diría que terminó bien habiendo mirado menos de un quinto.
+El script pide de a 15 días (~6.000 órdenes al ritmo de hoy) y **parte el tramo
+al medio solo** si alguno se acerca al tope, así que el número no hay que
+mantenerlo a mano. La ventana móvil de todos los días también falla ahora si
+llegara a pasarse del tope, en vez de guardarse recortada — hoy está en ~3.000,
+lejos, pero el día que el volumen se triplique eso se tiene que leer en un error
+y no descubrirse meses después.
+
 ### Cuánto tarda, hoy
 
 **La corrida entera: 2 min 13 s de mediana.** Medido sobre las 19 corridas del
