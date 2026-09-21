@@ -602,6 +602,7 @@ def extraer_ventas_ml():
     offset = 0
     limit = 50
     ordenes = []
+    esperadas = None
     while True:
         datos = llamar_ml(
             "/orders/search",
@@ -614,13 +615,42 @@ def extraer_ventas_ml():
                 "limit": limit,
             },
         )
+        total = datos.get("paging", {}).get("total", 0)
+        if esperadas is None:
+            esperadas = total
+
         resultados = datos.get("results", [])
         if not resultados:
+            # UNA PAGINA VACIA ANTES DE TIEMPO NO ES EL FINAL DE LA LISTA.
+            #
+            # La API contesta 200 con `results: []` cuando hipa. Cortar ahi y
+            # seguir como si nada es lo peligroso de todo este paso: abajo,
+            # `guardar_ventana_en_bd` BORRA la ventana entera y despues inserta
+            # lo que se junto. Con media ventana en la mano, el borrado se lleva
+            # puestas las ordenes que no se volvieron a bajar, y el paso termina
+            # diciendo OK.
+            #
+            # Casi siempre se arregla solo --a la hora siguiente la ventana
+            # vuelve a cubrir esas fechas y las reinserta--, y por eso no se
+            # nota. Lo que no se arregla nunca es el dia que se cae del borde de
+            # la ventana antes de la proxima corrida buena: ahi queda un hueco
+            # permanente, porque la ventana ya no mira esas fechas. Asi se formo
+            # el del 06/08/2026, que hubo que rellenar a mano con
+            # `rellenar_ventas_ml.py`.
+            #
+            # Explotar es mejor que guardar de menos: el orquestador lo ve, lo
+            # reintenta, y la tabla queda como estaba en vez de perder un dia.
+            if offset < esperadas:
+                raise RuntimeError(
+                    f"ML devolvio una pagina vacia en el offset {offset} de "
+                    f"{esperadas} ordenes. La ventana quedaria incompleta y el "
+                    f"guardado borraria lo que falta: se corta sin escribir."
+                )
             break
+
         ordenes.extend(resultados)
-        total = datos.get("paging", {}).get("total", 0)
         offset += limit
-        if offset >= total or offset >= 10000:
+        if offset >= esperadas or offset >= 10000:
             break
 
     print(f"  {len(ordenes)} ordenes en la ventana")

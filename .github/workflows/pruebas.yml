@@ -83,6 +83,12 @@ jobs:
       - name: Probar el lector de envios a Full
         run: python probar_envios_full.py
 
+      # Bajar de menos es peor que fallar: el guardado BORRA la ventana antes
+      # de insertar, asi que media ventana en la mano se lleva puesto el resto.
+      # El 06/08/2026 eso dejo 622 minutos sin una sola venta de ML.
+      - name: Probar que una pagina vacia de ML corte la bajada
+        run: python probar_pagina_vacia_ml.py
+
       # Que todos los scripts al menos compilen. No prueba que anden, pero un
       # error de sintaxis en un archivo que nadie importa en las pruebas
       # tambien tumba la corrida, y eso se ve gratis.
