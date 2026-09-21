@@ -14,6 +14,12 @@ name: Rellenar ventas de ML
 #  Se puede correr las veces que haga falta: el script NO BORRA NADA, solo
 #  inserta las ordenes que no estan. Repetirlo no duplica ni pisa nada.
 #
+#  SIRVE TAMBIEN PARA BARRER TODA LA HISTORIA de una, para quedarse tranquilo
+#  de que no hay otro hueco: `desde 2026-05-06` hasta hoy. El script parte el
+#  rango en tramos solo, asi que ningun pedido se pasa del tope de offset
+#  10.000 de la API --que no da error, corta y devuelve de menos--. Son unas
+#  56.000 ordenes: contando las pausas entre llamadas, ~15 minutos.
+#
 #  Despues de traer las ordenes reconstruye gold, que es lo que lee el tablero:
 #  sin ese paso las ventas entran a bronze y la pantalla sigue igual.
 # ============================================================================
@@ -40,7 +46,10 @@ concurrency:
 jobs:
   rellenar:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Un dia suelto son dos minutos. El techo esta puesto para el barrido de
+    # toda la historia: ~15 min de llamadas a ML mas la reconstruccion de gold,
+    # que con la ventana estirada a cuatro meses y medio es la parte lenta.
+    timeout-minutes: 120
 
     env:
       TZ: America/Argentina/Buenos_Aires
@@ -77,6 +86,11 @@ jobs:
       # cantidad de dias se calcula contra la fecha mas vieja que se acaba de
       # cargar. El +2 es colchon para el huso: `modelo.py` corta por `fecha`, y
       # una orden de las 21 de aca puede quedar anotada el dia siguiente.
+      #
+      # Corre SIEMPRE, aunque no haya faltado ninguna orden. Saltearlo cuando el
+      # relleno no inserto nada ahorraria unos minutos y agregaria la unica
+      # forma de que esto falle en silencio: que las ventas entren a bronze y
+      # gold no se entere. Reconstruir de mas es idempotente; de menos, no.
       - name: Reconstruir gold desde esa fecha
         run: |
           DIAS=$(( ( $(date -u +%s) - $(date -u -d "${{ inputs.desde }}" +%s) ) / 86400 + 2 ))

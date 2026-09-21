@@ -654,9 +654,25 @@ def extraer_ventas_ml():
             break
 
     print(f"  {len(ordenes)} ordenes en la ventana")
-    if len(ordenes) >= 9999:
-        print("  ATENCION: cerca del limite de offset 10.000. Si esto pasa seguido,")
-        print("  achicar WINDOW_DAYS o volver a partir en tramos.")
+
+    # EL TOPE DE OFFSET TAMPOCO PUEDE PASAR EN SILENCIO.
+    #
+    # `/orders/search` no devuelve nada pasado el offset 10.000: no da error,
+    # se corta. Antes esto era un `print` de advertencia y la corrida seguia
+    # hasta el guardado, que BORRA la ventana antes de insertar. Una ventana
+    # que no entra bajo el tope se guardaria recortada, y el recorte se lleva
+    # puesto lo que la API dejo de contestar.
+    #
+    # Hoy no esta ni cerca --7 dias son ~3.000 ordenes-- y por eso conviene que
+    # falle: el dia que el volumen se triplique hay que achicar WINDOW_DAYS o
+    # partir en tramos, y eso se decide leyendo un error, no descubriendo meses
+    # despues que falta media semana.
+    if esperadas > 10000:
+        raise RuntimeError(
+            f"La ventana tiene {esperadas} ordenes y la API no devuelve nada "
+            f"pasado el offset 10.000: se guardaria recortada. Achicar "
+            f"WINDOW_DAYS (hoy {WINDOW_DAYS}) o partir el pedido en tramos."
+        )
 
     df = pd.json_normalize(ordenes)
     guardar_ventana_en_bd(df, "ml_ventas", "date_created", cutoff)
