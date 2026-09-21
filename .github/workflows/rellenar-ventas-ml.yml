@@ -1,0 +1,84 @@
+name: Rellenar ventas de ML
+
+# ============================================================================
+#  TAPAR UN HUECO DE bronze.ml_ventas, A MANO.
+#
+#  La corrida de todos los dias solo mira los ultimos 7 dias. Eso alcanza para
+#  estar al dia, pero significa que un dia que quedo mal cargado y se cayo del
+#  borde de la ventana no se arregla NUNCA solo: el orquestador ya no vuelve a
+#  preguntar por esas fechas.
+#
+#  Paso una vez, el 06/08/2026, y por eso existe esto. El detalle completo de
+#  como se formo ese hueco esta arriba de todo en `rellenar_ventas_ml.py`.
+#
+#  Se puede correr las veces que haga falta: el script NO BORRA NADA, solo
+#  inserta las ordenes que no estan. Repetirlo no duplica ni pisa nada.
+#
+#  Despues de traer las ordenes reconstruye gold, que es lo que lee el tablero:
+#  sin ese paso las ventas entran a bronze y la pantalla sigue igual.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      desde:
+        description: 'Primer dia a revisar (YYYY-MM-DD)'
+        required: true
+        default: '2026-08-06'
+      hasta:
+        description: 'Ultimo dia a revisar, inclusive (YYYY-MM-DD)'
+        required: true
+        default: '2026-08-06'
+
+# Comparte tabla y API con el orquestador. Sin esto, este relleno puede estar
+# insertando mientras la corrida de las :20 borra su ventana -- que es la forma
+# en que se duplicaron 2.548 ordenes el 21/08.
+concurrency:
+  group: orquestador
+  cancel-in-progress: false
+
+jobs:
+  rellenar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      TZ: America/Argentina/Buenos_Aires
+
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASS: ${{ secrets.DB_PASS }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+
+      ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+      ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+      ML_REDIRECT_URI: ${{ secrets.ML_REDIRECT_URI }}
+      ML_USER_ID: ${{ secrets.ML_USER_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Traer las ventas que falten
+        run: |
+          python rellenar_ventas_ml.py \
+            --desde "${{ inputs.desde }}" \
+            --hasta "${{ inputs.hasta }}"
+
+      # gold se reconstruye por ventana movil hacia atras desde HOY, asi que la
+      # cantidad de dias se calcula contra la fecha mas vieja que se acaba de
+      # cargar. El +2 es colchon para el huso: `modelo.py` corta por `fecha`, y
+      # una orden de las 21 de aca puede quedar anotada el dia siguiente.
+      - name: Reconstruir gold desde esa fecha
+        run: |
+          DIAS=$(( ( $(date -u +%s) - $(date -u -d "${{ inputs.desde }}" +%s) ) / 86400 + 2 ))
+          echo "Reconstruyendo gold.fact_ventas $DIAS dias hacia atras"
+          python modelo.py --dias "$DIAS"

@@ -112,6 +112,40 @@ corrió a las 15 hoy vuelve a las 15 — plena tarde, con gente mirando el table
 es cuando se prende la máquina a la mañana. Y si estuvo apagada tres días, corre
 en la primera que haya: no espera un horario fijo que ya pasó.
 
+#### Aparte: `Rellenar ventas de ML` (workflow propio, a mano)
+
+La ventana móvil mira **los últimos 7 días**. Eso alcanza para estar al día,
+pero significa que un día que quedó mal cargado y ya se cayó del borde **no se
+arregla nunca solo**: el orquestador no vuelve a preguntar por esas fechas.
+
+Pasó una vez. Entre las **10:41 y las 21:03 del 06/08/2026** no hay ni una venta
+de Mercado Libre en `bronze.ml_ventas`: 622 minutos, ~250 órdenes y ~$5 M. Es el
+único hueco así en toda la tabla — el segundo más grande son 285 minutos y cae
+de madrugada, como todos los demás.
+
+Los dos bordes los pusieron dos extractores distintos:
+
+- **10:41** lo puso el viejo. Hasta el 14/08 las ventas se bajaban por quincenas
+  y cada tramo se cacheaba en `cache_ml_ventas/{desde}_{hasta}.json`. El último
+  tramo era «04/08 a HOY», así que ese día el archivo se llamó
+  `2026-08-04_2026-08-06.json`. La primera corrida lo escribió con las ventas
+  hasta las 10:41; **las siguientes del mismo día encontraron ese nombre y
+  leyeron el caché en vez de volver a pedirle a la API**. El archivo sigue en el
+  repo y su última orden es `2026-08-06T09:41:51.000-04:00`, justo la última que
+  hay en la base antes del hueco.
+- **21:03** lo puso el nuevo. La ventana móvil llegó el 14/08 con 7 días, así que
+  su primer piso fue el 07/08 — el 06/08 ya había quedado afuera. Y el piso se
+  resuelve **en UTC**: 07/08 00:00 UTC son las 21:00 del 06/08 de acá.
+
+La franja del medio no le tocó a ninguno de los dos.
+
+`rellenar_ventas_ml.py` tapa un hueco así. **No borra nada**: pide el rango y
+guarda sólo las órdenes que no están, así que se puede correr las veces que haga
+falta sin duplicar ni pisar nada. Se lanza desde Actions →
+*Rellenar ventas de ML*, con las fechas como parámetro, y el workflow reconstruye
+`gold` después — sin ese segundo paso las ventas entran a `bronze` y la pantalla
+sigue igual.
+
 ### Cuánto tarda, hoy
 
 **La corrida entera: 2 min 13 s de mediana.** Medido sobre las 19 corridas del
