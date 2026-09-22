@@ -423,12 +423,29 @@ momento:**
 
 - El **disparador**, cada hora. Es la red: si todo lo demás falla, la planilla
   llega igual sin que nadie haga nada.
+- **El menú de la planilla**, para no esperar a la hora. Arriba, al lado de
+  *Ayuda*, aparece **Tablero → Mandar el sell in ahora**. Lo usa quien acaba de
+  editar un descuento, que es justo quien sabe que cambió algo.
 - **A pedido**: el orquestador le pide la foto con un `POST` a `doPost` antes de
   parsear, en cada corrida. Así la corrida de las 10:20 trae la planilla como
   está a las 10:20, y el botón *"Actualizar ahora"* del panel de Compras la trae
   en el momento.
 
-Esa segunda vía necesita dos secretos en el repo, y **los dos son opcionales**:
+> **El menú no necesita nada.** `onOpen` es un *disparador simple*: no se
+> implementa, no se autoriza, no depende de ningún permiso de Workspace. Por eso
+> es el camino que quedó cuando Google bloqueó el deploy de la aplicación web.
+>
+> Un disparador simple no puede llamar servicios que pidan autorización —no
+> podría mandar la planilla por su cuenta— pero **sí puede dibujar un menú**, y
+> el ítem del menú corre como una función normal cuando alguien lo clickea. Por
+> eso `onOpen` sólo dibuja y el trabajo lo hace `mandarAhora`.
+>
+> Y el aviso dice que **mandar la foto no actualiza el tablero**: queda
+> esperando a que el orquestador pase (hasta 20 min) o a que alguien apriete
+> *Actualizar ahora* en Compras. Sin esa aclaración, quien lo usa mira el
+> tablero a los dos segundos, ve el número viejo y concluye que no anduvo.
+
+Esa vía necesita dos secretos en el repo, y **los dos son opcionales**:
 sin ellos el paso usa la última foto que haya, que es como funcionaba antes.
 `SELL_IN_WEBAPP_URL` sale de implementar el Apps Script como aplicación web
 (Implementar → Nueva implementación → Aplicación web, *ejecutar como* vos,
