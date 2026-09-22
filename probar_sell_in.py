@@ -132,5 +132,32 @@ revisar("hoja vacia no rompe", filas_de_la_planilla([]), ([], {
     "columnas_oferta": 0, "ignoradas": [], "sin_sku": 0, "fuera_de_rango": 0}))
 
 
+# --- La decision de --si-cambio ---------------------------------------------
+#
+# POR QUE IMPORTA. El paso estaba como `primera_del_dia` (~00:20) y el Apps
+# Script manda la foto a las 06:00: corria SEIS HORAS ANTES de que llegara la
+# del dia, asi que siempre procesaba la de ayer. Un descuento editado el lunes
+# entraba al tablero el miercoles.
+#
+# Ahora corre en cada corrida y decide aca. Lo que se fija es que ANTE LA DUDA
+# SE PROCESE: releer la misma planilla es barato e idempotente, y saltear una
+# nueva deja las ordenes de compra saliendo con el descuento viejo.
+
+import datetime as _dt
+
+from sell_in import toca_procesar
+
+FOTO = _dt.datetime(2026, 9, 22, 6, 49, tzinfo=_dt.timezone.utc)
+
+revisar("sin ninguna foto todavia: no hay nada que hacer",
+        toca_procesar(None, None)[0], False)
+revisar("la misma foto que ya se proceso: no se repite",
+        toca_procesar(FOTO, FOTO.isoformat())[0], False)
+revisar("foto nueva: se procesa", toca_procesar(FOTO, None)[0], True)
+revisar("foto mas nueva que la ultima procesada: se procesa",
+        toca_procesar(FOTO, "2026-09-21T06:49:00+00:00")[0], True)
+revisar("y el motivo dice cual es la foto",
+        "22/09 06:49" in toca_procesar(FOTO, None)[1], True)
+
 print("\nTODO OK" if not FALLOS else f"\n{len(FALLOS)} FALLARON: {', '.join(FALLOS)}")
 raise SystemExit(1 if FALLOS else 0)
