@@ -8,6 +8,11 @@ from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from conexion import crear_engine
+from guardado import (
+    guardar_ventana,
+    listas_a_texto as _listas_a_texto,
+    sincronizar_columnas as _sincronizar_columnas,
+)
 from contextlib import nullcontext
 from sqlalchemy.engine import Connection
 
@@ -95,65 +100,6 @@ def _crear_engine():
     )
 
 
-def _listas_a_texto(df):
-    """Convierte a texto cualquier columna que contenga listas o diccionarios (para poder guardarla)."""
-    import json as _json
-    for col in df.columns:
-        if df[col].apply(lambda x: isinstance(x, (list, dict))).any():
-            df[col] = df[col].apply(
-                lambda x: _json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else x
-            )
-    return df
-
-
-def _sincronizar_columnas(destino, tabla, df):
-    """Agrega a la tabla las columnas que el origen empezo a mandar y no estan.
-
-    POR QUE EXISTE. El 31/08/2026 SIGMA sumo el campo `operacionId` a
-    ExportArticulosVendidos. `to_sql(if_exists="append")` no lo tolera: falla
-    con "Unconsumed column names" y se cae la extraccion ENTERA. Las ventas
-    mayoristas dejaron de actualizarse por una columna nueva que ni siquiera
-    usamos.
-
-    BRONZE ES LA ZONA DE ATERRIZAJE: su trabajo es aguantar lo que el origen
-    mande, no discutirlo. Un campo nuevo tiene que entrar solo; el tipado fino y
-    las reglas de negocio son tarea de gold.
-
-    SE AGREGA Y NO SE DESCARTA. Tirar las columnas desconocidas tambien evitaria
-    el error, pero en silencio: el dia que el origen mande algo que SI importa,
-    nadie se enteraria hasta necesitarlo. Asi queda guardado y avisado en el log.
-
-    Todo como `text`, que acepta cualquier cosa que venga. Convertirlo despues es
-    barato; perder el dato no.
-
-    `destino` PUEDE SER UN ENGINE O UNA CONEXION YA ABIERTA. Cuando el llamador
-    esta dentro de una transaccion hay que pasarle ESA conexion: abrir otra por
-    dentro pediria un ACCESS EXCLUSIVE sobre una tabla que la de afuera ya tiene
-    tomada, y las dos se quedarian esperando para siempre.
-    """
-    ctx = nullcontext(destino) if isinstance(destino, Connection) else destino.begin()
-    faltantes = []
-    with ctx as con:
-        existentes = {
-            f[0] for f in con.exec_driver_sql(
-                """SELECT column_name FROM information_schema.columns
-                   WHERE table_schema = 'bronze' AND table_name = %(t)s""",
-                {"t": tabla},
-            ).fetchall()
-        }
-        if not existentes:
-            return          # la tabla no existe todavia: la crea el to_sql
-        for col in df.columns:
-            if col not in existentes:
-                faltantes.append(col)
-                con.exec_driver_sql(
-                    f'ALTER TABLE bronze."{tabla}" ADD COLUMN IF NOT EXISTS "{col}" text'
-                )
-    if faltantes:
-        print(f"  COLUMNAS NUEVAS en bronze.{tabla}: {', '.join(faltantes)}")
-        print("  (agregadas como text: el origen cambio y quedo registrado)")
-
-
 def guardar_en_bd(df, tabla, modo="replace"):
     """Para CATALOGOS (articulos, clientes, ofertas, etc): reemplaza la tabla entera.
        Tiene sentido acá porque representan el estado ACTUAL, no un historial que crece."""
@@ -198,34 +144,6 @@ def guardar_en_bd(df, tabla, modo="replace"):
     _sincronizar_columnas(engine, tabla, df)
     df.to_sql(tabla, engine, schema="bronze", if_exists=modo, index=False)
     print(f"  Guardado ({modo}): bronze.{tabla} ({len(df)} filas)")
-
-
-def guardar_ventana_en_bd(df, tabla, col_fecha, cutoff):
-    """Para datos TRANSACCIONALES que crecen con el tiempo (ventas): reemplaza SOLO
-       las filas dentro de la ventana movil (fecha >= cutoff). Todo lo anterior a
-       cutoff en la tabla queda intacto -- no se toca ni se vuelve a pedir a la API."""
-    engine = _crear_engine()
-    with engine.begin() as con:
-        con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
-
-    try:
-        with engine.begin() as con:
-            resultado = con.exec_driver_sql(
-                f'DELETE FROM bronze."{tabla}" WHERE "{col_fecha}"::date >= %(cutoff)s',
-                {"cutoff": cutoff}
-            )
-            print(f"  Filas borradas dentro de la ventana (se van a reemplazar): {resultado.rowcount}")
-    except Exception:
-        print(f"  (tabla bronze.{tabla} no existe todavia, se va a crear)")
-
-    if df.empty:
-        print(f"  (sin datos nuevos para {tabla} en esta ventana)")
-        return
-
-    df = _listas_a_texto(df)
-    _sincronizar_columnas(engine, tabla, df)
-    df.to_sql(tabla, engine, schema="bronze", if_exists="append", index=False)
-    print(f"  Guardado (ventana): bronze.{tabla} ({len(df)} filas)")
 
 
 # ============================================================
@@ -293,7 +211,10 @@ def extraer_ventas():
         print("  Si esto pasa seguido, achicar WINDOW_DAYS o volver a partir por quincenas.")
 
     df = pd.json_normalize(datos)
-    guardar_ventana_en_bd(df, "sigma_ventas", "fecha", cutoff)
+    # La clave de una linea de venta es (comprobante, renglon): un mismo `id`
+    # tiene un `item` por cada articulo facturado.
+    guardar_ventana(df, "sigma_ventas", "fecha", cutoff, clave=("id", "item"),
+                    engine=_crear_engine())
 
 
 def _ultima_compra_cargada():
@@ -353,7 +274,9 @@ def extraer_compras():
         print(f"  Con detalle de renglones: {con_items} de {len(datos)}")
 
     df = pd.json_normalize(datos)
-    guardar_ventana_en_bd(df, "sigma_compras", "fechaFactura", cutoff)
+    # Una fila por factura de compra, asi que alcanza con el `id`.
+    guardar_ventana(df, "sigma_compras", "fechaFactura", cutoff, clave=("id",),
+                    engine=_crear_engine())
 
 
 # ============================================================
