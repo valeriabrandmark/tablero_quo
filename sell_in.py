@@ -548,7 +548,24 @@ def leer_hoja():
 def guardar(filas):
     engine = crear_engine()
     df = pd.DataFrame(filas)
-    df["actualizado"] = datetime.now()
+
+    # `actualizado` NO SE ESCRIBE DESDE ACA: lo pone el `default now()` de la
+    # tabla, o sea el reloj del servidor.
+    #
+    # Antes era `df["actualizado"] = datetime.now()`, y eso guardaba la hora
+    # TRES HORAS ATRASADA. `datetime.now()` devuelve la hora local del runner
+    # --que corre con TZ=America/Argentina/Buenos_Aires-- pero sin huso pegado;
+    # la columna es `timestamptz`, asi que Postgres interpretaba esos numeros
+    # en la zona de la SESION, que es UTC. Las 12:02 de aca entraban como las
+    # 12:02 UTC, que son las 09:02 de aca.
+    #
+    # Medido el 22/09: la misma corrida dejo 12:02:03 en esta columna y
+    # 15:02:07 en `ops.estado.actualizado`, que la escribe `now()` del
+    # servidor. Exactamente 3,00 horas.
+    #
+    # SE SACA EN VEZ DE CORREGIRSE. Poner `datetime.now(timezone.utc)` tambien
+    # andaria, pero deja el reloj de Python en el medio de algo que la base ya
+    # sabe hacer sola. Menos piezas, menos husos que razonar.
     with engine.begin() as con:
         con.exec_driver_sql(DDL)
         # Se reemplaza entero y en UNA transaccion: la planilla es la verdad, y

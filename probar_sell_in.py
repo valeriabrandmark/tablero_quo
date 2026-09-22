@@ -13,6 +13,8 @@ Ya nos paso una vez con esta misma planilla: leerla por posicion desalineo
 
 from sell_in import filas_de_la_planilla, interpretar_encabezado, limpiar_pct
 
+import pandas as pd
+
 FALLOS = []
 
 
@@ -169,6 +171,57 @@ revisar("sin huella previa: se carga igual",
 # ella es el parser, que ya avisa si no encuentra la columna SKU.
 revisar("la hoja vacia tiene su propia huella",
         huella_de([]) != huella_de(HOJA_A), True)
+
+# --- El reloj de la marca de tiempo lo pone la base, no Python --------------
+#
+# POR QUE IMPORTA. `df["actualizado"] = datetime.now()` guardaba la hora TRES
+# HORAS ATRASADA: `datetime.now()` da la hora local del runner sin huso pegado,
+# y la columna es `timestamptz`, asi que Postgres interpretaba esos numeros en
+# la zona de la SESION (UTC). Medido el 22/09, la misma corrida dejo 12:02:03
+# en esa columna y 15:02:07 en ops.estado, que la escribe now() del servidor.
+#
+# Lo que se fija es que la columna NO VIAJE en el DataFrame: si viaja, alguien
+# volvio a poner un reloj de Python en el medio.
+
+import sell_in as _sell_in
+
+
+class _ConexionFalsa:
+    def exec_driver_sql(self, *a, **k):
+        class R:
+            rowcount = 0
+        return R()
+
+
+class _TransaccionFalsa:
+    def __enter__(self):
+        return _ConexionFalsa()
+
+    def __exit__(self, *a):
+        return False
+
+
+class _EngineFalso:
+    def begin(self):
+        return _TransaccionFalsa()
+
+
+_columnas = {}
+_crear_original = _sell_in.crear_engine
+_to_sql_original = pd.DataFrame.to_sql
+_sell_in.crear_engine = lambda *a, **k: _EngineFalso()
+pd.DataFrame.to_sql = lambda self, *a, **k: _columnas.update({"cols": list(self.columns)})
+try:
+    _sell_in.guardar([{"sku": "AL01013", "mes_comercial": "2026-09", "evento": "",
+                       "descuento_pct": 10.0, "proveedor": "ALGABO", "encabezado": "1/9/2026"}])
+finally:
+    _sell_in.crear_engine = _crear_original
+    pd.DataFrame.to_sql = _to_sql_original
+
+revisar("la marca de tiempo NO la manda Python",
+        "actualizado" in _columnas.get("cols", []), False)
+revisar("y las columnas del negocio si viajan",
+        "sku" in _columnas.get("cols", []) and "descuento_pct" in _columnas.get("cols", []), True)
 
 print("\nTODO OK" if not FALLOS else f"\n{len(FALLOS)} FALLARON: {', '.join(FALLOS)}")
 raise SystemExit(1 if FALLOS else 0)
