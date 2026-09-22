@@ -44,7 +44,7 @@ ESTAN. No borra nada, nunca. Eso lo hace repetible sin riesgo: correrlo dos
 veces no duplica ni pisa nada, y no puede romper datos buenos si el rango
 esta de mas.
 
-Es a proposito que NO reutilice `guardar_ventana_en_bd`: esa funcion borra
+Es a proposito que NO reutilice `guardar_ventana`: esa funcion borra
 la ventana antes de insertar, que es lo correcto para la corrida de todos los
 dias --una orden cancelada en el origen tiene que desaparecer-- y es
 exactamente lo que no se quiere para una carga hacia atras hecha a mano.

@@ -754,11 +754,94 @@ Ahora las dos operaciones van en **una sola transacción**, en todos los scripts
 Quien consulta sigue viendo la versión anterior completa hasta que la nueva está
 entera.
 
+> **Eso último era falso hasta el 22/09/2026**, y así se escribió acá creyéndolo.
+> `sigma.py` tenía su propia copia del guardado y la seguía haciendo en dos
+> transacciones. Ver la sección siguiente.
+
 **`DELETE` y no `TRUNCATE`:** los dos son transaccionales, pero `TRUNCATE` toma
 un lock exclusivo que ahora duraría toda la inserción y dejaría al tablero
 esperando. `DELETE` usa el control de versiones de Postgres y no bloquea a los
 lectores. Con estas tablas —miles de filas, no millones— la diferencia de
 velocidad no se nota.
+
+---
+
+## Un guardado, no dos: `guardado.py`
+
+`sigma.py` y `mercadolibre.py` tenían **cada uno su propia copia** de
+`guardar_ventana_en_bd`. Eran casi iguales, y esa palabra costó dos incidentes
+de duplicados:
+
+| Cuándo | Qué | Cuánto | Cuándo se descubrió |
+|---|---|---|---|
+| 21/08/2026 | Mercado Libre | 2.548 órdenes | ese día |
+| 14/08/2026 | SIGMA | 31 líneas, **2.046 unidades** de más en el mes 2026-08 | **22/09**, mes y medio después |
+
+El de SIGMA salió a la luz porque un sell out calculado a mano no cerraba: el
+SKU PR02007 daba 48 unidades cuando las reales eran 36. Cuatro comprobantes
+consecutivos (ids 4343–4346) habían entrado dos veces.
+
+**La copia de Mercado Libre se blindó en agosto. La de SIGMA no**, porque nadie
+tenía por qué acordarse de que existía. Un arreglo que hay que aplicar dos veces
+se aplica una.
+
+Ahora hay una sola función, en `guardado.py`, y hace cuatro cosas que **no son
+opcionales** porque cada una salió de un incidente:
+
+1. **Borrar e insertar en una sola transacción.** Separadas, entre un commit y
+   el otro la tabla se queda sin la ventana; y si el `INSERT` falla, ahí quedó:
+   una semana borrada.
+2. **Sólo se tolera un error: que la tabla no exista.** Ese `except Exception`
+   que atrapaba cualquier cosa y después insertaba igual es literalmente lo que
+   duplicó las 2.548 órdenes: el `DELETE` se pasó del `statement_timeout`, la
+   transacción hizo rollback, y las filas entraron por segunda vez. El paso
+   reportó OK.
+3. **El `DELETE` puede usar índice.** `"fecha"::date >= cutoff` es un cast y
+   ningún índice sirve a un cast — el borrado recorría la tabla entera, que es
+   lo que se pasó del timeout. El pre-filtro de texto `>= piso` es redundante
+   con el `::date` y está sólo para que el índice entre.
+4. **También se borra por clave natural.** Las filas que se van a insertar se
+   borran por su clave (`id`, o `(id, item)` en las líneas de venta de SIGMA),
+   además de por ventana. Eso es exacto por definición y no depende de husos ni
+   de bordes de día.
+
+Y una quinta que no estaba en ninguna de las dos copias: **si el origen devuelve
+una lista vacía, no se borra nada.** `sigma.py` borraba primero y recién después
+miraba si había con qué reemplazar, así que una API caída le vaciaba la ventana.
+
+`probar_guardado_ventana.py` (en la CI) fija las cinco, sin base ni red. Lo que
+prueba no es que guarde bien cuando todo anda, sino que **explote cuando no puede
+garantizarlo**.
+
+### La red de atrás: `claves_unicas_bronze.sql`
+
+Un índice único no es una optimización, es una afirmación sobre el negocio. Con
+él puesto, duplicar deja de ser posible **en silencio**: el `INSERT` falla y
+queda en el log.
+
+| Tabla | Clave |
+|---|---|
+| `bronze.sigma_ventas` | `(id, item)` |
+| `bronze.sigma_compras` | `(id)` |
+| `bronze.ml_ventas` | `(id)` |
+
+**`sigma_ventas` es `(id, item)` y no `id`:** un comprobante tiene un renglón por
+artículo facturado. Y por eso **no se puede deduplicar mirando las columnas de
+negocio**: en FA9-00000916 el artículo SS06007 está en el ítem 18 con 240
+unidades y en el ítem 21 con 168, las dos a $935,79. Son dos renglones reales,
+no una fila repetida.
+
+### `gold.fact_ventas` no necesita clave única
+
+Se reconstruye entera —la ventana— desde `bronze` en cada corrida, en una sola
+transacción. **No puede duplicar por su cuenta:** las 31 líneas de más que tuvo
+eran el reflejo fiel de las 31 de `bronze`. Arreglado `bronze`, `gold` queda bien
+solo.
+
+Lo único que no se arregla solo es un duplicado que entre a `bronze` y **se caiga
+de la ventana de 7 días** antes de que `gold` se reconstruya — que es exactamente
+lo que pasó con el del 14/08, limpiado a mano el 22/09. Para eso está
+`modelo.py --todo`.
 
 ---
 

@@ -89,6 +89,13 @@ jobs:
       - name: Probar que una pagina vacia de ML corte la bajada
         run: python probar_pagina_vacia_ml.py
 
+      # LA PRUEBA MAS CARA DE APRENDER DEL REPO. Este guardado duplico datos
+      # dos veces --2.548 ordenes de ML el 21/08, 31 lineas de SIGMA el 14/08--
+      # y las dos sin que nada fallara. Lo que se fija no es que guarde bien
+      # cuando todo anda, sino que EXPLOTE cuando no puede garantizarlo.
+      - name: Probar el guardado por ventana movil
+        run: python probar_guardado_ventana.py
+
       # Que todos los scripts al menos compilen. No prueba que anden, pero un
       # error de sintaxis en un archivo que nadie importa en las pruebas
       # tambien tumba la corrida, y eso se ve gratis.

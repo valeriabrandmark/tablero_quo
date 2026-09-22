@@ -14,6 +14,11 @@ from dotenv import load_dotenv
 from errores_bd import es_tabla_inexistente
 from sqlalchemy import text
 from conexion import crear_engine
+from guardado import (
+    guardar_ventana,
+    listas_a_texto as _listas_a_texto,
+    sincronizar_columnas as _sincronizar_columnas,
+)
 from contextlib import nullcontext
 from sqlalchemy.engine import Connection
 
@@ -341,64 +346,6 @@ def _crear_engine():
     return crear_engine()
 
 
-def _listas_a_texto(df):
-    import json as _json
-    for col in df.columns:
-        if df[col].apply(lambda x: isinstance(x, (list, dict))).any():
-            df[col] = df[col].apply(
-                lambda x: _json.dumps(x, ensure_ascii=False) if isinstance(x, (list, dict)) else x
-            )
-    return df
-
-
-def _sincronizar_columnas(destino, tabla, df):
-    """Agrega a la tabla las columnas que el origen empezo a mandar y no estan.
-
-    POR QUE EXISTE. El 31/08/2026 SIGMA sumo el campo `operacionId` a
-    ExportArticulosVendidos. `to_sql(if_exists="append")` no lo tolera: falla
-    con "Unconsumed column names" y se cae la extraccion ENTERA. Las ventas
-    mayoristas dejaron de actualizarse por una columna nueva que ni siquiera
-    usamos.
-
-    BRONZE ES LA ZONA DE ATERRIZAJE: su trabajo es aguantar lo que el origen
-    mande, no discutirlo. Un campo nuevo tiene que entrar solo; el tipado fino y
-    las reglas de negocio son tarea de gold.
-
-    SE AGREGA Y NO SE DESCARTA. Tirar las columnas desconocidas tambien evitaria
-    el error, pero en silencio: el dia que el origen mande algo que SI importa,
-    nadie se enteraria hasta necesitarlo. Asi queda guardado y avisado en el log.
-
-    Todo como `text`, que acepta cualquier cosa que venga. Convertirlo despues es
-    barato; perder el dato no.
-
-    `destino` PUEDE SER UN ENGINE O UNA CONEXION YA ABIERTA. Cuando el llamador
-    esta dentro de una transaccion hay que pasarle ESA conexion: abrir otra por
-    dentro pediria un ACCESS EXCLUSIVE sobre una tabla que la de afuera ya tiene
-    tomada, y las dos se quedarian esperando para siempre.
-    """
-    ctx = nullcontext(destino) if isinstance(destino, Connection) else destino.begin()
-    faltantes = []
-    with ctx as con:
-        existentes = {
-            f[0] for f in con.exec_driver_sql(
-                """SELECT column_name FROM information_schema.columns
-                   WHERE table_schema = 'bronze' AND table_name = %(t)s""",
-                {"t": tabla},
-            ).fetchall()
-        }
-        if not existentes:
-            return          # la tabla no existe todavia: la crea el to_sql
-        for col in df.columns:
-            if col not in existentes:
-                faltantes.append(col)
-                con.exec_driver_sql(
-                    f'ALTER TABLE bronze."{tabla}" ADD COLUMN IF NOT EXISTS "{col}" text'
-                )
-    if faltantes:
-        print(f"  COLUMNAS NUEVAS en bronze.{tabla}: {', '.join(faltantes)}")
-        print("  (agregadas como text: el origen cambio y quedo registrado)")
-
-
 def guardar_en_bd(df, tabla, modo="replace"):
     """Para CATALOGOS (publicaciones, stock full): reemplaza la tabla entera.
        Tiene sentido acá porque representan el estado ACTUAL, no un historial que crece."""
@@ -459,128 +406,6 @@ def guardar_en_bd(df, tabla, modo="replace"):
     print(f"  Guardado ({modo}): bronze.{tabla} ({len(df)} filas)")
 
 
-def guardar_ventana_en_bd(df, tabla, col_fecha, cutoff):
-    """Para VENTAS (crecen con el tiempo): reemplaza las filas de la ventana
-    movil. Todo lo anterior a cutoff queda intacto -- no se toca ni se vuelve a
-    pedir a la API de ML.
-
-    POR QUE BORRA POR ID Y NO SOLO POR FECHA
-    Antes borraba unicamente con `col_fecha::date >= cutoff`, y eso DUPLICABA
-    ordenes. `date_created` es texto con offset (-04:00) y Postgres resuelve ese
-    `::date` en la zona del SERVIDOR, que es UTC. Argentina es UTC-3, asi que
-    una venta de las 21 de aca ya es del dia siguiente en UTC: quedaba fuera del
-    borrado, la API la volvia a traer, y entraba de nuevo.
-
-    Se midio el 20/08/2026 y el patron no deja lugar a dudas: de 1.195 ordenes
-    duplicadas, 1.191 estaban entre las 21 y la medianoche. Eran 790 filas de
-    mas en bronze y $8,5 M contados dos veces en gold.fact_ventas.
-
-    El arreglo no es corregir el huso del DELETE sino dejar de depender de el:
-    se borran los ID QUE SE ESTAN POR INSERTAR. Eso es exacto por definicion --
-    la clave que se borra es la misma que se agrega -- y no hay huso, formato ni
-    borde de dia que lo pueda romper.
-
-    El borrado por ventana se mantiene ADEMAS, para que una orden que la API
-    dejo de devolver (por ejemplo si se borro alla) no quede colgada para
-    siempre. Los dos borrados y la insercion van en UNA transaccion, asi el
-    tablero nunca lee la tabla a medio reemplazar.
-    """
-    engine = _crear_engine()
-    with engine.begin() as con:
-        con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
-
-    if df.empty:
-        print(f"  (sin ventas nuevas de ML en esta ventana)")
-        return
-
-    df = _listas_a_texto(df)
-
-    # LA MISMA ORDEN PUEDE VENIR DOS VECES EN LA MISMA TANDA.
-    #
-    # `/orders/search` se pagina con offset y limit, y no acepta un orden
-    # explicito. Mientras se recorren las paginas el conjunto de resultados
-    # SIGUE CAMBIANDO: cada vez que una orden se actualiza, ML la reubica. Una
-    # orden que estaba en la pagina 3 puede saltar a la 2 justo despues de que
-    # se leyo la 2, y entonces sale de nuevo en la 3.
-    #
-    # Eso no es teorico: el 26/08/2026 la orden 2000018121647354 vino repetida y
-    # tumbo el orquestador dos corridas seguidas (118 y 119). El DELETE por id
-    # de mas abajo borra la fila vieja UNA vez, pero el INSERT intenta meter las
-    # dos copias y la segunda choca contra el indice unico ml_ventas_id_uniq.
-    #
-    # Deduplicar aca y no en la base es a proposito: el indice unico es la red
-    # de seguridad que descubrio esto y tiene que seguir siendo un error si
-    # alguna vez se cuela un duplicado por otra via. Lo que se arregla es la
-    # causa -- mandar dos filas con la misma clave -- no el sintoma.
-    #
-    # Se conserva la copia MAS ACTUALIZADA: si ML devolvio la orden dos veces es
-    # porque algo le cambio en el medio, asi que la segunda foto es la buena.
-    antes = len(df)
-    if "last_updated" in df.columns:
-        df = df.sort_values("last_updated", na_position="first")
-    df = df.drop_duplicates(subset=["id"], keep="last")
-    if len(df) < antes:
-        print(f"  ML devolvio {antes - len(df)} orden(es) repetida(s) en la paginacion: se dejo la mas actualizada")
-
-    ids = [str(x) for x in df["id"].tolist()]
-
-    try:
-        with engine.begin() as con:
-            # El `>= piso` es REDUNDANTE con el `::date`, y esta puesto para
-            # que Postgres pueda usar el indice.
-            #
-            # `"{col_fecha}"::date` es un cast, y ningun indice puede servir un
-            # cast: el DELETE recorria los 108 MB de la tabla entera. El 21/08
-            # se paso del statement_timeout de Supabase y ese fue el principio
-            # del incidente que duplico 2.548 ordenes.
-            #
-            # El piso va UN DIA ANTES del cutoff porque `::date` se resuelve en
-            # UTC y puede correr una fila hasta un dia hacia adelante: una venta
-            # de las 21 hora argentina ya es del dia siguiente alla. Con el dia
-            # de colchon, el pre-filtro NUNCA deja afuera una fila que el filtro
-            # exacto si querria borrar -- y el exacto sigue decidiendo, asi que
-            # el conjunto borrado es identico al de antes.
-            piso = (cutoff - timedelta(days=1)).isoformat()
-            porFecha = con.exec_driver_sql(
-                f'DELETE FROM bronze."{tabla}" '
-                f'WHERE "{col_fecha}" >= %(piso)s '
-                f'  AND "{col_fecha}"::date >= %(cutoff)s',
-                {"piso": piso, "cutoff": cutoff},
-            ).rowcount
-            # El que realmente evita los duplicados: saca las que se van a
-            # volver a insertar, sin importar en que dia las ubique el huso.
-            #
-            # Compara `id` contra un bigint[] y no `id::text` contra text[]: el
-            # cast tambien impedia usar el indice. Medido, con 3 ids: Index Scan
-            # de costo 5,35 contra un Seq Scan de 13.871.
-            porId = con.exec_driver_sql(
-                f'DELETE FROM bronze."{tabla}" WHERE id = ANY(%(ids)s::bigint[])',
-                {"ids": ids},
-            ).rowcount
-            print(f"  Borradas antes de reinsertar: {porFecha} por ventana + {porId} por id")
-            _sincronizar_columnas(con, tabla, df)
-            df.to_sql(tabla, con, schema="bronze", if_exists="append", index=False)
-    except Exception as e:
-        # ESTE except es el que duplico 2.548 ordenes el 21/08/2026.
-        #
-        # Atrapaba cualquier error y despues insertaba igual. Ese dia el DELETE
-        # de la ventana se paso del statement_timeout de Supabase, la
-        # transaccion hizo rollback -- los borrados se deshicieron -- y las
-        # filas entraron por segunda vez. El paso reporto OK.
-        #
-        # Ahora se tolera EXACTAMENTE un error: que la tabla no exista todavia,
-        # que es la primera corrida en una base limpia y ahi no hay nada que
-        # duplicar. Todo lo demas explota, el orquestador lo ve, lo reintenta y
-        # queda en el log. Ver errores_bd.py.
-        if not es_tabla_inexistente(e):
-            raise
-        print(f"  bronze.{tabla} no existe todavia -> la crea el to_sql.")
-        _sincronizar_columnas(engine, tabla, df)
-        df.to_sql(tabla, engine, schema="bronze", if_exists="append", index=False)
-
-    print(f"  Guardado (ventana): bronze.{tabla} ({len(df)} filas)")
-
-
 # ============================================================
 #  EXTRACCIONES
 # ============================================================
@@ -625,7 +450,7 @@ def extraer_ventas_ml():
             #
             # La API contesta 200 con `results: []` cuando hipa. Cortar ahi y
             # seguir como si nada es lo peligroso de todo este paso: abajo,
-            # `guardar_ventana_en_bd` BORRA la ventana entera y despues inserta
+            # `guardar_ventana` BORRA la ventana entera y despues inserta
             # lo que se junto. Con media ventana en la mano, el borrado se lleva
             # puestas las ordenes que no se volvieron a bajar, y el paso termina
             # diciendo OK.
@@ -675,7 +500,9 @@ def extraer_ventas_ml():
         )
 
     df = pd.json_normalize(ordenes)
-    guardar_ventana_en_bd(df, "ml_ventas", "date_created", cutoff)
+    # Una fila por orden: `id` alcanza. Es lo que evita que el borrado por
+    # ventana, que resuelve `::date` en UTC, deje afuera las ventas de las 21.
+    guardar_ventana(df, "ml_ventas", "date_created", cutoff, clave=("id",))
 
 
 def obtener_ids_publicaciones(access_token):
