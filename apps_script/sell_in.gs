@@ -33,6 +33,30 @@
  *  5. Elegir `instalarDisparador` y ejecutarla. Listo: corre todos los dias.
  *
  * Si algun dia falla, Google te manda un mail: el disparador avisa solo.
+ *
+ * ===========================================================================
+ *  Y PARA QUE EL TABLERO PUEDA PEDIRLA CUANDO QUIERA (opcional, una vez)
+ * ===========================================================================
+ *
+ * Con el disparador solo, la planilla se manda una vez por dia: un descuento
+ * editado a las 10 de la maniana entra maniana. `doPost` deja que el
+ * orquestador pida la foto en el momento, asi el boton "Actualizar ahora" del
+ * panel de Compras trae el descuento de hace diez segundos.
+ *
+ *  6. Implementar -> Nueva implementacion -> tipo "Aplicacion web".
+ *         Ejecutar como:   Yo (tu cuenta)
+ *         Quien tiene acceso: Cualquier usuario
+ *  7. Copiar la URL que queda (termina en /exec) y cargarla en GitHub como el
+ *     secreto SELL_IN_WEBAPP_URL del repo tablero_quo.
+ *
+ * "Cualquier usuario" NO significa que cualquiera pueda leer la planilla: lo
+ * unico que hace `doPost` es pedirle a esta misma funcion que mande la hoja al
+ * tablero, y SOLO si el pedido trae el token correcto. Sin token contesta 401
+ * y no lee nada. Es la misma proteccion que ya tiene el envio diario.
+ *
+ * CADA VEZ QUE SE EDITA ESTE ARCHIVO hay que volver a implementar (Implementar
+ * -> Administrar implementaciones -> editar -> Version: nueva). Si no, la URL
+ * sigue sirviendo la version vieja.
  */
 
 /** La hoja resumen. Si algun dia cambia de nombre, se cambia aca. */
@@ -113,6 +137,49 @@ function enviarSellIn() {
   Logger.log('Enviadas ' + valores.length + ' filas. Respuesta: ' + cuerpo);
   return cuerpo;
 }
+
+/**
+ * El tablero pide la foto AHORA. Contesta lo mismo que `enviarSellIn`.
+ *
+ * SE VALIDA EL TOKEN ANTES DE TOCAR LA PLANILLA. La URL de una aplicacion web
+ * de Apps Script es publica --hay que publicarla asi para que el orquestador,
+ * que no tiene sesion de Google, pueda llamarla-- asi que lo unico que separa
+ * a un curioso de disparar envios es este token. Es el mismo que ya usa el
+ * envio diario: un secreto menos que rotar.
+ *
+ * VA EN EL CUERPO Y NO EN LA URL a proposito. Un token en el query string
+ * queda en los registros de Google, en el historial y en cualquier proxy del
+ * camino; en el cuerpo de un POST, no.
+ */
+function doPost(e) {
+  var pedido = {};
+  try {
+    pedido = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+  } catch (err) {
+    pedido = {};
+  }
+
+  if (pedido.token !== token_()) {
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: false, error: 'token invalido' }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // Si la planilla esta vacia o la hoja no existe, `enviarSellIn` tira el
+  // error. Se devuelve como JSON en vez de dejar que Apps Script conteste una
+  // pagina de error en HTML, que del otro lado se lee como "anduvo".
+  try {
+    var cuerpo = enviarSellIn();
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: true, respuesta: cuerpo }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: false, error: String(err) }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
 
 /** Lo mismo, pero para correr a mano y ver que contesta. */
 function probar() {

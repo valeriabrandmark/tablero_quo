@@ -413,7 +413,48 @@ Se lee la hoja resumen y no las 25 hojas mensuales a propósito: cada una tiene 
 
 #### Camino 1 — el script adentro de la planilla. Sin administrador
 
-Un Apps Script dentro del Google Sheet lee la hoja una vez por día y la manda a la función `sell-in` del proyecto de Supabase, que la guarda tal cual en `bronze.sell_in_crudo`. Después el orquestador la interpreta con el mismo parser de siempre.
+Un Apps Script dentro del Google Sheet lee la hoja y la manda a la función
+`sell-in` del proyecto de Supabase, que la guarda tal cual en
+`bronze.sell_in_crudo`. Después el orquestador la interpreta con el mismo parser
+de siempre.
+
+**Sale por dos vías, y la segunda es la que hace que un descuento se vea en el
+momento:**
+
+- El **disparador diario**, a las 06:00. Es la red: si todo lo demás falla, la
+  planilla llega igual una vez por día.
+- **A pedido**: el orquestador le pide la foto con un `POST` a `doPost` antes de
+  parsear, en cada corrida. Así la corrida de las 10:20 trae la planilla como
+  está a las 10:20, y el botón *"Actualizar ahora"* del panel de Compras la trae
+  en el momento.
+
+Esa segunda vía necesita dos secretos en el repo, y **los dos son opcionales**:
+sin ellos el paso usa la última foto que haya, que es como funcionaba antes.
+`SELL_IN_WEBAPP_URL` sale de implementar el Apps Script como aplicación web
+(Implementar → Nueva implementación → Aplicación web, *ejecutar como* vos,
+*acceso* cualquier usuario) y `SELL_IN_TOKEN` es **el mismo** que ya tienen el
+script y la Edge Function.
+
+> "Cualquier usuario" no expone la planilla. Lo único que hace `doPost` es
+> pedirle a la misma función de siempre que mande la hoja al tablero, y sólo si
+> el pedido trae el token. Sin token contesta 401 y no lee nada. El token va en
+> el **cuerpo** y no en la URL: en el query string quedaría en los registros de
+> Google, en el historial y en cualquier proxy del camino.
+
+**Cada vez que se edita el Apps Script hay que volver a implementar** (Implementar
+→ Administrar implementaciones → editar → Versión: nueva). Si no, la URL sigue
+sirviendo la versión vieja.
+
+### Por qué se compara el contenido y no la fecha de la foto
+
+`--si-cambio` mira una **huella del contenido** de la hoja, igual que
+`costos.py --si-cambio` con los Excel. Tiene que ser así: como ahora se pide una
+foto nueva en cada corrida, la marca de tiempo cambia siempre aunque nadie haya
+tocado la planilla, y mirarla haría recargar 24 veces por día para nada.
+
+La huella se anota **después** de guardar. Si el guardado falla, la planilla
+queda sin marcar y la corrida siguiente la vuelve a intentar; al revés, un error
+dejaría la planilla nueva sin procesar para siempre.
 
 **El Apps Script no interpreta nada, y eso es lo importante.** Manda los textos como se ven (`1/8/2026`, `7,69%`) con `getDisplayValues()` — que es exactamente lo que devuelve la API de Google con `FORMATTED_VALUE`. Las dos rutas entregan lo mismo, así que hay **un** parser con sus pruebas en vez de dos que se van separando.
 
