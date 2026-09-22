@@ -421,8 +421,8 @@ de siempre.
 **Sale por dos vías, y la segunda es la que hace que un descuento se vea en el
 momento:**
 
-- El **disparador diario**, a las 06:00. Es la red: si todo lo demás falla, la
-  planilla llega igual una vez por día.
+- El **disparador**, cada hora. Es la red: si todo lo demás falla, la planilla
+  llega igual sin que nadie haga nada.
 - **A pedido**: el orquestador le pide la foto con un `POST` a `doPost` antes de
   parsear, en cada corrida. Así la corrida de las 10:20 trae la planilla como
   está a las 10:20, y el botón *"Actualizar ahora"* del panel de Compras la trae
@@ -444,6 +444,22 @@ script y la Edge Function.
 **Cada vez que se edita el Apps Script hay que volver a implementar** (Implementar
 → Administrar implementaciones → editar → Versión: nueva). Si no, la URL sigue
 sirviendo la versión vieja.
+
+### Las fotos no se acumulan
+
+Cada foto es la hoja entera —10.000 filas, tal como se ven— y **pesa ~475 kB**.
+Con el disparador cada hora eso son **11 MB por día**, sobre una base que entera
+pesa 383 MB: en dos semanas la llena.
+
+Por eso `sell_in.py` deja sólo las **últimas cinco** y borra el resto. Alcanzan
+de sobra para lo único que sirven: mirar qué mandó la planilla cuando un número
+no cierra. El dato que usa el tablero no vive ahí sino en `bronze.sell_in`, que
+ya está parseado y no pesa nada.
+
+**La limpieza corre en cada corrida, haya cambiado la planilla o no**, y ésa es
+la parte que importa: si corriera sólo al cargar, una semana sin tocar la
+planilla dejaría 168 fotos —80 MB— que nadie borraría nunca. Y corre **después**
+de leer, así que la foto que se está usando jamás es la que se borra.
 
 ### Por qué se compara el contenido y no la fecha de la foto
 
