@@ -83,12 +83,14 @@ pruebas, en vez de dos que se van separando sin que nadie lo note.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
 from datetime import date, datetime
 
 import pandas as pd
+import requests
 from dotenv import load_dotenv
 
 import estado
@@ -350,48 +352,97 @@ def credenciales():
         ) from e
 
 
-# La marca de la ultima foto que YA se proceso. Vive en Postgres, al lado del
+# La huella de la planilla que YA se proceso. Vive en Postgres, al lado del
 # resto del estado del pipeline.
-CLAVE_ULTIMA_FOTO = "sell_in_ultima_foto"
+CLAVE_HUELLA = "sell_in_huella"
 
 
-def ultima_foto():
-    """Cuando llego la ultima foto de la planilla, o None si no hay ninguna."""
-    engine = crear_engine()
-    with engine.begin() as con:
-        return con.exec_driver_sql(
-            "select max(recibido) from bronze.sell_in_crudo"
-        ).scalar()
+def huella_de(valores):
+    """La huella del contenido de la hoja.
+
+    SE COMPARA EL CONTENIDO Y NO LA FECHA DE LA FOTO. Cuando el orquestador
+    pide una foto nueva en cada corrida --ver `pedir_foto_nueva`-- la marca de
+    tiempo cambia siempre aunque nadie haya tocado la planilla, asi que
+    mirarla haria recargar 24 veces por dia para nada. La huella no: si la hoja
+    es la misma, es la misma.
+
+    Es el mismo criterio que usa `costos.py --si-cambio` con los Excel.
+    """
+    crudo = json.dumps(valores, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(crudo.encode("utf-8")).hexdigest()
 
 
-def foto_ya_procesada():
-    """La foto que se proceso la ultima vez, como texto ISO."""
+def huella_guardada():
+    """La huella de la ultima planilla que se cargo."""
     try:
-        return (estado.leer(CLAVE_ULTIMA_FOTO, {}) or {}).get("recibido")
+        return (estado.leer(CLAVE_HUELLA, {}) or {}).get("huella")
     except Exception as e:
-        # Sin poder leer la marca se recarga, que es lo barato y seguro: peor
-        # seria saltear una planilla nueva por no poder leer un timestamp.
-        print(f"  (aviso: no se pudo leer la marca de la ultima foto: {str(e)[:60]}) -> recarga")
+        # Sin poder leerla se recarga, que es lo barato y seguro: peor seria
+        # saltear una planilla nueva por no poder leer un texto.
+        print(f"  (aviso: no se pudo leer la huella: {str(e)[:60]}) -> recarga")
         return None
 
 
-def anotar_foto(recibido):
-    estado.guardar(CLAVE_ULTIMA_FOTO, {"recibido": recibido.isoformat()})
+def anotar_huella(huella):
+    estado.guardar(CLAVE_HUELLA, {"huella": huella})
 
 
-def toca_procesar(llegada, ya_procesada):
+def pedir_foto_nueva():
+    """Le pide a la planilla que mande una foto AHORA. Devuelve si lo logro.
+
+    Sin esto, la foto la manda el disparador del Apps Script una vez por dia a
+    las 06:00, y un descuento editado a las 10 de la maniana entra maniana.
+
+    NO ES OBLIGATORIO Y NO PUEDE TUMBAR LA CORRIDA. Si el secreto no esta
+    cargado --o la planilla no contesta-- se sigue con la ultima foto que haya,
+    que es exactamente como funcionaba antes. Quedarse sin sell in por no poder
+    refrescarlo seria cambiar un dato viejo por ninguno.
+    """
+    url = os.getenv("SELL_IN_WEBAPP_URL")
+    token = os.getenv("SELL_IN_TOKEN")
+    if not url or not token:
+        print("  (sin SELL_IN_WEBAPP_URL: se usa la ultima foto que haya mandado la planilla)")
+        return False
+
+    try:
+        r = requests.post(
+            url,
+            json={"token": token},
+            # El timeout largo es de LECTURA: leer la planilla y mandarla tarda
+            # unos segundos. El corto es de conexion -- si Google no acepta en
+            # 10s, no esta, y no tiene sentido esperarlo.
+            timeout=(10, 90),
+            # Apps Script contesta con un 302 a googleusercontent.com; sin
+            # seguirlo se lee un cuerpo vacio y parece que fallo.
+            allow_redirects=True,
+        )
+        cuerpo = r.json() if r.ok else {}
+    except Exception as e:
+        print(f"  (no se pudo pedir una foto nueva: {str(e)[:100]})")
+        print("  -> se sigue con la ultima que haya")
+        return False
+
+    if not cuerpo.get("ok"):
+        detalle = cuerpo.get("error") or f"HTTP {r.status_code}"
+        print(f"  (la planilla no mando la foto: {str(detalle)[:120]})")
+        print("  -> se sigue con la ultima que haya")
+        return False
+
+    print("  La planilla acaba de mandar una foto nueva.")
+    return True
+
+
+def toca_procesar(huella, huella_previa):
     """(si_o_no, motivo). La decision de `--si-cambio`, sin tocar la base.
 
-    ANTE LA DUDA SE PROCESA. Sin foto no hay nada que hacer, pero si la marca
-    de lo ya procesado no se pudo leer --o nunca existio-- se vuelve a cargar:
-    releer la misma planilla es barato e idempotente, y saltear una nueva deja
-    las ordenes de compra saliendo con el descuento viejo.
+    ANTE LA DUDA SE PROCESA. Si la huella guardada no se pudo leer --o nunca
+    existio-- se vuelve a cargar: releer la misma planilla es barato e
+    idempotente, y saltear una nueva deja las ordenes de compra saliendo con el
+    descuento viejo.
     """
-    if llegada is None:
-        return False, "todavia no hay ninguna foto de la planilla"
-    if ya_procesada == llegada.isoformat():
-        return False, f"la planilla no mando nada nuevo desde {llegada:%d/%m %H:%M}"
-    return True, f"foto nueva ({llegada:%d/%m %H:%M})"
+    if huella_previa is not None and huella_previa == huella:
+        return False, "la planilla no cambio desde la ultima carga"
+    return True, "la planilla cambio"
 
 
 def leer_crudo():
@@ -495,28 +546,36 @@ def main():
         origen = "api" if hay_credencial else "script"
     print(f"  Origen: {origen}")
 
-    # CORRER EN CADA CORRIDA Y DECIDIR ACA, en vez de una vez por dia.
+    # PEDIRLE A LA PLANILLA QUE MANDE LA FOTO AHORA.
     #
-    # POR QUE. Estaba como `primera_del_dia`, o sea ~00:20, y el Apps Script de
-    # la planilla manda su foto a las 06:00. El paso corria SEIS HORAS ANTES de
-    # que llegara la foto del dia, asi que siempre procesaba la de ayer: un
-    # descuento editado el lunes entraba al tablero el miercoles.
+    # Sin esto, la foto la manda el disparador del Apps Script una vez por dia
+    # a las 06:00 y el paso corria ANTES, a las 00:20: siempre procesaba la de
+    # ayer, y un descuento editado el lunes entraba al tablero el miercoles.
     #
-    # Ahora el orquestador lo llama siempre y el que decide es el script, igual
-    # que `costos.py --si-cambio`. La foto de las 06:00 se procesa en la corrida
-    # de las 06:20.
+    # Con esto, la corrida de las 10:20 trae la planilla como esta a las 10:20,
+    # y el boton "Actualizar ahora" del panel de Compras la trae en el momento.
     #
-    # SOLO APLICA A LA RUTA `script`. Por la API no hay foto que comparar --se
-    # lee la planilla en vivo-- y es una sola llamada, asi que se corre siempre.
-    if args.si_cambio and origen == "script" and not args.probar:
-        seguir, motivo = toca_procesar(ultima_foto(), foto_ya_procesada())
-        if not seguir:
-            print(f"  {motivo.capitalize()}: no hay nada que hacer.")
-            return
-        print(f"  {motivo.capitalize()}: se procesa.")
+    # Si no esta configurado, se sigue con la ultima foto que haya: no puede
+    # tumbar la corrida ni dejar al tablero sin sell in.
+    if origen == "script":
+        pedir_foto_nueva()
 
     valores = leer_hoja() if origen == "api" else leer_crudo()
     print(f"  Hoja leida: {len(valores)} filas")
+
+    # SE COMPARA EL CONTENIDO, NO LA FECHA DE LA FOTO. Como arriba se pide una
+    # foto nueva en cada corrida, la marca de tiempo cambia siempre aunque
+    # nadie haya tocado la planilla. La huella no.
+    #
+    # Asi el paso puede correr 24 veces por dia sin recargar 24 veces: lee la
+    # hoja, compara, y si es la misma no toca la base.
+    huella = huella_de(valores)
+    if args.si_cambio and not args.probar:
+        seguir, motivo = toca_procesar(huella, huella_guardada())
+        if not seguir:
+            print(f"  {motivo.capitalize()}: no hay nada que hacer.")
+            return
+        print(f"  {motivo.capitalize()}: se recarga.")
 
     filas, resumen = filas_de_la_planilla(valores)
     print(f"  {resumen['columnas_oferta']} columnas de oferta · {len(filas)} descuentos > 0")
@@ -549,13 +608,10 @@ def main():
 
     guardar(filas)
 
-    # LA MARCA SE ANOTA DESPUES DE GUARDAR, no antes. Si el guardado falla, la
-    # foto queda sin marcar y la corrida siguiente la vuelve a intentar. Al
+    # LA HUELLA SE ANOTA DESPUES DE GUARDAR, no antes. Si el guardado falla, la
+    # planilla queda sin marcar y la corrida siguiente la vuelve a intentar. Al
     # reves, un error dejaria la planilla nueva sin procesar para siempre.
-    if origen == "script":
-        llegada = ultima_foto()
-        if llegada is not None:
-            anotar_foto(llegada)
+    anotar_huella(huella)
 
 
 if __name__ == "__main__":

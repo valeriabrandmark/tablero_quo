@@ -119,6 +119,17 @@ jobs:
       # cual falta -- y como no es critico, el resto del pipeline sigue.
       SELL_IN_SHEET_ID: ${{ secrets.SELL_IN_SHEET_ID }}
 
+      # PARA PEDIRLE A LA PLANILLA QUE MANDE LA FOTO AHORA, en vez de esperar
+      # al disparador diario de las 06:00. Los dos son OPCIONALES: sin ellos el
+      # paso usa la ultima foto que haya, que es como funcionaba antes.
+      #
+      # SELL_IN_WEBAPP_URL sale de implementar el Apps Script como aplicacion
+      # web (termina en /exec). SELL_IN_TOKEN es EL MISMO que ya tienen el
+      # script y la Edge Function: es lo unico que separa a un curioso de
+      # disparar envios contra esa URL, que es publica por necesidad.
+      SELL_IN_WEBAPP_URL: ${{ secrets.SELL_IN_WEBAPP_URL }}
+      SELL_IN_TOKEN: ${{ secrets.SELL_IN_TOKEN }}
+
       # DOS CAMINOS PARA LA MISMA CREDENCIAL, y basta con uno.
       #
       # El recomendado no usa clave: GCP_WIF_PROVIDER y GCP_SA_EMAIL arman
