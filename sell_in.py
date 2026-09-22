@@ -91,6 +91,7 @@ from datetime import date, datetime
 import pandas as pd
 from dotenv import load_dotenv
 
+import estado
 from conexion import crear_engine
 
 load_dotenv()
@@ -349,6 +350,50 @@ def credenciales():
         ) from e
 
 
+# La marca de la ultima foto que YA se proceso. Vive en Postgres, al lado del
+# resto del estado del pipeline.
+CLAVE_ULTIMA_FOTO = "sell_in_ultima_foto"
+
+
+def ultima_foto():
+    """Cuando llego la ultima foto de la planilla, o None si no hay ninguna."""
+    engine = crear_engine()
+    with engine.begin() as con:
+        return con.exec_driver_sql(
+            "select max(recibido) from bronze.sell_in_crudo"
+        ).scalar()
+
+
+def foto_ya_procesada():
+    """La foto que se proceso la ultima vez, como texto ISO."""
+    try:
+        return (estado.leer(CLAVE_ULTIMA_FOTO, {}) or {}).get("recibido")
+    except Exception as e:
+        # Sin poder leer la marca se recarga, que es lo barato y seguro: peor
+        # seria saltear una planilla nueva por no poder leer un timestamp.
+        print(f"  (aviso: no se pudo leer la marca de la ultima foto: {str(e)[:60]}) -> recarga")
+        return None
+
+
+def anotar_foto(recibido):
+    estado.guardar(CLAVE_ULTIMA_FOTO, {"recibido": recibido.isoformat()})
+
+
+def toca_procesar(llegada, ya_procesada):
+    """(si_o_no, motivo). La decision de `--si-cambio`, sin tocar la base.
+
+    ANTE LA DUDA SE PROCESA. Sin foto no hay nada que hacer, pero si la marca
+    de lo ya procesado no se pudo leer --o nunca existio-- se vuelve a cargar:
+    releer la misma planilla es barato e idempotente, y saltear una nueva deja
+    las ordenes de compra saliendo con el descuento viejo.
+    """
+    if llegada is None:
+        return False, "todavia no hay ninguna foto de la planilla"
+    if ya_procesada == llegada.isoformat():
+        return False, f"la planilla no mando nada nuevo desde {llegada:%d/%m %H:%M}"
+    return True, f"foto nueva ({llegada:%d/%m %H:%M})"
+
+
 def leer_crudo():
     """La ultima foto que dejo el Apps Script de la planilla."""
     engine = crear_engine()
@@ -435,6 +480,9 @@ def main():
     parser.add_argument("--origen", choices=["auto", "api", "script"], default="auto",
                         help="De donde sale la hoja. auto: la API si hay credencial,"
                              " si no la foto que dejo el Apps Script")
+    parser.add_argument("--si-cambio", action="store_true",
+                        help="No hace nada si la planilla no mando una foto nueva."
+                             " Es lo que usa el orquestador en cada corrida.")
     args = parser.parse_args()
 
     print("\n=== SELL IN DEL PROVEEDOR ===")
@@ -446,6 +494,26 @@ def main():
         hay_credencial = bool(os.getenv("GOOGLE_SA_JSON") or os.getenv("GCP_WIF_PROVIDER"))
         origen = "api" if hay_credencial else "script"
     print(f"  Origen: {origen}")
+
+    # CORRER EN CADA CORRIDA Y DECIDIR ACA, en vez de una vez por dia.
+    #
+    # POR QUE. Estaba como `primera_del_dia`, o sea ~00:20, y el Apps Script de
+    # la planilla manda su foto a las 06:00. El paso corria SEIS HORAS ANTES de
+    # que llegara la foto del dia, asi que siempre procesaba la de ayer: un
+    # descuento editado el lunes entraba al tablero el miercoles.
+    #
+    # Ahora el orquestador lo llama siempre y el que decide es el script, igual
+    # que `costos.py --si-cambio`. La foto de las 06:00 se procesa en la corrida
+    # de las 06:20.
+    #
+    # SOLO APLICA A LA RUTA `script`. Por la API no hay foto que comparar --se
+    # lee la planilla en vivo-- y es una sola llamada, asi que se corre siempre.
+    if args.si_cambio and origen == "script" and not args.probar:
+        seguir, motivo = toca_procesar(ultima_foto(), foto_ya_procesada())
+        if not seguir:
+            print(f"  {motivo.capitalize()}: no hay nada que hacer.")
+            return
+        print(f"  {motivo.capitalize()}: se procesa.")
 
     valores = leer_hoja() if origen == "api" else leer_crudo()
     print(f"  Hoja leida: {len(valores)} filas")
@@ -480,6 +548,14 @@ def main():
         return
 
     guardar(filas)
+
+    # LA MARCA SE ANOTA DESPUES DE GUARDAR, no antes. Si el guardado falla, la
+    # foto queda sin marcar y la corrida siguiente la vuelve a intentar. Al
+    # reves, un error dejaria la planilla nueva sin procesar para siempre.
+    if origen == "script":
+        llegada = ultima_foto()
+        if llegada is not None:
+            anotar_foto(llegada)
 
 
 if __name__ == "__main__":

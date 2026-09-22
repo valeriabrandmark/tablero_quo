@@ -365,8 +365,17 @@ PASOS = [
     # medio cargar, `bronze.sell_in` conserva lo de ayer y las ordenes se
     # arman con eso. Voltear el pipeline entero por un descuento seria cambiar
     # un dato viejo por todos.
-    {"comando": "sell_in.py",                  "intentos": 2, "espera": 60,
-     "cada_horas": None, "primera_del_dia": True, "critico": False,
+    # EN CADA CORRIDA, Y EL QUE DECIDE ES EL SCRIPT. Igual que costos.py.
+    #
+    # Estaba como `primera_del_dia`, o sea ~00:20, y el Apps Script de la
+    # planilla manda su foto a las 06:00: el paso corria SEIS HORAS ANTES de que
+    # llegara la foto del dia y siempre procesaba la de ayer. Un descuento
+    # editado el lunes entraba al tablero el miercoles.
+    #
+    # Con `--si-cambio` no hace nada si la planilla no mando una foto nueva, asi
+    # que llamarlo 24 veces por dia cuesta una consulta de una fila.
+    {"comando": "sell_in.py --si-cambio",      "intentos": 2, "espera": 60,
+     "cada_horas": None, "critico": False,
      "escribe": "sell_in", "techo": 5 * 60},
 
     # VA ULTIMO, Y NO ESCRIBE NADA. Revisa lo que los pasos de arriba acaban de
