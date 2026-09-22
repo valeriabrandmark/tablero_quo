@@ -30,7 +30,7 @@
  *         SELL_IN_TOKEN = (la clave que te pasaron; NO la escribas en el codigo)
  *  4. Elegir la funcion `probar` y ejecutarla. Google va a pedir permiso una
  *     vez: es para leer esta planilla y para salir a internet. Aceptar.
- *  5. Elegir `instalarDisparador` y ejecutarla. Listo: corre todos los dias.
+ *  5. Elegir `instalarDisparador` y ejecutarla. Listo: corre cada hora.
  *
  * Si algun dia falla, Google te manda un mail: el disparador avisa solo.
  *
@@ -65,8 +65,24 @@ const HOJA = 'Tablero';
 /** A donde se manda. Es publico: lo que protege es el token, no la URL. */
 const DESTINO = 'https://znxhjbkkvkvcszdbczcg.supabase.co/functions/v1/sell-in';
 
-/** Hora del dia (0-23) a la que sale. 6 = de madrugada, antes de que nadie mire. */
-const HORA = 6;
+/**
+ * Cada cuantas horas se manda la planilla.
+ *
+ * ERA UNA VEZ POR DIA, A LAS 6, y eso es lo que hacia que un descuento
+ * editado el lunes a las 10 recien apareciera en el panel de Compras el
+ * martes: la foto de las 06:00 ya se habia mandado.
+ *
+ * Con 1, el descuento entra en la corrida siguiente del orquestador -- una
+ * hora en el peor caso.
+ *
+ * Google solo acepta 1, 2, 4, 6, 8 o 12. Si se sube este numero, subir tambien
+ * el aviso de `leer_crudo` en sell_in.py, que hoy avisa a los 3 dias.
+ *
+ * NO SE ACUMULAN: el tablero se queda con las ultimas `FOTOS_QUE_SE_GUARDAN`
+ * de sell_in.py y borra el resto. Cada foto pesa ~475 kB, asi que una por hora
+ * sin limpiar serian 11 MB por dia sobre una base de 383 MB.
+ */
+const CADA_HORAS = 1;
 
 /**
  * El token vive en las Propiedades del script y NO en el codigo.
@@ -191,15 +207,19 @@ function probar() {
 }
 
 /**
- * Deja el envio corriendo todos los dias.
+ * Deja el envio corriendo cada `CADA_HORAS` horas.
  *
  * Borra primero los disparadores de esta misma funcion: correrla dos veces
- * dejaria dos, y la planilla se mandaria dos veces por dia para siempre.
+ * dejaria dos, y la planilla se mandaria el doble de veces para siempre.
+ *
+ * CORRERLA DE NUEVO ES LO QUE APLICA UN CAMBIO DE `CADA_HORAS`. El disparador
+ * ya instalado se queda con la frecuencia que tenia cuando se creo: cambiar la
+ * constante y no volver a ejecutar esto no hace nada.
  */
 function instalarDisparador() {
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (t.getHandlerFunction() === 'enviarSellIn') ScriptApp.deleteTrigger(t);
   });
-  ScriptApp.newTrigger('enviarSellIn').timeBased().everyDays(1).atHour(HORA).create();
-  Logger.log('Listo: se manda todos los dias alrededor de las ' + HORA + ':00.');
+  ScriptApp.newTrigger('enviarSellIn').timeBased().everyHours(CADA_HORAS).create();
+  Logger.log('Listo: la planilla se manda cada ' + CADA_HORAS + ' hora(s).');
 }

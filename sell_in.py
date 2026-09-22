@@ -432,6 +432,42 @@ def pedir_foto_nueva():
     return True
 
 
+# Cuantas fotos de la planilla se guardan.
+#
+# CADA UNA PESA ~475 kB (la hoja entera, 10.000 filas, tal como se ve). Con el
+# disparador cada hora serian 11 MB POR DIA sobre una base que entera pesa
+# 383 MB: en dos semanas la llena.
+#
+# Cinco alcanzan de sobra para lo unico que sirven: mirar que mando la planilla
+# cuando un numero no cierra. El dato que usa el tablero no vive aca sino en
+# bronze.sell_in, que ya esta parseado y pesa nada.
+FOTOS_QUE_SE_GUARDAN = 5
+
+
+def limpiar_fotos_viejas():
+    """Deja solo las ultimas FOTOS_QUE_SE_GUARDAN. Devuelve cuantas borro.
+
+    SE LLAMA EN CADA CORRIDA, haya cambiado la planilla o no. Llamarla solo
+    cuando se carga dejaria sin limpiar justo el caso que importa: una semana
+    sin tocar la planilla, con el disparador cada hora, son 168 fotos que nadie
+    borraria.
+
+    Y se llama DESPUES de leer la foto, asi que la que se esta usando nunca es
+    la que se borra. Las cinco que quedan alcanzan para mirar que mando la
+    planilla cuando un numero no cierra.
+    """
+    engine = crear_engine()
+    with engine.begin() as con:
+        return con.exec_driver_sql(
+            """delete from bronze.sell_in_crudo
+                where id not in (
+                    select id from bronze.sell_in_crudo
+                     order by recibido desc, id desc limit %(n)s
+                )""",
+            {"n": FOTOS_QUE_SE_GUARDAN},
+        ).rowcount
+
+
 def toca_procesar(huella, huella_previa):
     """(si_o_no, motivo). La decision de `--si-cambio`, sin tocar la base.
 
@@ -562,6 +598,20 @@ def main():
 
     valores = leer_hoja() if origen == "api" else leer_crudo()
     print(f"  Hoja leida: {len(valores)} filas")
+
+    # LA LIMPIEZA VA ACA Y NO DESPUES DE CARGAR, y la diferencia es todo.
+    #
+    # Despues de cargar solo correria cuando la planilla CAMBIO. Con el
+    # disparador cada hora, una semana sin tocar la planilla son 168 fotos de
+    # 475 kB --80 MB-- que nadie borraria nunca.
+    #
+    # Aca corre en cada corrida, haya cambiado o no. Y va despues de leer, asi
+    # que la foto que se esta usando nunca es la que se borra.
+    if origen == "script":
+        borradas = limpiar_fotos_viejas()
+        if borradas:
+            print(f"  Fotos viejas borradas: {borradas} "
+                  f"(se guardan las ultimas {FOTOS_QUE_SE_GUARDAN})")
 
     # SE COMPARA EL CONTENIDO, NO LA FECHA DE LA FOTO. Como arriba se pide una
     # foto nueva en cada corrida, la marca de tiempo cambia siempre aunque
