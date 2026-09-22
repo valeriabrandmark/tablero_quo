@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from errores_bd import es_tabla_inexistente
 from sqlalchemy import text
 from conexion import crear_engine
+import ventana
 from guardado import (
     guardar_ventana,
     listas_a_texto as _listas_a_texto,
@@ -419,7 +420,9 @@ def extraer_ventas_ml():
     access_token = token_ml()
 
     hoy = date.today()
-    cutoff = max(FECHA_CORTE, hoy - timedelta(days=WINDOW_DAYS))
+    # La ventana se estira sola si este paso no corre bien desde hace mas de
+    # WINDOW_DAYS. Ver ventana.py.
+    cutoff = ventana.cutoff("mercadolibre.py --ventas", WINDOW_DAYS, FECHA_CORTE, hoy)
     desde = f"{cutoff.isoformat()}T00:00:00.000-00:00"
     hasta = f"{hoy.isoformat()}T23:59:59.000-00:00"
     print(f"  Ventana: {cutoff.isoformat()} a {hoy.isoformat()}")

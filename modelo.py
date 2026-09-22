@@ -9,6 +9,7 @@ from conexion import crear_engine
 from calendario import mes_comercial
 import estado
 import errores_bd
+import ventana
 
 load_dotenv()
 
@@ -1168,7 +1169,12 @@ def main():
     if args.todo:
         CUTOFF = FECHA_CORTE
     else:
-        CUTOFF = max(FECHA_CORTE, date.today() - timedelta(days=args.dias))
+        # La ventana se estira sola si este paso no corre bien desde hace mas
+        # dias que los pedidos. Ver ventana.py: gold se reconstruye por ventana
+        # igual que bronze, asi que tenia el mismo agujero -- si modelo.py no
+        # corre diez dias, al volver reconstruiria siete y los otros tres
+        # quedarian con lo viejo para siempre, aunque bronze ya tuviera el dato.
+        CUTOFF = ventana.cutoff("modelo.py", args.dias, FECHA_CORTE, date.today())
 
     # Un costo que cambio hacia atras manda sobre la ventana pedida, tambien si
     # se pidio una corta a mano: si no, la anotacion se borraria sin que nadie

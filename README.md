@@ -845,6 +845,84 @@ lo que pasó con el del 14/08, limpiado a mano el 22/09. Para eso está
 
 ---
 
+## La ventana se estira sola
+
+La ventana móvil era una constante: `hoy - 7 días`, siempre. Eso alcanza
+**mientras el pipeline corra**, y falla justo cuando no corre.
+
+Mientras el paso ande, una corrida que se cae no deja nada: la de la hora
+siguiente vuelve a pedir los mismos 7 días y reemplaza todo. El problema
+empieza cuando el paso deja de andar **varios días** —se venció un token, la API
+cambió, alguien rompió algo y no se miró el log—. Al octavo día, la primera
+corrida que vuelve a funcionar pide `hoy - 7` y **el día 1 ya no entra**. Nadie
+lo vuelve a pedir nunca, porque la ventana siguiente está todavía más adelante.
+
+Ese agujero no da error. Queda ahí y se descubre meses después porque un número
+no cierra.
+
+Ahora (`ventana.py`) el piso llega hasta el **más viejo** de dos puntos: la
+ventana normal, o **la última vez que ese paso terminó bien**, menos un día de
+colchón. Un paso que no corre desde hace tres semanas pide tres semanas; uno que
+corrió hace una hora pide los 7 de siempre.
+
+| Situación | Ventana antes | Ventana ahora |
+|---|---|---|
+| Corrió hace una hora | 7 días | 7 días |
+| Caído 12 días | 7 días — **5 se pierden** | 13 días |
+| Caído 2 meses | 7 días — **53 se pierden** | 65 días |
+| Caído desde antes del piso histórico | 7 días | hasta el piso, no más atrás |
+
+**Sólo se estira, nunca se achica.** Ante cualquier duda —no se puede leer el
+estado, el paso nunca corrió, la fecha guardada es ilegible— se usa la ventana
+normal y se pide de más, que es barato, en vez de dejar un hueco.
+
+Lo aplican `sigma.py --ventas`, `mercadolibre.py --ventas` y `modelo.py`.
+`sigma.py --compras` ya lo hacía a su manera (mira la última factura cargada).
+
+**Lo que esto NO arregla:** sólo sirve cuando el paso *falla de verdad*, porque
+lo que mira es el último `ok`. Un paso que reporta bien y trae de menos —lo que
+hacía el extractor viejo de ML— no deja rastro por acá. Para eso están las otras
+dos patas: que el guardado explote en vez de guardar a medias (`guardado.py`) y
+que alguien mire después (`auditoria.py`).
+
+---
+
+## Que alguien mire: `auditoria.py`
+
+Los dos incidentes de datos de este pipeline tienen la misma forma: **no dieron
+error**. El paso reportó OK, el tablero mostró números, y el problema se
+descubrió semanas después porque una cuenta hecha a mano no cerraba.
+
+| Qué | Cuándo pasó | Cuándo se vio | Cómo se vio |
+|---|---|---|---|
+| 31 líneas duplicadas de SIGMA | 14/08 | 22/09 | el sell out de PR02007 daba 48 y eran 36 |
+| 622 min sin ventas de ML | 06/08 | 21/09 | faltaba una venta que alguien buscó |
+
+Todo lo demás que se blindó ataca causas conocidas. Esto ataca el problema de
+fondo, que es otro: **que nadie estaba mirando**.
+
+Corre como último paso del orquestador y no escribe nada:
+
+- **Duplicados** por clave natural en las tres tablas con ventana. Esto **falla**
+  la corrida. Con los índices únicos puestos ya no debería poder pasar —
+  justamente por eso, si pasa es que falta un índice. Cero falsos positivos
+  posibles: dos filas con la misma clave nunca son correctas.
+- **Huecos** en las ventas de ML. Esto **avisa**, no falla. Mercado Libre vende
+  las 24 horas, así que un rato largo sin una sola venta es sospechoso.
+
+**El umbral de huecos es 6 horas, y sale de los datos:** sobre 134 días de
+historia, el hueco legítimo más grande fue de **285 minutos** y cayó de
+madrugada; los seis más grandes, todos entre las 02 y las 08. El del 06/08 fue
+de **622 minutos en pleno día hábil**. Con el umbral en 6 h: cero falsos
+positivos en toda la historia, y el del 06/08 habría saltado en la corrida
+siguiente.
+
+**Avisa y no falla a propósito.** Un feriado largo o una caída de ML podrían dar
+un hueco real y legítimo, y poner el pipeline en rojo por eso enseña a ignorar el
+rojo. Lo que hace falta es que se vea en el log, no que trabe la carga.
+
+---
+
 ## La única tabla que solo crece: la foto diaria del stock
 
 `bronze.ml_stock_full` se sobrescribe entera en cada corrida, así que sabe

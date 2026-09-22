@@ -96,6 +96,12 @@ jobs:
       - name: Probar el guardado por ventana movil
         run: python probar_guardado_ventana.py
 
+      # La ventana era una constante, y eso falla justo cuando el pipeline no
+      # corre: un paso caido ocho dias vuelve pidiendo siete, y el dia 1 no
+      # entra nunca mas. Lo que se fija es que SOLO se estire, nunca se achique.
+      - name: Probar la ventana que se estira sola
+        run: python probar_ventana.py
+
       # Que todos los scripts al menos compilen. No prueba que anden, pero un
       # error de sintaxis en un archivo que nadie importa en las pruebas
       # tambien tumba la corrida, y eso se ve gratis.

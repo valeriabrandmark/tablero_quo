@@ -8,6 +8,7 @@ from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from conexion import crear_engine
+import ventana
 from guardado import (
     guardar_ventana,
     listas_a_texto as _listas_a_texto,
@@ -197,7 +198,10 @@ def extraer_ventas():
     print("\n=== VENTAS (ventana movil) ===")
 
     hoy = date.today()
-    cutoff = max(FECHA_INICIO_VENTAS, hoy - timedelta(days=WINDOW_DAYS))
+    # La ventana se estira sola si este paso no corre bien desde hace mas de
+    # WINDOW_DAYS. Ver ventana.py: es lo que hace que un parate de cualquier
+    # duracion se repare en la primera corrida que vuelve a andar.
+    cutoff = ventana.cutoff("sigma.py --ventas", WINDOW_DAYS, FECHA_INICIO_VENTAS, hoy)
     dde = cutoff.isoformat()
     hta = hoy.isoformat()
     print(f"  Ventana: {dde} a {hta}")
