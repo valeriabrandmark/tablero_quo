@@ -31,6 +31,8 @@
  *  4. Elegir la funcion `probar` y ejecutarla. Google va a pedir permiso una
  *     vez: es para leer esta planilla y para salir a internet. Aceptar.
  *  5. Elegir `instalarDisparador` y ejecutarla. Listo: corre cada hora.
+ *  6. Recargar la planilla: arriba aparece el menu "Tablero", con
+ *     "Mandar el sell in ahora" para no esperar a la hora.
  *
  * Si algun dia falla, Google te manda un mail: el disparador avisa solo.
  *
@@ -194,6 +196,81 @@ function doPost(e) {
       .createTextOutput(JSON.stringify({ ok: false, error: String(err) }))
       .setMimeType(ContentService.MimeType.JSON);
   }
+}
+
+
+/**
+ * EL MENU DE LA PLANILLA: "Tablero -> Mandar el sell in ahora".
+ *
+ * ===========================================================================
+ *  POR QUE ESTO Y NO LA APLICACION WEB
+ * ===========================================================================
+ *
+ * `doPost` --el camino para que el orquestador pida la foto solo-- necesita
+ * implementar el script como aplicacion web, y eso lo bloquea la politica de
+ * Google Workspace: "No tienes permiso para realizar esta accion". Lo destraba
+ * un administrador.
+ *
+ * `onOpen` no. Es un DISPARADOR SIMPLE: no se implementa, no se autoriza, no
+ * depende de ningun permiso especial. Aparece solo al abrir la planilla.
+ *
+ * Asi que el camino manual queda en manos de quien edita la planilla, que es
+ * justo quien sabe que acaba de cambiar un descuento.
+ *
+ * ===========================================================================
+ *  LO QUE ONOPEN PUEDE Y NO PUEDE HACER
+ * ===========================================================================
+ *
+ * Un disparador simple NO puede llamar a servicios que pidan autorizacion
+ * --no podria mandar la planilla por su cuenta-- pero SI puede agregar un
+ * menu. Y el item del menu, cuando alguien lo clickea, corre como una funcion
+ * normal, con todos los permisos.
+ *
+ * Por eso `onOpen` solo dibuja el menu y el trabajo lo hace `mandarAhora`.
+ * La primera vez que alguien lo usa, Google le pide permiso una vez.
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Tablero')
+    .addItem('Mandar el sell in ahora', 'mandarAhora')
+    .addToUi();
+}
+
+
+/**
+ * Manda la planilla en el momento y avisa como salio.
+ *
+ * EL AVISO DICE QUE ESTO NO ES EL FINAL, y es importante que lo diga: mandar
+ * la foto no actualiza el tablero. La foto queda esperando a que el
+ * orquestador pase --hasta 20 minutos-- o a que alguien apriete "Actualizar
+ * ahora" en el panel de Compras. Sin esa aclaracion, quien la usa mira el
+ * tablero a los dos segundos, ve el numero viejo y concluye que no anduvo.
+ *
+ * Los errores van en un `alert` y no en un `toast`: un toast se va solo a los
+ * segundos, y un error que nadie llego a leer es un error que no existio.
+ */
+function mandarAhora() {
+  const hoja = SpreadsheetApp.getActiveSpreadsheet();
+  hoja.toast('Mandando la planilla al tablero...', 'Tablero', 30);
+
+  let cuerpo;
+  try {
+    cuerpo = enviarSellIn();
+  } catch (err) {
+    SpreadsheetApp.getUi().alert(
+      'No se pudo mandar la planilla.\n\n' + err + '\n\n' +
+      'Si dice 401, el SELL_IN_TOKEN de este script no coincide con el del ' +
+      'servidor. Si dice 503, falta cargarlo del lado del tablero.'
+    );
+    return;
+  }
+
+  hoja.toast(
+    'Listo. El tablero la toma en la proxima corrida (hasta 20 min), ' +
+    'o ya mismo si apretas "Actualizar ahora" en el panel de Compras.',
+    'Tablero', 15
+  );
+  Logger.log(cuerpo);
 }
 
 
