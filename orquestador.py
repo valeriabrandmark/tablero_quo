@@ -44,6 +44,7 @@ import argparse
 import datetime
 import json
 import estado
+from ventana import registro, ultima_corrida
 import os
 import subprocess
 import sys
@@ -367,6 +368,21 @@ PASOS = [
     {"comando": "sell_in.py",                  "intentos": 2, "espera": 60,
      "cada_horas": None, "primera_del_dia": True, "critico": False,
      "escribe": "sell_in", "techo": 5 * 60},
+
+    # VA ULTIMO, Y NO ESCRIBE NADA. Revisa lo que los pasos de arriba acaban de
+    # cargar: duplicados por clave repetida y ratos largos sin una sola venta.
+    #
+    # POR QUE UN PASO Y NO UNA ALERTA APARTE. Los dos incidentes de datos que
+    # tuvo este pipeline --31 lineas duplicadas de SIGMA, 622 minutos sin
+    # ventas de ML-- no dieron error: se descubrieron semanas despues porque
+    # una cuenta a mano no cerraba. Todo lo demas que se blindo ataca causas
+    # conocidas; esto ataca que nadie estuviera mirando.
+    #
+    # `intentos: 1` porque no hay nada que reintentar: si encuentra un
+    # duplicado, encontrarlo otra vez no lo arregla.
+    {"comando": "auditoria.py",                "intentos": 1, "espera": 0,
+     "cada_horas": None, "critico": False, "escribe": "(nada: solo revisa)",
+     "techo": 3 * 60},
 ]
 
 CARPETA = os.path.dirname(os.path.abspath(__file__))
@@ -407,35 +423,6 @@ def cargar_estado():
 
 def guardar_estado(nuevo):
     estado.guardar("pasos", nuevo)
-
-
-def registro(estado, comando):
-    """El estado de un paso, normalizado.
-
-    Las versiones viejas guardaban solo la fecha del ultimo OK como texto; se
-    acepta ese formato para no perder el estado al actualizar.
-    """
-    valor = estado.get(comando)
-    if isinstance(valor, str):
-        return {"ok": valor, "fallos": 0, "ultimo_fallo": None, "error": None}
-    if isinstance(valor, dict):
-        return {
-            "ok": valor.get("ok"),
-            "fallos": valor.get("fallos", 0),
-            "ultimo_fallo": valor.get("ultimo_fallo"),
-            "error": valor.get("error"),
-        }
-    return {"ok": None, "fallos": 0, "ultimo_fallo": None, "error": None}
-
-
-def ultima_corrida(estado, comando):
-    valor = registro(estado, comando).get("ok")
-    if not valor:
-        return None
-    try:
-        return datetime.datetime.fromisoformat(valor)
-    except ValueError:
-        return None
 
 
 def toca_correr(paso, estado, corrieron=()):
