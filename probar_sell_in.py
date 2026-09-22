@@ -139,25 +139,36 @@ revisar("hoja vacia no rompe", filas_de_la_planilla([]), ([], {
 # del dia, asi que siempre procesaba la de ayer. Un descuento editado el lunes
 # entraba al tablero el miercoles.
 #
-# Ahora corre en cada corrida y decide aca. Lo que se fija es que ANTE LA DUDA
-# SE PROCESE: releer la misma planilla es barato e idempotente, y saltear una
-# nueva deja las ordenes de compra saliendo con el descuento viejo.
+# Ahora corre en cada corrida, le pide a la planilla una foto nueva y compara
+# EL CONTENIDO. La fecha de la foto ya no sirve para decidir: como se pide una
+# nueva cada vez, cambia siempre aunque nadie haya tocado la planilla.
+#
+# Lo que se fija es que ANTE LA DUDA SE PROCESE: releer la misma planilla es
+# barato e idempotente, y saltear una nueva deja las ordenes de compra saliendo
+# con el descuento viejo.
 
-import datetime as _dt
+from sell_in import huella_de, toca_procesar
 
-from sell_in import toca_procesar
+HOJA_A = [["SKU", "1/8/2026"], ["AL01013", "10%"]]
+HOJA_B = [["SKU", "1/8/2026"], ["AL01013", "12%"]]
 
-FOTO = _dt.datetime(2026, 9, 22, 6, 49, tzinfo=_dt.timezone.utc)
+revisar("la misma hoja da la misma huella", huella_de(HOJA_A), huella_de(HOJA_A))
+revisar("una hoja distinta da otra huella", huella_de(HOJA_A) != huella_de(HOJA_B), True)
 
-revisar("sin ninguna foto todavia: no hay nada que hacer",
-        toca_procesar(None, None)[0], False)
-revisar("la misma foto que ya se proceso: no se repite",
-        toca_procesar(FOTO, FOTO.isoformat())[0], False)
-revisar("foto nueva: se procesa", toca_procesar(FOTO, None)[0], True)
-revisar("foto mas nueva que la ultima procesada: se procesa",
-        toca_procesar(FOTO, "2026-09-21T06:49:00+00:00")[0], True)
-revisar("y el motivo dice cual es la foto",
-        "22/09 06:49" in toca_procesar(FOTO, None)[1], True)
+revisar("la planilla no cambio: no se recarga",
+        toca_procesar(huella_de(HOJA_A), huella_de(HOJA_A))[0], False)
+revisar("la planilla cambio: se recarga",
+        toca_procesar(huella_de(HOJA_B), huella_de(HOJA_A))[0], True)
+
+# Sin huella previa --primera corrida, o no se pudo leer el estado-- se carga.
+# Saltear aca dejaria el sell in en blanco hasta que alguien tocara la planilla.
+revisar("sin huella previa: se carga igual",
+        toca_procesar(huella_de(HOJA_A), None)[0], True)
+
+# Una hoja vacia tiene huella propia y no explota: quien decide que hacer con
+# ella es el parser, que ya avisa si no encuentra la columna SKU.
+revisar("la hoja vacia tiene su propia huella",
+        huella_de([]) != huella_de(HOJA_A), True)
 
 print("\nTODO OK" if not FALLOS else f"\n{len(FALLOS)} FALLARON: {', '.join(FALLOS)}")
 raise SystemExit(1 if FALLOS else 0)
