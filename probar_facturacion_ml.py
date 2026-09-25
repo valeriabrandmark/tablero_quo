@@ -89,6 +89,7 @@ from datetime import date
 import requests
 from dotenv import load_dotenv
 
+import mercadolibre as ml
 from mercadolibre import token_ml
 
 load_dotenv()
@@ -228,9 +229,22 @@ def buscar_periodos(token):
     return claves
 
 
-def analizar(filas):
+def analizar(filas, cuantas_hay=None, corte=None):
     """Que cargos hay, cuanto suman, y si se pueden colgar de una venta."""
     planas = [_aplanar(f) for f in filas]
+
+    # ESTO PRIMERO, ANTES DE CUALQUIER NUMERO.
+    #
+    # La corrida del 25/09 leyo 400 filas de 27.737 --murio en un 429-- e
+    # imprimio la tabla de conceptos como si fuera el mes. Un total que sale
+    # del 1,4 % de las filas y no lo aclara no es un dato incompleto: es un
+    # dato falso, y encima creible.
+    if corte or (cuantas_hay and len(planas) < cuantas_hay):
+        porcion = f" ({len(planas) / cuantas_hay:.1%})" if cuantas_hay else ""
+        print(f"\n     !!! MUESTRA PARCIAL: {len(planas)} filas"
+              + (f" de {cuantas_hay}{porcion}" if cuantas_hay else "")
+              + (f" · {corte}" if corte else ""))
+        print("     !!! Los totales de abajo son de ESA MUESTRA, no del mes.")
 
     por_concepto = {}
     for f in planas:
@@ -244,11 +258,23 @@ def analizar(filas):
     for nombre, (cuenta, suma, con_orden) in sorted(por_concepto.items(),
                                                     key=lambda x: -abs(x[1][1])):
         print(f"         {suma:16,.2f}  {cuenta:>7}  {con_orden:>7}  {nombre}")
-    print(f"         {sum(f['monto'] for f in planas):16,.2f}  "
-          f"{len(planas):>7}          TOTAL")
 
-    # SI ALGUNA FILA NO SE ENTENDIO, SE DICE. Un total al que le faltan filas
-    # sin avisar es el peor resultado posible de un sondeo.
+    # LAS ANULACIONES NO SE SUMAN, SE RESTAN.
+    #
+    # Vienen con el importe en positivo y el tipo dice que son otra cosa
+    # (CHARGE vs lo demas). Sumandolas, una anulacion de $6.594 aparecia como
+    # $6.594 mas de gasto en vez de $6.594 menos: el error es del doble del
+    # importe, y siempre para el lado de creer que gastamos mas.
+    cargos = sum(f["monto"] for f in planas if f["tipo"] == "CHARGE")
+    otros = sum(f["monto"] for f in planas if f["tipo"] != "CHARGE")
+    print(f"\n         {cargos:16,.2f}  cargos")
+    print(f"         {-otros:16,.2f}  anulaciones y bonificaciones")
+    print(f"         {cargos - otros:16,.2f}  NETO"
+          + (" de la muestra" if corte or (cuantas_hay and len(planas) < cuantas_hay)
+             else ""))
+    tipos = sorted({str(f["tipo"]) for f in planas})
+    print(f"         (tipos vistos: {', '.join(tipos)})")
+
     ciegas = sum(1 for f in planas if f["sin_importe"])
     if ciegas:
         print(f"\n     !!! {ciegas} filas sin importe reconocible: el total esta corto.")
@@ -280,19 +306,23 @@ RUTA_DETALLE = "/billing/integration/periods/key/{clave}/group/ML/details"
 
 
 def pedir_paginas(clave, token, paginas, limite):
-    """El detalle del periodo, de a `limite` filas, hasta `paginas` veces.
+    """El detalle del periodo. Devuelve (filas, cuantas hay, por que corto).
 
-    UN MES SON ~28.000 FILAS. Con una sola pagina de 50 --lo que hacia este
-    sondeo-- los totales por concepto son los de 50 filas cualquiera, que no
-    dicen nada: el cargo mas caro puede estar entero afuera.
+    UN MES SON ~28.000 FILAS y se piden de a `limite`. Lo que devuelve NO es
+    necesariamente el mes entero, y por eso devuelve tambien el motivo del
+    corte: quien lo muestre tiene que poder decir "esto es una muestra".
 
-    Se pagina con `from_id`, que es lo que documenta este endpoint y lo que
-    explica que la respuesta traiga `last_id`. Si con eso la pagina no avanza
-    --el `last_id` no se mueve-- se pasa a `offset`, y si tampoco, corta y lo
-    dice. Un sondeo que se queda en bucle pidiendo la misma pagina es peor que
-    uno que se planta.
+    LAS LLAMADAS VAN POR `llamar_ml` Y NO POR requests.
+    La corrida del 25/09 murio en un 429 a la tercera pagina --400 filas de
+    27.737-- porque esto pedia directo con requests y un 429 lo dejaba sin
+    respuesta. `llamar_ml` ya sabe esperar lo que la API pide y reintentar, y
+    ademas renueva el token si vence a mitad de camino, que con 139 paginas es
+    perfectamente posible.
     """
     filas, desde, offset, modo = [], None, 0, "from_id"
+    cuantas_hay = None
+    corte = None
+
     for pagina in range(1, paginas + 1):
         params = {"document_type": "BILL", "limit": limite}
         if modo == "from_id" and desde is not None:
@@ -300,16 +330,31 @@ def pedir_paginas(clave, token, paginas, limite):
         elif modo == "offset":
             params["offset"] = offset
 
-        datos = llamar(RUTA_DETALLE.format(clave=clave), params, token,
-                       mostrar=1200 if pagina == 1 else 0)
+        ruta = RUTA_DETALLE.format(clave=clave)
+        try:
+            datos = ml.llamar_ml(ruta, token, params)
+        except Exception as e:
+            # Se rindio despues de los reintentos. No se pierde lo leido: se
+            # dice hasta donde se llego y se analiza eso.
+            print(f"\n  la pagina {pagina} no volvio: {e}")
+            corte = f"la API corto en la pagina {pagina}"
+            break
+
+        if pagina == 1:
+            print(f"\n  200  {ruta}")
+            print(f"     params: {params}")
+            # `total` es LO QUE FALTA, no el tamaño del mes: baja en cada
+            # pagina (27.737, despues 27.537...). El del primer pedido es el
+            # unico que sirve de denominador.
+            cuantas_hay = (datos or {}).get("total")
+
         nuevas = _filas(datos)
         if not nuevas:
             break
 
         filas.extend(nuevas)
-        total = (datos or {}).get("total")
-        print(f"     pagina {pagina}: {len(nuevas)} filas"
-              f" · acumuladas {len(filas)}" + (f" de {total}" if total else ""))
+        print(f"     pagina {pagina}: {len(nuevas)} filas · acumuladas {len(filas)}"
+              + (f" de {cuantas_hay}" if cuantas_hay else ""))
 
         ultimo = (datos or {}).get("last_id")
         if modo == "from_id" and (ultimo is None or ultimo == desde):
@@ -318,9 +363,13 @@ def pedir_paginas(clave, token, paginas, limite):
         desde = ultimo
         offset += len(nuevas)
 
-        if total and len(filas) >= total:
+        if cuantas_hay and len(filas) >= cuantas_hay:
             break
-    return filas
+    else:
+        if cuantas_hay and len(filas) < cuantas_hay:
+            corte = f"se acabaron las {paginas} paginas pedidas"
+
+    return filas, cuantas_hay, corte
 
 
 def detalle(clave, token, paginas, limite):
@@ -328,9 +377,9 @@ def detalle(clave, token, paginas, limite):
     print(f"PASO 2 · EL DETALLE DEL PERIODO {clave}")
     print("=" * 74)
 
-    filas = pedir_paginas(clave, token, paginas, limite)
+    filas, cuantas_hay, corte = pedir_paginas(clave, token, paginas, limite)
     if filas:
-        analizar(filas)
+        analizar(filas, cuantas_hay, corte)
         return True
 
     # Si el detalle no contesto, se prueban las otras dos por si el periodo
@@ -344,7 +393,7 @@ def detalle(clave, token, paginas, limite):
         datos = llamar(ruta, params, token, mostrar=1800)
         otras = _filas(datos)
         if otras:
-            analizar(otras)
+            analizar(otras, None, None)
             return True
     return False
 
@@ -391,7 +440,8 @@ def main():
     print("3. La columna C/ORDEN: cuantas filas de ese concepto traen la venta")
     print("   adentro. Esas se pueden colgar del margen de cada linea; el")
     print("   resto es un gasto mensual del canal y nada mas.")
-    print("4. Si dice que faltan filas sin importe, el total esta corto.")
+    print("4. Si arriba dice MUESTRA PARCIAL, los totales son de esa muestra.")
+    print("   Para el mes entero hacen falta ~139 paginas de 200.")
     print("\nPara los totales de un mes entero:")
     print("   python probar_facturacion_ml.py --periodo 2026-08-01 --paginas 60")
 
