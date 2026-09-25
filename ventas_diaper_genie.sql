@@ -69,13 +69,38 @@ INSERT INTO gold.fact_ventas_previo SELECT * FROM movidas;
 --    marca empiezan con AC01, y los kits son ese mismo codigo con una C al
 --    final. Las dos condiciones se pisan en los cinco articulos del maestro
 --    --que cumplen las dos-- y eso esta bien: es un OR, no los duplica.
+--    LA COMISION SE SIRVE DE LAS DOS FORMAS, Y CON EL NOMBRE PUESTO.
+--
+--    `comision` es POR UNIDAD y SIN IVA, igual que precio_unitario,
+--    precio_neto y costo_unitario. El reporte que se baja de Mercado Libre
+--    muestra otra cosa --"Cargo por venta e impuestos", que es por LINEA y
+--    CON IVA-- y quien las cruzo leyo una como si fuera la otra: en 64 de
+--    259 lineas de ML faltaban $450.324, un 7,4% de la comision del canal.
+--
+--    NO SE CAMBIA `comision`. Multiplicarla ahi dejaria una fila con el
+--    precio por unidad y la comision por linea, y el que la lea despues se
+--    equivoca al reves; ademas la vista dejaria de coincidir con
+--    gold.fact_ventas, que es de donde sale.
+--
+--    OJO AL MEZCLAR: en la misma fila, precio_unitario, precio_neto,
+--    costo_unitario y comision son POR UNIDAD, y total_linea, envio y
+--    margen_total son POR LINEA. El envio de ML es la parte que le toca a
+--    esa linea del flete del paquete, no un costo unitario.
 CREATE OR REPLACE VIEW public.ventas_diaper_genie
     WITH (security_invoker = on) AS
-    SELECT * FROM gold.fact_ventas_previo
+    SELECT *,
+           comision * cantidad          AS comision_linea,
+           -- El sale_fee tal cual lo manda ML: es el mismo 1,21 con el que
+           -- modelo.py lo neteo, asi que esto lo devuelve entero.
+           comision * cantidad * 1.21   AS comision_linea_con_iva
+      FROM gold.fact_ventas_previo
      WHERE upper(trim(coalesce(marca, ''))) = 'DIAPER GENIE'
         OR upper(trim(coalesce(sku, ''))) LIKE 'AC01%'
     UNION ALL
-    SELECT * FROM gold.fact_ventas
+    SELECT *,
+           comision * cantidad          AS comision_linea,
+           comision * cantidad * 1.21   AS comision_linea_con_iva
+      FROM gold.fact_ventas
      WHERE upper(trim(coalesce(marca, ''))) = 'DIAPER GENIE'
         OR upper(trim(coalesce(sku, ''))) LIKE 'AC01%';
 
