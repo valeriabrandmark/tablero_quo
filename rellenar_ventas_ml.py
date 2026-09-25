@@ -55,6 +55,9 @@ exactamente lo que no se quiere para una carga hacia atras hecha a mano.
     # revisar TODA la historia, por las dudas
     python rellenar_ventas_ml.py --desde 2026-05-06 --hasta 2026-09-21
 
+    # traer ventas ANTERIORES al piso del tablero (ver motivo_para_no_correr)
+    python rellenar_ventas_ml.py --desde 2026-02-01 --hasta 2026-05-05 --antes-del-piso
+
 Despues hay que reconstruir gold para esas fechas, que es lo que el tablero
 lee de verdad:
 
@@ -268,6 +271,42 @@ def _fecha(texto):
         raise argparse.ArgumentTypeError(f"'{texto}' no es una fecha YYYY-MM-DD")
 
 
+# EL PISO DE 2026-05-06 ES NUESTRO, NO DE MERCADO LIBRE
+#
+# `ml.FECHA_CORTE` es desde cuando el tablero guarda ventas, y por eso la
+# corrida de todos los dias nunca pide nada anterior. Este script nacio para
+# tapar agujeros DENTRO de esa historia, asi que copiaba ese piso como un
+# limite duro.
+#
+# Pero un dia hubo que traer un trimestre anterior --las ventas de una marca de
+# febrero a mayo-- y el piso freno un pedido perfectamente valido: la API de ML
+# llega muchisimo mas atras, el freno era nuestro.
+#
+# Asi que el piso sigue siendo el default, porque de verdad atrapa algo: un ano
+# mal tipeado (2025 en vez de 2026) pediria meses de ordenes de a 15 dias sin
+# que nadie lo note hasta ver la factura de tiempo. Pero ahora se puede abrir a
+# proposito, y hay que decirlo con todas las letras.
+def motivo_para_no_correr(desde, hasta, dias_por_tramo, antes_del_piso, hoy=None):
+    """Por que este rango no se puede pedir, o None si esta bien.
+
+    Vive afuera de `main()` para que se pueda probar sin red y sin base: es la
+    unica parte del script que decide algo.
+    """
+    hoy = hoy or date.today()
+
+    if hasta < desde:
+        return "--hasta no puede ser anterior a --desde"
+    if hasta > hoy:
+        return "--hasta no puede ser futuro"
+    if dias_por_tramo < 1:
+        return "--dias-por-tramo tiene que ser al menos 1"
+    if desde < ml.FECHA_CORTE and not antes_del_piso:
+        return (f"--desde ({desde}) es anterior a {ml.FECHA_CORTE}, el piso "
+                "historico del tablero. Si es a proposito --un relleno de "
+                "ventas viejas-- agregale --antes-del-piso.")
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Rellena las ventas de ML que falten en un rango de fechas.",
@@ -279,17 +318,23 @@ def main():
     parser.add_argument("--dias-por-tramo", type=int, default=DIAS_POR_TRAMO,
                         help=f"De a cuantos dias se le pide a la API "
                              f"(por defecto {DIAS_POR_TRAMO})")
+    parser.add_argument(
+        "--antes-del-piso", action="store_true",
+        help=f"Habilita pedir fechas anteriores a {ml.FECHA_CORTE}. Ver arriba.",
+    )
     args = parser.parse_args()
 
-    if args.hasta < args.desde:
-        parser.error("--hasta no puede ser anterior a --desde")
+    problema = motivo_para_no_correr(
+        args.desde, args.hasta, args.dias_por_tramo, args.antes_del_piso,
+    )
+    if problema:
+        parser.error(problema)
+
     if args.desde < ml.FECHA_CORTE:
-        parser.error(f"--desde no puede ser anterior a {ml.FECHA_CORTE}, "
-                     f"que es el piso historico del tablero")
-    if args.hasta > date.today():
-        parser.error("--hasta no puede ser futuro")
-    if args.dias_por_tramo < 1:
-        parser.error("--dias-por-tramo tiene que ser al menos 1")
+        print(f"OJO: se piden ventas anteriores a {ml.FECHA_CORTE}.\n"
+              "     A esas fechas no las mira ninguna corrida automatica, asi\n"
+              "     que lo que entre a bronze ahora queda invisible hasta que\n"
+              "     se corra modelo.py --relleno para ese mismo rango.\n")
 
     rellenar(args.desde, args.hasta, args.dias_por_tramo)
     print("\n=== LISTO ===")
