@@ -186,5 +186,25 @@ revisar("y recibe los SKU como parametro", "%(skus)s::text[]" in clausula, claus
 # suyo, asi que un LIKE '%...%' aca rompe la consulta entera.
 revisar("no usa comodines", clausula.replace("%(skus)s", "") .count("%") == 0, clausula)
 
+# --- Un relleno no escribe en la tabla que lee el tablero ------------------
+#
+# Es lo que lo hace inofensivo. gold.fact_ventas arranca en la fecha de corte y
+# el tablero cuenta con eso: si un relleno de una marca sola le mete catorce
+# lineas de abril, cualquier panel que mire abril ve esas catorce como si
+# fueran el mes entero. No da error, da un numero equivocado.
+
+from relleno import TABLA_NORMAL, TABLA_PREVIO, tabla_destino
+
+revisar("la corrida de todos los dias escribe en fact_ventas",
+        tabla_destino(es_relleno=False) == "fact_ventas")
+revisar("el relleno escribe en otra tabla",
+        tabla_destino(es_relleno=True) != tabla_destino(es_relleno=False))
+revisar("y esa otra tiene nombre propio",
+        tabla_destino(es_relleno=True) == "fact_ventas_previo")
+# Nombres pelados, sin esquema: los dos usos los llaman como gold.<tabla>, asi
+# que un 'gold.' de mas aca daria gold.gold.fact_ventas.
+revisar("los nombres no traen el esquema",
+        "." not in TABLA_NORMAL and "." not in TABLA_PREVIO)
+
 print(f"\n{len(FALLOS)} FALLARON: {', '.join(FALLOS)}" if FALLOS else "\nTODO OK")
 raise SystemExit(1 if FALLOS else 0)
