@@ -5,9 +5,8 @@
 ============================================================================
 
 Hay costos de Mercado Libre que NO vienen en la orden. La orden trae la
-comision (`sale_fee`) y, con los envios, el flete. Todo lo demas --lo que ML
-nos cobra por otras cosas-- vive en la facturacion mensual, que hoy no
-leemos. Dos que ya sabemos que faltan:
+comision (`sale_fee`) y, con los envios, el flete. Todo lo demas vive en la
+facturacion mensual, que hoy no leemos. Dos que ya sabemos que faltan:
 
   EL COSTO DE LAS CUOTAS. En la orden, `installments` y la diferencia entre
   `total_paid_amount` y `transaction_amount` son lo que paga EL COMPRADOR.
@@ -21,31 +20,36 @@ leemos. Dos que ya sabemos que faltan:
   LA CATEGORIA: un perfume puede entrar a los 60 dias y una crema a los 120.
   Con un corte fijo, lo nuestro es una aproximacion.
 
-La facturacion da PESOS efectivamente cobrados. Si ademas cada fila trae con
-que cruzarla --una orden, un articulo-- el costo deja de ser un total mensual
-y pasa a poder colgarse de cada venta.
-
 ============================================================================
- QUE SE PRUEBA
+ LAS RUTAS, Y COMO SE LLEGO A ESTAS
 ============================================================================
 
-Primero los periodos (para sacar la `key`), despues el detalle de cada uno, y
-de ahi la lista COMPLETA de conceptos de cargo con lo que suma cada uno: la
-pregunta de fondo no es "esta tal cargo" sino "que nos estan cobrando".
-Las rutas salen de la documentacion de Reportes de Facturacion, que no coincide
-entre paises, asi que se prueban las variantes que aparecen.
+La primera version de este sondeo pidio /billing/integration/periods y se
+llevo tres 404. El detalle que lo resolvio fue el tercer intento: pidiendo
+ESA MISMA ruta con menos parametros, contesto 422 "Missing required parameter
+<document_type>" en vez de 404. O sea que del otro lado hay algo que valida
+parametros -- la ruta de periodos es otra, pero la familia existe.
 
-LO IMPORTANTE ES QUE IMPRIME EL CUERPO DE LA RESPUESTA, pase lo que pase. Dos
-veces en este proyecto un 400 llego sin cuerpo y hubo que adivinar; el cuerpo
-decia exactamente que faltaba. No se repite.
+Segun la documentacion de Reportes de Facturacion:
 
-NO ESCRIBE NADA EN LA BASE.
+    /billing/monthly/periods                              los periodos
+    /billing/integration/periods/key/{KEY}/group/ML/details   el detalle
+    /billing/integration/periods/key/{KEY}/group/ML/summary   el resumen
+    /billing/integration/periods/key/{KEY}/documents          las facturas
+
+y la `KEY` de un periodo es EL PRIMER DIA DEL MES ('2026-08-01'). Eso ultimo
+es lo que hace que este sondeo ya no dependa de adivinar la ruta de periodos:
+si no contesta ninguna, las claves se arman solas con los ultimos meses. Un
+404 en el paso 1 deja de ser el final del camino.
+
+NO ESCRIBE NADA EN LA BASE. Pide y muestra, nada mas.
 
     python probar_facturacion_ml.py
 """
 
 import json
 import os
+from datetime import date
 
 import requests
 from dotenv import load_dotenv
@@ -56,10 +60,30 @@ load_dotenv()
 USER_ID = os.getenv("ML_USER_ID")
 BASE = "https://api.mercadolibre.com"
 
+# Cuantos meses probar cuando hay que armar las claves a mano. El mes en curso
+# no se factura hasta que termina, asi que se empieza por el anterior.
+MESES_A_PROBAR = 3
+
+# Las palabras con las que se reconoce cada cargo. Van en minuscula y sin
+# acento del lado de la busqueda, pero el texto de ML puede traerlos: por eso
+# se buscan las dos formas de "interes".
+CARGOS_BUSCADOS = (
+    ("CUOTAS / FINANCIACION",
+     ("cuota", "financ", "interes", "interés", "installment")),
+    ("ALMACENAMIENTO", ("almacen", "storage")),
+)
+
+# Los nombres con los que la API puede mandar el importe de una fila. Cambian
+# entre paises y entre versiones de la documentacion.
+NOMBRES_DE_IMPORTE = ("amount", "charge_amount", "total_amount", "value",
+                      "detail_amount", "amount_with_taxes")
+
+# Con que se podria colgar un cargo de una venta.
+CAMPOS_PARA_CRUZAR = ("order", "operation", "item", "sku", "shipment", "pack")
+
 
 def llamar(ruta, params, token, mostrar=900):
-    url = BASE + ruta
-    r = requests.get(url, headers={"Authorization": f"Bearer {token}"},
+    r = requests.get(BASE + ruta, headers={"Authorization": f"Bearer {token}"},
                      params=params, timeout=30)
     print(f"\n  {r.status_code}  {ruta}")
     if params:
@@ -69,46 +93,107 @@ def llamar(ruta, params, token, mostrar=900):
 
 
 def _monto(fila):
-    """El importe de una fila de facturacion, se llame como se llame.
+    """El importe de una fila, se llame como se llame.
 
-    La API no usa el mismo nombre en todos lados y este sondeo justamente no
-    sabe cual va a venir. Si no encuentra ninguno devuelve 0: el total queda
-    corto y se nota, que es mejor que romper el sondeo entero por un nombre.
+    Si no reconoce ningun nombre devuelve 0: el total queda corto y se nota,
+    que es mejor que romper el sondeo entero por un nombre nuevo.
     """
-    for clave in ("amount", "charge_amount", "total_amount", "value",
-                  "detail_amount", "amount_with_taxes"):
+    for clave in NOMBRES_DE_IMPORTE:
         valor = fila.get(clave)
         if isinstance(valor, (int, float)):
             return float(valor)
     return 0.0
 
 
+def _filas(datos):
+    """Las filas de una respuesta, que no siempre se llaman igual."""
+    if isinstance(datos, list):
+        return [f for f in datos if isinstance(f, dict)]
+    for clave in ("results", "details", "data", "items"):
+        valor = (datos or {}).get(clave)
+        if isinstance(valor, list):
+            return [f for f in valor if isinstance(f, dict)]
+    return []
+
+
+def claves_de_los_ultimos_meses(cuantos=MESES_A_PROBAR):
+    """'2026-08-01', '2026-07-01', ... El mes en curso no se factura todavia."""
+    hoy = date.today()
+    claves = []
+    anio, mes = hoy.year, hoy.month
+    for _ in range(cuantos):
+        mes -= 1
+        if mes == 0:
+            anio, mes = anio - 1, 12
+        claves.append(date(anio, mes, 1).isoformat())
+    return claves
+
+
 def buscar_periodos(token):
-    """La `key` del periodo, que es lo que piden todas las rutas de detalle."""
     print("=" * 74)
     print("PASO 1 · LOS PERIODOS DE FACTURACION")
     print("=" * 74)
 
     for ruta, params in [
-        ("/billing/integration/periods",
-         {"group": "ML", "document_type": "BILL", "limit": 6}),
-        (f"/billing/integration/{USER_ID}/periods",
-         {"group": "ML", "document_type": "BILL", "limit": 6}),
-        ("/billing/integration/periods", {"group": "ML"}),
+        ("/billing/monthly/periods", {"group": "ML", "document_type": "BILL", "limit": 6}),
+        ("/billing/monthly/periods", {"group": "ML", "limit": 6}),
+        ("/billing/monthly/periods", {"document_type": "BILL"}),
+        # La de la primera version. Se deja porque su 422 fue la pista de que
+        # la familia de rutas existe, y porque no cuesta nada.
+        ("/billing/integration/periods", {"group": "ML", "document_type": "BILL", "limit": 6}),
     ]:
         datos = llamar(ruta, params, token)
-        if not datos:
-            continue
-        # La estructura no esta documentada igual en todos lados: se busca
-        # cualquier cosa que parezca una clave de periodo.
-        candidatos = datos.get("results") or datos.get("periods") or []
-        claves = [p.get("key") or p.get("period") for p in candidatos
-                  if isinstance(p, dict)]
+        candidatos = _filas(datos) or (datos or {}).get("periods") or []
+        claves = [p.get("key") or p.get("period") or p.get("date_from")
+                  for p in candidatos if isinstance(p, dict)]
         claves = [k for k in claves if k]
         if claves:
             print(f"\n     >>> periodos encontrados: {claves}")
             return claves
-    return []
+
+    # NO SE ABANDONA ACA. La clave de un periodo es el primer dia del mes, asi
+    # que se arman solas y el paso 2 corre igual.
+    claves = claves_de_los_ultimos_meses()
+    print("\n     >>> ninguna ruta de periodos contesto.")
+    print(f"     >>> se prueban las claves armadas a mano: {claves}")
+    return claves
+
+
+def analizar(filas):
+    """Lo que se vino a ver: que cargos hay, cuanto suman, y si se pueden cruzar."""
+    por_concepto = {}
+    for f in filas:
+        nombre = str(f.get("detail") or f.get("detail_type") or f.get("charge_type")
+                     or f.get("concept") or "?")
+        sub = f.get("detail_sub_type") or f.get("sub_type")
+        if sub:
+            nombre = f"{nombre} / {sub}"
+        cuenta, suma = por_concepto.get(nombre, (0, 0.0))
+        por_concepto[nombre] = (cuenta + 1, suma + _monto(f))
+
+    print("\n     >>> conceptos de cargo en el periodo:")
+    for nombre, (cuenta, suma) in sorted(por_concepto.items(), key=lambda x: -abs(x[1][1])):
+        print(f"         {suma:14,.2f}   x{cuenta:<5} {nombre}")
+
+    print(f"\n     >>> campos de cada fila: {sorted(filas[0].keys())}")
+
+    # LA PREGUNTA QUE DECIDE TODO: es un costo POR VENTA o un gasto del mes.
+    # Con order_id el cargo entra al margen de esa linea; sin eso, es un gasto
+    # del canal y nada mas.
+    cruces = sorted({c for f in filas for c in f
+                     if any(p in c.lower() for p in CAMPOS_PARA_CRUZAR)})
+    print(f"     >>> campos para cruzar con una venta: {cruces or 'NINGUNO'}")
+
+    for titulo, palabras in CARGOS_BUSCADOS:
+        texto = [(f, json.dumps(f, ensure_ascii=False).lower()) for f in filas]
+        encontrados = [f for f, t in texto if any(p in t for p in palabras)]
+        if encontrados:
+            total = sum(_monto(f) for f in encontrados)
+            print(f"\n     >>> HAY CARGOS DE {titulo}: {len(encontrados)} filas, "
+                  f"{total:,.2f} en total")
+            print(json.dumps(encontrados[:2], indent=2, ensure_ascii=False)[:1200])
+        else:
+            print(f"\n     >>> sin cargos de {titulo} en esta muestra")
 
 
 def detalle(clave, token):
@@ -117,94 +202,48 @@ def detalle(clave, token):
     print("=" * 74)
 
     for ruta, params in [
-        (f"/billing/integration/periods/key/{clave}/group/ML/full/details",
-         {"document_type": "BILL", "limit": 30}),
-        (f"/billing/integration/periods/key/{clave}/group/ML/summary/details",
+        (f"/billing/integration/periods/key/{clave}/group/ML/details",
+         {"document_type": "BILL", "limit": 50}),
+        (f"/billing/integration/periods/key/{clave}/group/ML/summary",
          {"document_type": "BILL"}),
+        (f"/billing/integration/periods/key/{clave}/documents",
+         {"group": "ML", "document_type": "BILL", "limit": 5}),
     ]:
         datos = llamar(ruta, params, token, mostrar=1800)
-        if not datos:
-            continue
-
-        filas = datos.get("results") or []
-        if not filas:
-            continue
-
-        # 1) TODOS LOS CONCEPTOS, CON CUANTO SUMA CADA UNO.
-        #
-        #    Antes esto listaba los nombres y listo. El nombre solo no alcanza
-        #    para decidir nada: un cargo de $200 al mes no justifica una
-        #    ingesta y uno de $2 M cambia el margen de un canal entero.
-        por_concepto = {}
-        for f in filas:
-            nombre = str(f.get("detail") or f.get("charge_type")
-                         or f.get("concept") or "?")
-            cuenta, suma = por_concepto.get(nombre, (0, 0.0))
-            por_concepto[nombre] = (cuenta + 1, suma + _monto(f))
-
-        print("\n     >>> conceptos de cargo en el periodo:")
-        for nombre, (cuenta, suma) in sorted(por_concepto.items(),
-                                             key=lambda x: -abs(x[1][1])):
-            print(f"         {suma:14,.2f}   x{cuenta:<5} {nombre}")
-
-        claves_fila = sorted(filas[0].keys()) if filas else []
-        print(f"\n     >>> campos de cada fila: {claves_fila}")
-
-        # 2) SE PUEDE COLGAR DE UNA VENTA, O ES SOLO UN TOTAL DEL MES?
-        #
-        #    Es la diferencia entre "Mercado Libre nos cobro $X de cuotas en
-        #    agosto" y "esta venta nos costo $X de cuotas". Lo segundo entra al
-        #    margen por linea; lo primero es un gasto del canal y nada mas.
-        cruces = sorted({c for f in filas for c in f
-                         if any(p in c.lower() for p in
-                                ("order", "operation", "item", "sku", "shipment", "pack"))})
-        print(f"     >>> campos para cruzar con una venta: {cruces or 'NINGUNO'}")
-
-        # 3) LOS DOS CARGOS QUE ESTAMOS BUSCANDO.
-        for titulo, palabras in (
-            ("CUOTAS / FINANCIACION",
-             ("cuota", "financ", "interes", "interés", "installment")),
-            ("ALMACENAMIENTO", ("almacen", "storage")),
-        ):
-            encontrados = [f for f in filas
-                           if any(p in json.dumps(f, ensure_ascii=False).lower()
-                                  for p in palabras)]
-            if encontrados:
-                total = sum(_monto(f) for f in encontrados)
-                print(f"\n     >>> HAY CARGOS DE {titulo}: {len(encontrados)} filas, "
-                      f"{total:,.2f} en total")
-                print(json.dumps(encontrados[:2], indent=2, ensure_ascii=False)[:1200])
-            else:
-                print(f"\n     >>> sin cargos de {titulo} en esta muestra")
+        filas = _filas(datos)
+        if filas:
+            analizar(filas)
+            return True
+    return False
 
 
 def main():
     token = token_ml()
     print("ML User ID:", USER_ID)
 
-    claves = buscar_periodos(token)
-    if not claves:
-        print("\n" + "=" * 74)
-        print("NINGUNA RUTA DE PERIODOS CONTESTO")
-        print("=" * 74)
-        print("Mirar los cuerpos de arriba: un 403 significa que la aplicacion no")
-        print("tiene el permiso de facturacion y hay que habilitarlo en el panel de")
-        print("desarrolladores. Un 404 significa que la ruta es otra.")
-        return
-
-    for clave in claves[:2]:
-        detalle(clave, token)
+    hubo_detalle = False
+    for clave in buscar_periodos(token)[:MESES_A_PROBAR]:
+        if detalle(clave, token):
+            hubo_detalle = True
+            break
 
     print("\n" + "=" * 74)
     print("QUE MIRAR")
     print("=" * 74)
+    if not hubo_detalle:
+        print("Ninguna ruta devolvio filas. Mirar los cuerpos de arriba:")
+        print("  403  la aplicacion no tiene el permiso de facturacion. Se")
+        print("       habilita en el panel de desarrolladores, y NO significa")
+        print("       que el dato no exista.")
+        print("  404  la ruta es otra en este pais.")
+        print("  422  el parametro es otro: el cuerpo dice cual falta.")
+        return
     print("1. La lista de conceptos con sus totales: que nos cobran, y cuanto.")
     print("   Es lo que decide si vale la pena ingerir algo o no.")
     print("2. Si hay un concepto de cuotas / financiacion. Si existe, es un")
     print("   costo por venta que hoy no esta en ningun lado.")
     print("3. Los campos para cruzar. Con order_id o pack_id el cargo se cuelga")
     print("   de la venta; sin eso, es un gasto mensual del canal y nada mas.")
-    print("4. Un 403 es permiso de la aplicacion, no es que el dato no exista.")
 
 
 if __name__ == "__main__":
