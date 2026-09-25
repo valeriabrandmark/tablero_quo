@@ -35,6 +35,18 @@ cargos esta el que se estaba buscando:
 ASI QUE EL COSTO DE LAS CUOTAS SE PUEDE COLGAR DE CADA VENTA: la fila del
 cargo trae la orden adentro. No es un total del mes.
 
+Y CON --comparar SE VIO QUE YA ESTA COLGADO. En las 63 ordenes que deciden,
+el `sale_fee` de la orden es exactamente la suma de los cargos de esa venta.
+La orden 2000017268460338 lo muestra entero:
+
+    sale_fee  3740.94
+    factura   CVFV 1671.99 + CVFF 600.00 + CVFN 1468.95 = 3740.94
+
+O sea que el costo de las cuotas --y el costo por unidad vendida-- ya estan
+adentro de la comision que el tablero descuenta. Lo que NO esta ahi es el
+flete (se factura aparte, y ya lo trae ml_envios) ni los cargos sin orden:
+publicidad, colecta y almacenamiento Full.
+
 ============================================================================
  LAS RUTAS, Y COMO SE LLEGO A ESTAS
 ============================================================================
@@ -313,33 +325,45 @@ def analizar(filas, cuantas_hay=None, corte=None, comparar=False):
 TOLERANCIA = 0.01
 
 
+# El flete se factura aparte del sale_fee --se ve en cualquier orden que
+# tenga los dos-- y ademas ya lo tenemos por bronze.ml_envios. Queda afuera
+# de la comparacion.
+SUBTIPOS_DE_FLETE = ("CFF", "CXD")
+
+
 def veredicto(cargos, fee):
-    """Que explica mejor el sale_fee de una orden: la comision sola o con el fijo.
+    """Que explica el sale_fee de una orden: todos los cargos, o solo la comision.
 
-    `cargos` son los de ESA orden, por sub_tipo. Se compara contra las dos
-    hipotesis posibles y se devuelve la que entra dentro de la tolerancia:
+    LO QUE CONTESTA. En gold, la comision de una linea de ML es el `sale_fee`
+    de la orden. La factura trae varios cargos por esa misma venta --comision
+    (CVFV), costo por unidad vendida (CVFF), costo de cuotas (CVFN)-- y de
+    esto depende si hay que sumarlos al margen o si ya estan adentro.
 
-        "comision"          sale_fee == CVFV          -> el fijo es un costo APARTE
-        "comision + fijo"   sale_fee == CVFV + CVFF   -> el fijo YA esta adentro
-        "ninguna"           no da ni una ni otra
+        "todos los cargos de venta"  sale_fee == la suma  -> ya estan adentro
+        "solo la comision"           sale_fee == CVFV     -> el resto falta
+        "no decide"                  habia un solo cargo: las dos cuentas dan
+                                     lo mismo y esta orden no prueba nada
+        "ninguna"                    no da ni una ni otra
 
-    De esto depende si sumar el costo por unidad vendida al margen lo arregla
-    o lo cuenta dos veces.
+    LO DE "NO DECIDE" NO ES UN DETALLE. En la corrida del 25/09, 6 de 69
+    ordenes tenian un solo cargo, y contarlas como prueba de "solo la
+    comision" dejo el resultado en 62 contra 6 --"no hay veredicto unico"--
+    cuando en realidad era 63 a 0. Una orden sin nada que comparar no es
+    evidencia de nada.
     """
-    comision = cargos.get("CVFV", 0.0)
-    fijo = cargos.get("CVFF", 0.0)
-    if not comision:
-        return "sin comision en la factura"
+    venta = {k: v for k, v in cargos.items() if k not in SUBTIPOS_DE_FLETE}
+    if not venta:
+        return "sin cargos de venta en la factura"
 
     def parecido(a, b):
         return abs(a - b) <= max(abs(b), 1.0) * TOLERANCIA
 
-    if parecido(fee, comision + fijo):
-        # Si no hubo cargo fijo, las dos hipotesis son la misma cuenta y no
-        # se puede distinguir: esta orden no aporta nada al veredicto.
-        return "comision" if not fijo else "comision + fijo"
-    if parecido(fee, comision):
-        return "comision"
+    if len(venta) == 1:
+        return "no decide" if parecido(fee, sum(venta.values())) else "ninguna"
+    if parecido(fee, sum(venta.values())):
+        return "todos los cargos de venta"
+    if parecido(fee, venta.get("CVFV", 0.0)):
+        return "solo la comision"
     return "ninguna"
 
 
@@ -400,15 +424,21 @@ def comparar_con_las_ordenes(planas):
         print(f"            ej. orden {orden}: sale_fee={fee}"
               f" · factura={ {k: round(x, 2) for k, x in cargos.items()} }")
 
-    con_fijo = cuenta.get("comision + fijo", 0)
-    aparte = cuenta.get("comision", 0)
+    todos = cuenta.get("todos los cargos de venta", 0)
+    solo = cuenta.get("solo la comision", 0)
     print("\n     >>> QUE QUIERE DECIR")
-    if con_fijo and not aparte:
-        print("     El sale_fee YA incluye el costo por unidad vendida.")
-        print("     Sumarlo al margen lo contaria dos veces: NO ingerir CVFF.")
-    elif aparte and not con_fijo:
-        print("     El sale_fee es SOLO la comision: el costo por unidad vendida")
-        print("     son pesos que hoy no ve nadie. Vale ingerir CVFF.")
+    if todos and not solo:
+        print(f"     En las {todos} ordenes que deciden, el sale_fee ES la suma de")
+        print("     todos los cargos de esa venta. O sea que el costo por unidad")
+        print("     vendida y el de cuotas YA ESTAN en la comision del tablero:")
+        print("     sumarlos al margen los contaria dos veces.")
+    elif solo and not todos:
+        print(f"     En las {solo} ordenes que deciden, el sale_fee es SOLO la")
+        print("     comision. El resto de los cargos de venta son pesos que hoy")
+        print("     no ve nadie: vale ingerirlos.")
+    elif not todos and not solo:
+        print("     Ninguna orden decidio: todas tenian un solo cargo. Hace falta")
+        print("     una muestra mas grande (mas paginas).")
     else:
         print("     No hay un veredicto unico: mirar los ejemplos de arriba antes")
         print("     de tocar el margen.")
