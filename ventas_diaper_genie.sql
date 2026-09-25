@@ -57,13 +57,27 @@ INSERT INTO gold.fact_ventas_previo SELECT * FROM movidas;
 --    UNION ALL y no UNION: las dos tablas no se pisan --una termina donde
 --    empieza la otra-- asi que buscar duplicados seria pagar un ordenamiento
 --    entero para no encontrar ninguno.
+--    LA MARCA SOLA NO ALCANZA: FALTAN LOS KITS.
+--
+--    Los packs armados para Mercado Libre --AC01001C, AC01002C: el cesto con
+--    tres repuestos-- no existen en el maestro de Sigma. Son una publicacion
+--    de Meli, no un articulo. Y la marca de cada linea sale del maestro, asi
+--    que esas lineas llegan a gold con marca en NULL y una vista que filtra
+--    por marca las deja afuera, aunque sean Diaper Genie de punta a punta.
+--
+--    Por eso el corte es "la marca O el codigo": todos los articulos de la
+--    marca empiezan con AC01, y los kits son ese mismo codigo con una C al
+--    final. Las dos condiciones se pisan en los cinco articulos del maestro
+--    --que cumplen las dos-- y eso esta bien: es un OR, no los duplica.
 CREATE OR REPLACE VIEW public.ventas_diaper_genie
     WITH (security_invoker = on) AS
     SELECT * FROM gold.fact_ventas_previo
      WHERE upper(trim(coalesce(marca, ''))) = 'DIAPER GENIE'
+        OR upper(trim(coalesce(sku, ''))) LIKE 'AC01%'
     UNION ALL
     SELECT * FROM gold.fact_ventas
-     WHERE upper(trim(coalesce(marca, ''))) = 'DIAPER GENIE';
+     WHERE upper(trim(coalesce(marca, ''))) = 'DIAPER GENIE'
+        OR upper(trim(coalesce(sku, ''))) LIKE 'AC01%';
 
 -- 4) Quien puede leerla.
 --
@@ -92,5 +106,9 @@ COMMIT;
 --         apikey: <clave service_role>
 --         Authorization: Bearer <clave service_role>
 --
+-- OJO CON LOS KITS SI SE SACAN CUENTAS: no estan en el maestro, asi que esas
+-- lineas vienen sin costo, sin proveedor y sin marca. Precio, comision, envio
+-- e IVA si. Un margen calculado sobre ellas da todo el importe como ganancia.
+
 -- Para otra marca no hace falta tocar nada de esto: es la misma vista con otro
 -- nombre y otro literal.
