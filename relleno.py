@@ -64,3 +64,25 @@ def condicion_borrado(cutoff, hasta=None, marca=None):
         valores["marca"] = marca
 
     return " AND ".join(condiciones), valores
+
+
+# Como se ve un SKU adentro del JSON de una orden de Mercado Libre.
+#
+# `order_items` se guarda con json.dumps (ver listas_a_texto en guardado.py),
+# que separa clave y valor con dos puntos Y UN ESPACIO. Por eso el pedazo que
+# se busca es exactamente  "seller_sku": "AC01001"  --con ese espacio y con la
+# comilla del final, que es la que hace que un SKU que sea prefijo de otro no
+# se pueda colar.
+MOLDE_SKU = '"seller_sku": "{sku}"'
+
+
+def condicion_marca_en_items(columna, parametro="skus"):
+    """El `AND` que deja solo las ordenes que llevan alguno de esos SKU.
+
+    SE USA strpos Y NO LIKE. LIKE necesitaria comodines '%', y psycopg2 lee
+    cualquier % de la consulta como un parametro suyo: un LIKE aca reventaria
+    la consulta entera o, peor, la dejaria pasar mal armada.
+    """
+    molde = MOLDE_SKU.replace("{sku}", "' || s || '")
+    return (f"EXISTS (SELECT 1 FROM unnest(%({parametro})s::text[]) s "
+            f"WHERE strpos({columna}, '{molde}') > 0)")

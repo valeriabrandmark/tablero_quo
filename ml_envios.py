@@ -1,3 +1,4 @@
+import argparse
 import os
 import json
 import time
@@ -8,6 +9,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from mercadolibre import token_ml
 from conexion import crear_engine
+import relleno
 
 load_dotenv()
 
@@ -31,8 +33,54 @@ def to_date(valor):
     return None if pd.isna(ts) else ts.date()
 
 
-def extraer_envios():
+def skus_de_la_marca(marca):
+    """Los SKU de esa marca, como los escribe el maestro de Sigma.
+
+    La marca NO vive en la columna `marca` --que esta vacia para casi todos--
+    sino en `attributes.marca`. Es la misma fuente que usa modelo.py para
+    decidir de que marca es cada linea, asi que filtrar por acá trae
+    exactamente los envios de las lineas que van a quedar en gold.
+    """
+    filas = pd.read_sql(
+        """SELECT trim(id) AS sku FROM bronze.sigma_articulos
+            WHERE upper(trim(coalesce("attributes.marca", ''))) = %(marca)s""",
+        engine, params={"marca": marca.strip().upper()},
+    )
+    return filas["sku"].tolist()
+
+
+def extraer_envios(desde=None, hasta=None, marca=None):
+    """Baja a bronze.ml_envios los costos de envio que falten.
+
+    Sin argumentos hace lo de siempre: de FECHA_CORTE hasta hoy, todas las
+    marcas. `desde`/`hasta`/`marca` existen para un relleno de meses viejos.
+
+    POR QUE HAY UN FILTRO DE MARCA. Pedir los envios de un trimestre entero son
+    ~28.000 llamadas de a una, o sea horas. Si lo que se esta rellenando en gold
+    es una sola marca --que es el unico caso en que se rellena hacia atras-- los
+    unicos envios que se van a usar son los de esas ordenes: catorce, no
+    veintiocho mil.
+    """
     print("=== Extrayendo costos de envio de ML (retomando) ===")
+
+    piso_fecha = desde or FECHA_CORTE
+    if desde is not None and desde < FECHA_CORTE:
+        print(f"    OJO: se piden envios anteriores a {FECHA_CORTE}, que es el")
+        print("    piso historico del tablero. Es a proposito, pero acordate de")
+        print("    correr modelo.py --relleno despues para que entren a gold.")
+    print(f"    Desde {piso_fecha}"
+          + (f" hasta {hasta}" if hasta else " hasta hoy")
+          + (f" · solo marca {marca.strip().upper()}" if marca else " · todas las marcas"))
+
+    skus = None
+    if marca:
+        skus = skus_de_la_marca(marca)
+        if not skus:
+            print(f"    NINGUN articulo tiene marca '{marca.strip().upper()}' en el "
+                  "maestro de Sigma.")
+            print("    Revisa como esta escrita: sin articulos no hay envios que pedir.")
+            return
+        print(f"    {len(skus)} articulos de esa marca")
 
     # 1) Los envios que FALTAN, resueltos en SQL y no en pandas.
     #
@@ -54,7 +102,7 @@ def extraer_envios():
     # un dia antes del corte a proposito: el filtro fino sigue siendo el de
     # pandas, que resuelve bien el huso. Sin ese dia de más, una orden del 5 de
     # mayo a las 23 hs -- que en UTC ya es 6 de mayo -- se perderia.
-    piso = (FECHA_CORTE - timedelta(days=1)).isoformat()
+    piso = (piso_fecha - timedelta(days=1)).isoformat()
     ship = 'v."shipping.id"::bigint::text'
 
     # `bronze.ml_envios` no existe en una instalacion nueva: la crea el primer
@@ -66,6 +114,14 @@ def extraer_envios():
     filtro_ya_bajados = f"""
           AND NOT EXISTS (SELECT 1 FROM bronze.ml_envios e
                            WHERE e.shipping_id = {ship})""" if hay_envios else ""
+
+    # EL FILTRO DE MARCA MIRA EL JSON DE LA ORDEN, que es donde esta el SKU: no
+    # hay una columna con el articulo, `order_items` es la orden entera. Como se
+    # arma ese pedazo de SQL --y por que no es un LIKE-- esta en relleno.py.
+    filtro_marca = (
+        "\n          AND " + relleno.condicion_marca_en_items("v.order_items")
+        if skus else ""
+    )
 
     # El parametro va como %(piso)s y NO como :piso.
     #
@@ -79,12 +135,16 @@ def extraer_envios():
         FROM bronze.ml_ventas v
         WHERE v.status = 'paid'
           AND v."shipping.id" IS NOT NULL
-          AND v.date_created >= %(piso)s{filtro_ya_bajados}
+          AND v.date_created >= %(piso)s{filtro_ya_bajados}{filtro_marca}
         ORDER BY {ship}
-    """, engine, params={"piso": piso})
+    """, engine, params={"piso": piso, "skus": skus})
 
     ordenes["fecha"] = ordenes["date_created"].apply(to_date)
-    faltan = ordenes[ordenes["fecha"].notna() & (ordenes["fecha"] >= FECHA_CORTE)]
+    # El filtro fino --el que resuelve bien el huso-- es el mismo que usa
+    # modelo.py para decidir que entra en una reconstruccion. Ver relleno.py.
+    adentro = ~ordenes["fecha"].apply(
+        lambda f: relleno.fuera_de_ventana(f, piso_fecha, hasta))
+    faltan = ordenes[adentro]
     print(f"Faltan {len(faltan)} envios por pedirle a la API.")
 
     if len(faltan) == 0:
@@ -164,6 +224,25 @@ def extraer_envios():
     print(f"Costo total de envios: ${final['costo_envio'].sum():,.2f}")
 
 
+def main():
+    parser = argparse.ArgumentParser(
+        description="Baja a bronze.ml_envios los costos de envio que falten.",
+    )
+    parser.add_argument("--desde", type=date.fromisoformat,
+                        help=f"Primer dia a mirar (por defecto {FECHA_CORTE})")
+    parser.add_argument("--hasta", type=date.fromisoformat,
+                        help="Ultimo dia, incluido (por defecto hoy)")
+    parser.add_argument("--marca",
+                        help="Solo los envios de las ordenes que llevan algun "
+                             "articulo de esa marca. Para un relleno viejo.")
+    args = parser.parse_args()
+
+    if args.desde and args.hasta and args.hasta < args.desde:
+        parser.error("--hasta no puede ser anterior a --desde")
+
+    extraer_envios(args.desde, args.hasta, args.marca)
+
+
 if __name__ == "__main__":
-    extraer_envios()
+    main()
     print("\n=== LISTO ===")
