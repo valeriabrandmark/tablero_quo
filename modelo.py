@@ -9,6 +9,7 @@ from conexion import crear_engine
 from calendario import mes_comercial
 import estado
 import errores_bd
+import relleno
 import ventana
 
 load_dotenv()
@@ -22,6 +23,25 @@ FECHA_CORTE = date(2026, 5, 6)
 # Todo lo anterior a esa ventana en gold.fact_ventas queda intacto (no se vuelve a tocar).
 WINDOW_DAYS = 7
 CUTOFF = max(FECHA_CORTE, date.today() - timedelta(days=WINDOW_DAYS))
+
+# ============================================================================
+#  EL MODO RELLENO: traer un rango VIEJO, y solo ese
+# ============================================================================
+#
+# La corrida de todos los dias reconstruye "de CUTOFF en adelante" y borra esa
+# misma ventana antes de insertar. Para rellenar un rango viejo --ventas de
+# febrero que nunca entraron porque FECHA_CORTE esta en mayo-- ese borrado sin
+# techo se llevaria puesta TODA la tabla: `DELETE WHERE fecha >= '2026-02-01'`
+# son cuatro meses de datos buenos.
+#
+# Por eso el relleno tiene su propio techo y su propio filtro, y los dos viajan
+# hasta el DELETE. Con los dos puestos, lo unico que se toca de gold son las
+# lineas de ESA marca dentro de ESAS fechas: correrlo dos veces da lo mismo que
+# correrlo una, y no roza nada de lo que ya estaba.
+#
+# En la corrida normal los dos son None y no cambia absolutamente nada.
+HASTA = None      # ultimo dia a reconstruir, incluido
+MARCA = None      # unica marca a escribir, ya en mayusculas
 
 # ============================================================================
 #  LA VENTANA SE ESTIRA SOLA CUANDO CAMBIA UN COSTO VIEJO
@@ -337,6 +357,15 @@ def piso_sql():
     return (CUTOFF - timedelta(days=1)).isoformat()
 
 
+def fuera_de_ventana(f):
+    """Si esa fecha queda afuera de lo que hay que reconstruir.
+
+    La cuenta vive en relleno.py --que no abre la base y por eso se puede
+    probar-- y esto solo le pasa los limites de la corrida.
+    """
+    return relleno.fuera_de_ventana(f, CUTOFF, HASTA)
+
+
 def costo_vigente(tramos, fecha):
     """El costo del ultimo tramo que ya habia arrancado esa fecha.
 
@@ -604,7 +633,7 @@ def construir_fact_ventas():
 
     for _, r in sigma.iterrows():
         f = to_date(r["fecha"])
-        if f is None or f < CUTOFF:
+        if fuera_de_ventana(f):
             continue
         mc = mes_comercial(f)
         sku = r["itemArticuloId"]
@@ -821,7 +850,7 @@ def construir_fact_ventas():
 
     for _, r in tn.iterrows():
         f = to_date(r["fecha"])
-        if f is None or f < CUTOFF:
+        if fuera_de_ventana(f):
             continue
         mc = mes_comercial(f)
         sku = r["sku"]
@@ -993,7 +1022,7 @@ def construir_fact_ventas():
 
         for _, r in ml.iterrows():
             f = to_date(r["date_created"])
-            if f is None or f < CUTOFF:
+            if fuera_de_ventana(f):
                 continue
             mc = mes_comercial(f)
             items = json.loads(r["order_items"]) if isinstance(r["order_items"], str) else r["order_items"]
@@ -1083,6 +1112,20 @@ def construir_fact_ventas():
     # quedaba pensando que el --todo no habia funcionado.
     dias = (date.today() - CUTOFF).days
     print(f"Total de lineas (desde {CUTOFF}, {dias} dias): {len(filas)}")
+
+    # EL FILTRO DE MARCA SE APLICA ACA Y NO EN LAS CONSULTAS DE BRONZE, y no es
+    # por comodidad: la marca no esta en las tablas de venta, se resuelve por
+    # SKU contra el maestro de articulos mientras se arma cada linea. Filtrar
+    # antes obligaria a repetir ese cruce en las tres consultas.
+    #
+    # Se compara en mayusculas y sin espacios porque lo que llega del maestro
+    # viene como lo escribio quien lo cargo.
+    if MARCA is not None:
+        antes = len(filas)
+        filas = [f for f in filas
+                 if str(f.get("marca") or "").strip().upper() == MARCA]
+        print(f"  Filtrado por marca {MARCA}: {len(filas)} de {antes} lineas")
+
     df = pd.DataFrame(filas)
 
     with engine.begin() as con:
@@ -1132,9 +1175,14 @@ def construir_fact_ventas():
         if existe:
             # Solo se borra (y se va a re-insertar) la ventana movil. Todo lo anterior
             # a CUTOFF en gold.fact_ventas queda intacto -- no se vuelve a tocar ni reprocesar.
+            #
+            # EN EL MODO RELLENO EL BORRADO LLEVA LOS MISMOS DOS LIMITES que se
+            # usaron para armar las filas, y eso es lo que lo hace seguro: sin
+            # el techo, un relleno de febrero borraria los cuatro meses buenos
+            # que vienen despues antes de insertar cinco lineas.
+            donde, valores = relleno.condicion_borrado(CUTOFF, HASTA, MARCA)
             resultado = con.exec_driver_sql(
-                "DELETE FROM gold.fact_ventas WHERE fecha >= %(cutoff)s",
-                {"cutoff": CUTOFF}
+                "DELETE FROM gold.fact_ventas WHERE " + donde, valores,
             )
             print(f"  Filas viejas borradas dentro de la ventana (se van a reemplazar): {resultado.rowcount}")
 
@@ -1152,6 +1200,19 @@ def main():
         help=f"Cuantos dias hacia atras reconstruir (por defecto {WINDOW_DAYS})",
     )
     parser.add_argument(
+        "--relleno", action="store_true",
+        help="Modo relleno: reconstruye SOLO el rango --desde/--hasta, y solo "
+             "esa --marca si se pasa. Es la unica forma de meter en gold "
+             f"ventas anteriores a {FECHA_CORTE}, y la unica que acota el "
+             "borrado por arriba. Se corre a mano.",
+    )
+    parser.add_argument("--desde", type=date.fromisoformat,
+                        help="Solo con --relleno: primer dia (YYYY-MM-DD)")
+    parser.add_argument("--hasta", type=date.fromisoformat,
+                        help="Solo con --relleno: ultimo dia, incluido")
+    parser.add_argument("--marca",
+                        help="Solo con --relleno: unica marca a escribir")
+    parser.add_argument(
         "--todo", action="store_true",
         help=f"Reconstruye TODO desde {FECHA_CORTE}. Tarda, pero es la unica forma "
              f"de que un dato que llego tarde a bronze (por ejemplo el costo de "
@@ -1165,7 +1226,31 @@ def main():
     # ml_envios.py se pone al dia despues de meses sin correr -- ese dato nunca
     # entra a gold, porque gold ya no vuelve a mirar esas fechas. Para eso esta
     # --todo, que se corre a mano una vez y despues no se toca mas.
-    global CUTOFF
+    global CUTOFF, HASTA, MARCA
+
+    # EL RELLENO SE VA POR OTRO CAMINO ENTERO y sale antes de tocar nada de lo
+    # de abajo. No mira la ventana, no estira por costos pendientes y no borra
+    # la anotacion de costos: esa anotacion es para la corrida normal, y
+    # limpiarla desde un relleno dejaria dias sin recalcular sin que nadie se
+    # entere.
+    if args.relleno:
+        if args.desde is None or args.hasta is None:
+            parser.error("--relleno necesita --desde y --hasta")
+        if args.hasta < args.desde:
+            parser.error("--hasta no puede ser anterior a --desde")
+
+        CUTOFF = args.desde
+        HASTA = args.hasta
+        MARCA = args.marca.strip().upper() if args.marca else None
+
+        print("=== MODO RELLENO ===")
+        print(f"    Rango: {CUTOFF} a {HASTA}"
+              + (f" · marca: {MARCA}" if MARCA else " · TODAS las marcas"))
+        print("    Fuera de ese rango no se toca ni una fila.\n")
+        construir_fact_ventas()
+        print("\n=== LISTO ===")
+        return
+
     if args.todo:
         CUTOFF = FECHA_CORTE
     else:
