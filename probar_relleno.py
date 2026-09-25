@@ -17,7 +17,7 @@ techo casi nunca se usa", esto es lo unico que lo va a frenar.
     python probar_relleno.py
 """
 
-from datetime import date
+from datetime import date, timedelta
 
 from relleno import condicion_borrado, fuera_de_ventana
 
@@ -105,6 +105,49 @@ revisar("la marca se compara en mayusculas", "upper(" in donde, donde)
 revisar("y sin espacios alrededor", "trim(" in donde, donde)
 # Un NULL en marca no puede hacer que la fila se escape del borrado.
 revisar("una marca nula cuenta como vacia", "coalesce(marca" in donde, donde)
+
+# --- El piso del relleno de Mercado Libre ----------------------------------
+#
+# `rellenar_ventas_ml.py` copiaba `ml.FECHA_CORTE` como limite duro, y por eso
+# freno el pedido de las ventas de febrero: un rango perfectamente valido, que
+# la API de ML sirve sin problema. Ahora el piso es el default y se abre con
+# --antes-del-piso.
+#
+# Se prueba la funcion y no el parser porque es la unica parte del script que
+# decide algo; lo demas es red.
+
+import mercadolibre as ml
+from rellenar_ventas_ml import motivo_para_no_correr
+
+ANTES = date(2026, 2, 1)
+DESPUES = date(2026, 5, 6)
+
+revisar("un rango normal se corre",
+        motivo_para_no_correr(DESPUES, date(2026, 9, 21), 15, False, HOY) is None)
+
+# LO QUE ROMPIO: sin el flag, el piso frena algo que la API si puede dar.
+freno = motivo_para_no_correr(ANTES, date(2026, 5, 5), 15, False, HOY)
+revisar("antes del piso, sin permiso, no corre", freno is not None)
+revisar("y el error dice como habilitarlo",
+        freno is not None and "--antes-del-piso" in freno, str(freno))
+
+revisar("antes del piso, con permiso, corre",
+        motivo_para_no_correr(ANTES, date(2026, 5, 5), 15, True, HOY) is None)
+
+# El permiso abre el piso y NADA MAS: los otros tres frenos siguen.
+revisar("con permiso, un rango al reves sigue frenado",
+        motivo_para_no_correr(date(2026, 5, 5), ANTES, 15, True, HOY) is not None)
+revisar("con permiso, el futuro sigue frenado",
+        motivo_para_no_correr(ANTES, date(2026, 12, 1), 15, True, HOY) is not None)
+revisar("con permiso, un tramo de cero dias sigue frenado",
+        motivo_para_no_correr(ANTES, date(2026, 5, 5), 0, True, HOY) is not None)
+
+# El piso es el de mercadolibre.py, no una copia que pueda quedar desfasada.
+revisar("el piso sale de mercadolibre.py",
+        motivo_para_no_correr(ml.FECHA_CORTE, ml.FECHA_CORTE, 15, False, HOY) is None
+        and motivo_para_no_correr(
+            ml.FECHA_CORTE - timedelta(days=1), ml.FECHA_CORTE, 15, False, HOY,
+        ) is not None)
 
 print(f"\n{len(FALLOS)} FALLARON: {', '.join(FALLOS)}" if FALLOS else "\nTODO OK")
 raise SystemExit(1 if FALLOS else 0)
