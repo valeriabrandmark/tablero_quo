@@ -1,5 +1,12 @@
 /**
- * Sube la auditoria de fletes de esta planilla a bronze.auditoria_sevillanita.
+ * Sube la hoja ACCIONES a bronze.auditoria_sevillanita.
+ *
+ * REEMPLAZA A `subirAuditoriaASupabase`, que pegaba contra /rest/v1 con la
+ * SERVICE KEY guardada en las Propiedades del script. Ese camino no podia
+ * funcionar --la tabla no tiene permiso para ningun rol de la API, y `bronze`
+ * no se sirve por la API-- y habilitarlo habria costado caro: exponer `bronze`
+ * deja al alcance de la clave publica cinco tablas de cuentas corrientes que
+ * hoy tienen INSERT, UPDATE y DELETE para `anon`.
  *
  * ============================================================================
  *  COMO SE CONFIGURA (una sola vez)
@@ -27,9 +34,8 @@
  *  QUE MANDA
  * ============================================================================
  *
- * Las columnas se buscan POR EL TEXTO DEL ENCABEZADO, no por posicion: mover
- * una columna de lugar en la planilla no rompe nada. Si cambia el texto de un
- * encabezado, se cambia aca abajo y solo aca.
+ * De la hoja ACCIONES salen las siete columnas en orden: N° FACTURA, fecha,
+ * localidad, veredicto de tarifa, veredicto de peso, accion y monto en juego.
  *
  * Es un upsert por factura: se puede reenviar la auditoria entera todas las
  * veces que haga falta, que cada factura queda una sola vez con su ultima
@@ -40,19 +46,19 @@
 var DESTINO =
   'https://znxhjbkkvkvcszdbczcg.supabase.co/functions/v1/auditoria-sevillanita';
 
-/** Que encabezado de la planilla va a cada columna de la tabla. */
-var COLUMNAS = {
-  factura: 'Factura',
-  fecha: 'Fecha',
-  localidad: 'Localidad',
-  veredicto_tarifa: 'Veredicto tarifa',
-  veredicto_peso: 'Veredicto peso',
-  accion: 'Accion',
-  monto_en_juego: 'Monto en juego'
-};
+/** La hoja de la que se lee: la que arma "Calcular acciones". */
+var HOJA = 'ACCIONES';
 
-/** La hoja de la que se lee. Vacio = la que este activa. */
-var HOJA = 'Auditoria';
+/**
+ * Cuantas columnas se leen, de la A a la G, EN ESE ORDEN.
+ *
+ * Va por posicion y no por el texto del encabezado --como lo hacia el script
+ * anterior-- y no es descuido: esta hoja no la escribe una persona, la genera
+ * "Calcular acciones". El orden lo fija ese codigo, asi que es mas estable que
+ * los titulos, que alguien puede renombrar sin saber que algo depende de
+ * ellos. Si esa funcion algun dia mueve una columna, se cambia aca.
+ */
+var COLUMNAS = 7;
 
 function onOpen() {
   SpreadsheetApp.getUi()
@@ -80,12 +86,20 @@ function fecha_(valor) {
   return String(valor).trim() || null;
 }
 
+/** El texto de una celda, o null si esta vacia. */
+function texto_(valor) {
+  return String(valor === null || valor === undefined ? '' : valor).trim() || null;
+}
+
 /**
  * Un numero de una celda que puede venir como '$ 1.234,56'.
  *
  * SI NO SE ENTIENDE, SE MANDA EL TEXTO TAL CUAL y el servidor rechaza el envio
- * diciendo que fila es. Convertirlo a 0 seria peor: el monto en juego de esa
- * factura desapareceria sin que nadie lo note.
+ * diciendo que fila es.
+ *
+ * El script anterior hacia `Number(celda) || 0`, que para '$ 1.234,56' da 0:
+ * la fila subia igual, con el monto en juego en cero y sin que nadie se
+ * enterara. Un envio rechazado se ve; un cero inventado, no.
  */
 function numero_(valor) {
   if (valor === '' || valor === null || valor === undefined) return null;
@@ -106,26 +120,14 @@ function subirAuditoria() {
 
   var valores = hoja.getDataRange().getValues();
   if (valores.length < 2) {
-    ui.alert('La hoja no tiene filas debajo del encabezado.');
+    ui.alert('La hoja ' + HOJA + ' no tiene filas debajo del encabezado.');
     return;
   }
-
-  // El encabezado se compara sin mayusculas ni espacios de mas: una celda con
-  // un espacio al final no tiene por que romper el envio.
-  var encabezado = valores[0].map(function (c) {
-    return String(c).trim().toLowerCase();
-  });
-  var donde = {};
-  var faltan = [];
-  Object.keys(COLUMNAS).forEach(function (campo) {
-    var i = encabezado.indexOf(COLUMNAS[campo].trim().toLowerCase());
-    if (i === -1) faltan.push(COLUMNAS[campo]);
-    donde[campo] = i;
-  });
-  if (faltan.length) {
+  if (valores[0].length < COLUMNAS) {
     ui.alert(
-      'No encuentro estas columnas en el encabezado:\n\n  ' + faltan.join('\n  ') +
-      '\n\nSi en la planilla se llaman distinto, cambiar COLUMNAS arriba del script.'
+      'La hoja ' + HOJA + ' tiene ' + valores[0].length + ' columnas y hacen ' +
+      'falta ' + COLUMNAS + ', de N° FACTURA a MONTO EN JUEGO.\n\n' +
+      'Correr "Calcular acciones" primero.'
     );
     return;
   }
@@ -133,18 +135,16 @@ function subirAuditoria() {
   var filas = [];
   for (var f = 1; f < valores.length; f++) {
     var fila = valores[f];
-    // Una fila sin factura es una fila vacia del final de la hoja: se saltea
-    // aca y no se manda. Las que tengan datos pero no factura las rechaza el
-    // servidor, que es lo que queremos ver.
-    if (!String(fila[donde.factura] || '').trim()) continue;
+    // Sin factura es una fila vacia del final de la hoja: no se manda.
+    if (!String(fila[0] || '').trim()) continue;
     filas.push({
-      factura: String(fila[donde.factura]).trim(),
-      fecha: fecha_(fila[donde.fecha]),
-      localidad: String(fila[donde.localidad] || '').trim() || null,
-      veredicto_tarifa: String(fila[donde.veredicto_tarifa] || '').trim() || null,
-      veredicto_peso: String(fila[donde.veredicto_peso] || '').trim() || null,
-      accion: String(fila[donde.accion] || '').trim() || null,
-      monto_en_juego: numero_(fila[donde.monto_en_juego])
+      factura: String(fila[0]).trim(),
+      fecha: fecha_(fila[1]),
+      localidad: texto_(fila[2]),
+      veredicto_tarifa: texto_(fila[3]),
+      veredicto_peso: texto_(fila[4]),
+      accion: texto_(fila[5]),
+      monto_en_juego: numero_(fila[6])
     });
   }
 
