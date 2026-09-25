@@ -89,7 +89,10 @@ from datetime import date
 import requests
 from dotenv import load_dotenv
 
+import pandas as pd
+
 import mercadolibre as ml
+from conexion import crear_engine
 from mercadolibre import token_ml
 
 load_dotenv()
@@ -229,7 +232,7 @@ def buscar_periodos(token):
     return claves
 
 
-def analizar(filas, cuantas_hay=None, corte=None):
+def analizar(filas, cuantas_hay=None, corte=None, comparar=False):
     """Que cargos hay, cuanto suman, y si se pueden colgar de una venta."""
     planas = [_aplanar(f) for f in filas]
 
@@ -300,6 +303,115 @@ def analizar(filas, cuantas_hay=None, corte=None):
                       f"  orden={f['ordenes'][:1] or '-'}")
         else:
             print(f"\n     >>> sin cargos de {titulo} en esta muestra")
+
+    if comparar:
+        comparar_con_las_ordenes(planas)
+
+
+# Cuanto puede diferir un importe para considerarlo "el mismo". No es cero
+# porque los dos lados redondean distinto y el sale_fee viene por unidad.
+TOLERANCIA = 0.01
+
+
+def veredicto(cargos, fee):
+    """Que explica mejor el sale_fee de una orden: la comision sola o con el fijo.
+
+    `cargos` son los de ESA orden, por sub_tipo. Se compara contra las dos
+    hipotesis posibles y se devuelve la que entra dentro de la tolerancia:
+
+        "comision"          sale_fee == CVFV          -> el fijo es un costo APARTE
+        "comision + fijo"   sale_fee == CVFV + CVFF   -> el fijo YA esta adentro
+        "ninguna"           no da ni una ni otra
+
+    De esto depende si sumar el costo por unidad vendida al margen lo arregla
+    o lo cuenta dos veces.
+    """
+    comision = cargos.get("CVFV", 0.0)
+    fijo = cargos.get("CVFF", 0.0)
+    if not comision:
+        return "sin comision en la factura"
+
+    def parecido(a, b):
+        return abs(a - b) <= max(abs(b), 1.0) * TOLERANCIA
+
+    if parecido(fee, comision + fijo):
+        # Si no hubo cargo fijo, las dos hipotesis son la misma cuenta y no
+        # se puede distinguir: esta orden no aporta nada al veredicto.
+        return "comision" if not fijo else "comision + fijo"
+    if parecido(fee, comision):
+        return "comision"
+    return "ninguna"
+
+
+def comparar_con_las_ordenes(planas):
+    """Lo que ML factura por una venta contra lo que el tablero cree que cuesta.
+
+    LA PREGUNTA. En gold, la comision de una linea de Mercado Libre es el
+    `sale_fee` de la orden. La factura, en cambio, trae DOS cargos por la misma
+    venta: "Cargo por vender" (CVFV) y "Costo por unidad vendida" (CVFF, $500
+    fijos). Si el sale_fee ya es la suma de los dos, el tablero esta bien y
+    sumar el fijo lo contaria dos veces. Si el sale_fee es solo el primero,
+    hay $500 por unidad que hoy no ve nadie.
+
+    No se puede contestar mirando porcentajes --la comision cambia con la
+    categoria-- asi que se compara ORDEN POR ORDEN contra bronze.ml_ventas.
+    """
+    por_orden = {}
+    for f in planas:
+        if not f["ordenes"] or not f["sub_tipo"]:
+            continue
+        # Una fila puede cubrir varias ordenes: no se puede repartir el
+        # importe entre ellas, asi que esas quedan afuera de la comparacion.
+        if len(f["ordenes"]) > 1:
+            continue
+        cargos = por_orden.setdefault(f["ordenes"][0], {})
+        cargos[f["sub_tipo"]] = cargos.get(f["sub_tipo"], 0.0) + f["monto"]
+
+    if not por_orden:
+        print("\n     >>> ninguna fila con una sola orden: no se puede comparar")
+        return
+
+    print("\n" + "=" * 74)
+    print(f"PASO 3 · LA FACTURA CONTRA LO QUE EL TABLERO CREE ({len(por_orden)} ordenes)")
+    print("=" * 74)
+
+    fees = pd.read_sql("""
+        SELECT v.id,
+               sum((it->>'sale_fee')::numeric * (it->>'quantity')::numeric) AS sale_fee
+        FROM bronze.ml_ventas v, lateral jsonb_array_elements(v.order_items::jsonb) it
+        WHERE v.id = ANY(%(ids)s::bigint[])
+        GROUP BY v.id
+    """, crear_engine(), params={"ids": list(por_orden)})
+    fee_de = dict(zip(fees["id"], fees["sale_fee"].astype(float)))
+
+    cuenta = {}
+    ejemplos = {}
+    for orden, cargos in por_orden.items():
+        if orden not in fee_de:
+            v = "la orden no esta en bronze"
+        else:
+            v = veredicto(cargos, fee_de[orden])
+        cuenta[v] = cuenta.get(v, 0) + 1
+        ejemplos.setdefault(v, (orden, cargos, fee_de.get(orden)))
+
+    for v, n in sorted(cuenta.items(), key=lambda x: -x[1]):
+        orden, cargos, fee = ejemplos[v]
+        print(f"\n     {n:>5}  {v}")
+        print(f"            ej. orden {orden}: sale_fee={fee}"
+              f" · factura={ {k: round(x, 2) for k, x in cargos.items()} }")
+
+    con_fijo = cuenta.get("comision + fijo", 0)
+    aparte = cuenta.get("comision", 0)
+    print("\n     >>> QUE QUIERE DECIR")
+    if con_fijo and not aparte:
+        print("     El sale_fee YA incluye el costo por unidad vendida.")
+        print("     Sumarlo al margen lo contaria dos veces: NO ingerir CVFF.")
+    elif aparte and not con_fijo:
+        print("     El sale_fee es SOLO la comision: el costo por unidad vendida")
+        print("     son pesos que hoy no ve nadie. Vale ingerir CVFF.")
+    else:
+        print("     No hay un veredicto unico: mirar los ejemplos de arriba antes")
+        print("     de tocar el margen.")
 
 
 RUTA_DETALLE = "/billing/integration/periods/key/{clave}/group/ML/details"
@@ -372,14 +484,14 @@ def pedir_paginas(clave, token, paginas, limite):
     return filas, cuantas_hay, corte
 
 
-def detalle(clave, token, paginas, limite):
+def detalle(clave, token, paginas, limite, comparar=False):
     print("\n" + "=" * 74)
     print(f"PASO 2 · EL DETALLE DEL PERIODO {clave}")
     print("=" * 74)
 
     filas, cuantas_hay, corte = pedir_paginas(clave, token, paginas, limite)
     if filas:
-        analizar(filas, cuantas_hay, corte)
+        analizar(filas, cuantas_hay, corte, comparar)
         return True
 
     # Si el detalle no contesto, se prueban las otras dos por si el periodo
@@ -409,6 +521,10 @@ def main():
                              "Un mes entero son ~28.000 filas.")
     parser.add_argument("--limite", type=int, default=200,
                         help="Filas por pagina (por defecto 200)")
+    parser.add_argument("--comparar", action="store_true",
+                        help="Compara lo que ML factura por cada venta contra el "
+                             "sale_fee que el tablero usa como comision. Lee "
+                             "bronze.ml_ventas; no escribe nada.")
     args = parser.parse_args()
 
     token = token_ml()
@@ -418,7 +534,7 @@ def main():
 
     hubo_detalle = False
     for clave in claves:
-        if detalle(clave, token, args.paginas, args.limite):
+        if detalle(clave, token, args.paginas, args.limite, args.comparar):
             hubo_detalle = True
             break
 
