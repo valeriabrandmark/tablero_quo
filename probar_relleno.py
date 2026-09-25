@@ -149,5 +149,42 @@ revisar("el piso sale de mercadolibre.py",
             ml.FECHA_CORTE - timedelta(days=1), ml.FECHA_CORTE, 15, False, HOY,
         ) is not None)
 
+# --- El filtro de marca sobre el JSON de una orden de ML -------------------
+#
+# Es el que hace que rellenar los envios de una marca sean 14 llamadas a la API
+# y no 28.000. Se prueba contra el MISMO serializador con el que bronze guarda
+# `order_items`: si algun dia json.dumps cambia de formato --o alguien le pone
+# separators=(',',':')-- el pedazo buscado deja de aparecer y el filtro no
+# encontraria una sola orden, en silencio.
+
+import json
+
+from relleno import MOLDE_SKU, condicion_marca_en_items
+
+def _como_lo_guarda_bronze(sku):
+    """Un order_items de una sola linea, serializado como en guardado.py."""
+    return json.dumps([{"item": {"seller_sku": sku, "id": "MLA1"}, "quantity": 1}],
+                      ensure_ascii=False)
+
+guardado = _como_lo_guarda_bronze("AC01001")
+revisar("el molde es el que json.dumps escribe de verdad",
+        MOLDE_SKU.format(sku="AC01001") in guardado, guardado)
+
+# LA COMILLA DEL FINAL NO ES DECORACION: sin ella, pedir los envios de un SKU
+# se llevaria puestos los de todos los que empiezan igual.
+revisar("un SKU que es prefijo de otro no coincide",
+        MOLDE_SKU.format(sku="AC0100") not in guardado)
+revisar("y uno que no esta, tampoco",
+        MOLDE_SKU.format(sku="AC01002") not in guardado)
+
+clausula = condicion_marca_en_items("v.order_items")
+revisar("la clausula mira la columna que se le pasa",
+        "strpos(v.order_items," in clausula, clausula)
+revisar("y recibe los SKU como parametro", "%(skus)s::text[]" in clausula, clausula)
+
+# Sin comodines: psycopg2 lee cualquier otro % de la consulta como parametro
+# suyo, asi que un LIKE '%...%' aca rompe la consulta entera.
+revisar("no usa comodines", clausula.replace("%(skus)s", "") .count("%") == 0, clausula)
+
 print(f"\n{len(FALLOS)} FALLARON: {', '.join(FALLOS)}" if FALLOS else "\nTODO OK")
 raise SystemExit(1 if FALLOS else 0)
