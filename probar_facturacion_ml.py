@@ -21,6 +21,21 @@ facturacion mensual, que hoy no leemos. Dos que ya sabemos que faltan:
   Con un corte fijo, lo nuestro es una aproximacion.
 
 ============================================================================
+ LO QUE YA CONTESTO (corrida del 25/09/2026, periodo 2026-08-01)
+============================================================================
+
+La ruta de detalle anda y devuelve 27.737 filas para un mes. Entre los
+cargos esta el que se estaba buscando:
+
+    transaction_detail  "Costo por ofrecer cuotas"
+    detail_sub_type     CVFN
+    detail_amount       1468.95
+    sales_info[0]       order_id, operation_id, sale_date_time, ...
+
+ASI QUE EL COSTO DE LAS CUOTAS SE PUEDE COLGAR DE CADA VENTA: la fila del
+cargo trae la orden adentro. No es un total del mes.
+
+============================================================================
  LAS RUTAS, Y COMO SE LLEGO A ESTAS
 ============================================================================
 
@@ -42,11 +57,31 @@ es lo que hace que este sondeo ya no dependa de adivinar la ruta de periodos:
 si no contesta ninguna, las claves se arman solas con los ultimos meses. Un
 404 en el paso 1 deja de ser el final del camino.
 
+============================================================================
+ LA FORMA DE UNA FILA
+============================================================================
+
+No es plana: cada fila es un cargo con sus partes separadas.
+
+    charge_info     que cargo es y cuanto        transaction_detail,
+                                                 detail_sub_type, detail_amount
+    sales_info      LA VENTA: order_id, operation_id, fecha, importe
+    items_info      el articulo: item_id, titulo, categoria
+    shipping_info   shipping_id, pack_id
+    discount_info   bonificaciones, applied_percentage
+
+La primera version de este sondeo las leia como si fueran planas y por eso
+dijo "? x50, 0.00": ningun campo estaba donde miraba. Es el riesgo de un
+sondeo que resume -- si no entiende la forma, no falla, MIENTE. Por eso
+ahora, cuando no encuentra el importe donde deberia estar, lo dice.
+
 NO ESCRIBE NADA EN LA BASE. Pide y muestra, nada mas.
 
     python probar_facturacion_ml.py
+    python probar_facturacion_ml.py --periodo 2026-08-01 --paginas 60
 """
 
+import argparse
 import json
 import os
 from datetime import date
@@ -88,7 +123,8 @@ def llamar(ruta, params, token, mostrar=900):
     print(f"\n  {r.status_code}  {ruta}")
     if params:
         print(f"     params: {params}")
-    print(f"     cuerpo: {r.text[:mostrar]}")
+    if mostrar:
+        print(f"     cuerpo: {r.text[:mostrar]}")
     return r.json() if r.status_code == 200 else None
 
 
@@ -103,6 +139,39 @@ def _monto(fila):
         if isinstance(valor, (int, float)):
             return float(valor)
     return 0.0
+
+
+def _aplanar(fila):
+    """Una fila de cargo, con lo que sirve a la vista.
+
+    Devuelve tambien `sin_importe` para poder contar cuantas no se entendieron:
+    un total que se arma ignorando filas en silencio es peor que no tenerlo.
+    """
+    cargo = fila.get("charge_info") or {}
+    ventas = fila.get("sales_info") or []
+    items = fila.get("items_info") or []
+    envio = fila.get("shipping_info") or {}
+
+    monto = cargo.get("detail_amount")
+    if not isinstance(monto, (int, float)):
+        monto = _monto(fila)
+        sin_importe = True
+    else:
+        sin_importe = False
+
+    return {
+        "concepto": (cargo.get("transaction_detail") or "?").strip(),
+        "sub_tipo": cargo.get("detail_sub_type"),
+        "tipo": cargo.get("detail_type"),
+        "monto": float(monto or 0),
+        "sin_importe": sin_importe,
+        # UNA FILA PUEDE CUBRIR VARIAS VENTAS (un pack). Se guardan todas: de
+        # eso depende si el cargo se puede repartir o no.
+        "ordenes": [v.get("order_id") for v in ventas if v.get("order_id")],
+        "items": [i.get("item_id") for i in items if i.get("item_id")],
+        "shipping_id": envio.get("shipping_id"),
+        "pack_id": envio.get("pack_id"),
+    }
 
 
 def _filas(datos):
@@ -160,70 +229,147 @@ def buscar_periodos(token):
 
 
 def analizar(filas):
-    """Lo que se vino a ver: que cargos hay, cuanto suman, y si se pueden cruzar."""
+    """Que cargos hay, cuanto suman, y si se pueden colgar de una venta."""
+    planas = [_aplanar(f) for f in filas]
+
     por_concepto = {}
-    for f in filas:
-        nombre = str(f.get("detail") or f.get("detail_type") or f.get("charge_type")
-                     or f.get("concept") or "?")
-        sub = f.get("detail_sub_type") or f.get("sub_type")
-        if sub:
-            nombre = f"{nombre} / {sub}"
-        cuenta, suma = por_concepto.get(nombre, (0, 0.0))
-        por_concepto[nombre] = (cuenta + 1, suma + _monto(f))
+    for f in planas:
+        nombre = f["concepto"] + (f" [{f['sub_tipo']}]" if f["sub_tipo"] else "")
+        cuenta, suma, con_orden = por_concepto.get(nombre, (0, 0.0, 0))
+        por_concepto[nombre] = (cuenta + 1, suma + f["monto"],
+                                con_orden + (1 if f["ordenes"] else 0))
 
-    print("\n     >>> conceptos de cargo en el periodo:")
-    for nombre, (cuenta, suma) in sorted(por_concepto.items(), key=lambda x: -abs(x[1][1])):
-        print(f"         {suma:14,.2f}   x{cuenta:<5} {nombre}")
+    print(f"\n     >>> {len(planas)} filas leidas. Conceptos de cargo:")
+    print(f"         {'IMPORTE':>16}  {'FILAS':>7}  {'C/ORDEN':>7}  CONCEPTO")
+    for nombre, (cuenta, suma, con_orden) in sorted(por_concepto.items(),
+                                                    key=lambda x: -abs(x[1][1])):
+        print(f"         {suma:16,.2f}  {cuenta:>7}  {con_orden:>7}  {nombre}")
+    print(f"         {sum(f['monto'] for f in planas):16,.2f}  "
+          f"{len(planas):>7}          TOTAL")
 
-    print(f"\n     >>> campos de cada fila: {sorted(filas[0].keys())}")
+    # SI ALGUNA FILA NO SE ENTENDIO, SE DICE. Un total al que le faltan filas
+    # sin avisar es el peor resultado posible de un sondeo.
+    ciegas = sum(1 for f in planas if f["sin_importe"])
+    if ciegas:
+        print(f"\n     !!! {ciegas} filas sin importe reconocible: el total esta corto.")
 
-    # LA PREGUNTA QUE DECIDE TODO: es un costo POR VENTA o un gasto del mes.
-    # Con order_id el cargo entra al margen de esa linea; sin eso, es un gasto
-    # del canal y nada mas.
-    cruces = sorted({c for f in filas for c in f
-                     if any(p in c.lower() for p in CAMPOS_PARA_CRUZAR)})
-    print(f"     >>> campos para cruzar con una venta: {cruces or 'NINGUNO'}")
+    # LA PREGUNTA QUE DECIDE TODO: por venta o total del mes.
+    con_orden = [f for f in planas if f["ordenes"]]
+    varias = [f for f in con_orden if len(f["ordenes"]) > 1]
+    print(f"\n     >>> con order_id: {len(con_orden)} de {len(planas)}"
+          f" · con mas de una orden en la misma fila: {len(varias)}")
+    print(f"     >>> con item_id: {sum(1 for f in planas if f['items'])}"
+          f" · con pack_id: {sum(1 for f in planas if f['pack_id'])}")
 
     for titulo, palabras in CARGOS_BUSCADOS:
-        texto = [(f, json.dumps(f, ensure_ascii=False).lower()) for f in filas]
-        encontrados = [f for f, t in texto if any(p in t for p in palabras)]
+        encontrados = [f for f in planas
+                       if any(p in (f["concepto"] or "").lower() for p in palabras)]
         if encontrados:
-            total = sum(_monto(f) for f in encontrados)
-            print(f"\n     >>> HAY CARGOS DE {titulo}: {len(encontrados)} filas, "
-                  f"{total:,.2f} en total")
-            print(json.dumps(encontrados[:2], indent=2, ensure_ascii=False)[:1200])
+            total = sum(f["monto"] for f in encontrados)
+            colgables = sum(1 for f in encontrados if f["ordenes"])
+            print(f"\n     >>> CARGOS DE {titulo}: {len(encontrados)} filas, "
+                  f"{total:,.2f} en total, {colgables} con orden")
+            for f in encontrados[:3]:
+                print(f"         {f['monto']:12,.2f}  {f['concepto']}"
+                      f"  orden={f['ordenes'][:1] or '-'}")
         else:
             print(f"\n     >>> sin cargos de {titulo} en esta muestra")
 
 
-def detalle(clave, token):
+RUTA_DETALLE = "/billing/integration/periods/key/{clave}/group/ML/details"
+
+
+def pedir_paginas(clave, token, paginas, limite):
+    """El detalle del periodo, de a `limite` filas, hasta `paginas` veces.
+
+    UN MES SON ~28.000 FILAS. Con una sola pagina de 50 --lo que hacia este
+    sondeo-- los totales por concepto son los de 50 filas cualquiera, que no
+    dicen nada: el cargo mas caro puede estar entero afuera.
+
+    Se pagina con `from_id`, que es lo que documenta este endpoint y lo que
+    explica que la respuesta traiga `last_id`. Si con eso la pagina no avanza
+    --el `last_id` no se mueve-- se pasa a `offset`, y si tampoco, corta y lo
+    dice. Un sondeo que se queda en bucle pidiendo la misma pagina es peor que
+    uno que se planta.
+    """
+    filas, desde, offset, modo = [], None, 0, "from_id"
+    for pagina in range(1, paginas + 1):
+        params = {"document_type": "BILL", "limit": limite}
+        if modo == "from_id" and desde is not None:
+            params["from_id"] = desde
+        elif modo == "offset":
+            params["offset"] = offset
+
+        datos = llamar(RUTA_DETALLE.format(clave=clave), params, token,
+                       mostrar=1200 if pagina == 1 else 0)
+        nuevas = _filas(datos)
+        if not nuevas:
+            break
+
+        filas.extend(nuevas)
+        total = (datos or {}).get("total")
+        print(f"     pagina {pagina}: {len(nuevas)} filas"
+              f" · acumuladas {len(filas)}" + (f" de {total}" if total else ""))
+
+        ultimo = (datos or {}).get("last_id")
+        if modo == "from_id" and (ultimo is None or ultimo == desde):
+            print("     (from_id no avanza: se pasa a offset)")
+            modo = "offset"
+        desde = ultimo
+        offset += len(nuevas)
+
+        if total and len(filas) >= total:
+            break
+    return filas
+
+
+def detalle(clave, token, paginas, limite):
     print("\n" + "=" * 74)
     print(f"PASO 2 · EL DETALLE DEL PERIODO {clave}")
     print("=" * 74)
 
+    filas = pedir_paginas(clave, token, paginas, limite)
+    if filas:
+        analizar(filas)
+        return True
+
+    # Si el detalle no contesto, se prueban las otras dos por si el periodo
+    # existe con otro nombre o el permiso alcanza solo para el resumen.
     for ruta, params in [
-        (f"/billing/integration/periods/key/{clave}/group/ML/details",
-         {"document_type": "BILL", "limit": 50}),
         (f"/billing/integration/periods/key/{clave}/group/ML/summary",
          {"document_type": "BILL"}),
         (f"/billing/integration/periods/key/{clave}/documents",
          {"group": "ML", "document_type": "BILL", "limit": 5}),
     ]:
         datos = llamar(ruta, params, token, mostrar=1800)
-        filas = _filas(datos)
-        if filas:
-            analizar(filas)
+        otras = _filas(datos)
+        if otras:
+            analizar(otras)
             return True
     return False
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Sondeo de la facturacion de ML. No escribe nada.")
+    parser.add_argument("--periodo",
+                        help="Clave del periodo (el primer dia del mes, "
+                             "'2026-08-01'). Por defecto los ultimos meses.")
+    parser.add_argument("--paginas", type=int, default=5,
+                        help="Cuantas paginas de detalle pedir (por defecto 5). "
+                             "Un mes entero son ~28.000 filas.")
+    parser.add_argument("--limite", type=int, default=200,
+                        help="Filas por pagina (por defecto 200)")
+    args = parser.parse_args()
+
     token = token_ml()
     print("ML User ID:", USER_ID)
 
+    claves = [args.periodo] if args.periodo else buscar_periodos(token)[:MESES_A_PROBAR]
+
     hubo_detalle = False
-    for clave in buscar_periodos(token)[:MESES_A_PROBAR]:
-        if detalle(clave, token):
+    for clave in claves:
+        if detalle(clave, token, args.paginas, args.limite):
             hubo_detalle = True
             break
 
@@ -242,8 +388,12 @@ def main():
     print("   Es lo que decide si vale la pena ingerir algo o no.")
     print("2. Si hay un concepto de cuotas / financiacion. Si existe, es un")
     print("   costo por venta que hoy no esta en ningun lado.")
-    print("3. Los campos para cruzar. Con order_id o pack_id el cargo se cuelga")
-    print("   de la venta; sin eso, es un gasto mensual del canal y nada mas.")
+    print("3. La columna C/ORDEN: cuantas filas de ese concepto traen la venta")
+    print("   adentro. Esas se pueden colgar del margen de cada linea; el")
+    print("   resto es un gasto mensual del canal y nada mas.")
+    print("4. Si dice que faltan filas sin importe, el total esta corto.")
+    print("\nPara los totales de un mes entero:")
+    print("   python probar_facturacion_ml.py --periodo 2026-08-01 --paginas 60")
 
 
 if __name__ == "__main__":
