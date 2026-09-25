@@ -86,3 +86,23 @@ def condicion_marca_en_items(columna, parametro="skus"):
     molde = MOLDE_SKU.replace("{sku}", "' || s || '")
     return (f"EXISTS (SELECT 1 FROM unnest(%({parametro})s::text[]) s "
             f"WHERE strpos({columna}, '{molde}') > 0)")
+
+
+# Las dos tablas de gold, y cual le toca a cada corrida.
+#
+# EL TABLERO CUENTA CON QUE fact_ventas ARRANCA EN LA FECHA DE CORTE. Todos
+# sus paneles comparan meses, sacan promedios y arman ritmos sobre lo que
+# encuentran ahi. Un relleno de una marca sola mete un abril de catorce
+# lineas: correcto como dato, y un numero equivocado para cualquiera que mire
+# abril, porque no tiene como saber que eso no es abril entero.
+#
+# Por eso lo que se rellena hacia atras va a otra tabla, con la misma forma.
+# Quien lo necesita lo lee de ahi --o de una vista que une las dos-- y el
+# tablero sigue viendo exactamente lo que veia.
+TABLA_NORMAL = "fact_ventas"
+TABLA_PREVIO = "fact_ventas_previo"
+
+
+def tabla_destino(es_relleno):
+    """En que tabla de gold escribe esta corrida."""
+    return TABLA_PREVIO if es_relleno else TABLA_NORMAL

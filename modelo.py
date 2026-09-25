@@ -42,6 +42,7 @@ CUTOFF = max(FECHA_CORTE, date.today() - timedelta(days=WINDOW_DAYS))
 # En la corrida normal los dos son None y no cambia absolutamente nada.
 HASTA = None      # ultimo dia a reconstruir, incluido
 MARCA = None      # unica marca a escribir, ya en mayusculas
+TABLA = relleno.TABLA_NORMAL   # en que tabla de gold escribe esta corrida
 
 # ============================================================================
 #  LA VENTANA SE ESTIRA SOLA CUANDO CAMBIA UN COSTO VIEJO
@@ -1168,9 +1169,9 @@ def construir_fact_ventas():
         existe = con.exec_driver_sql("""
             SELECT EXISTS (
                 SELECT 1 FROM information_schema.tables
-                WHERE table_schema = 'gold' AND table_name = 'fact_ventas'
+                WHERE table_schema = 'gold' AND table_name = %(tabla)s
             )
-        """).scalar()
+        """, {"tabla": TABLA}).scalar()
 
         if existe:
             # Solo se borra (y se va a re-insertar) la ventana movil. Todo lo anterior
@@ -1182,13 +1183,13 @@ def construir_fact_ventas():
             # que vienen despues antes de insertar cinco lineas.
             donde, valores = relleno.condicion_borrado(CUTOFF, HASTA, MARCA)
             resultado = con.exec_driver_sql(
-                "DELETE FROM gold.fact_ventas WHERE " + donde, valores,
+                f"DELETE FROM gold.{TABLA} WHERE " + donde, valores,
             )
             print(f"  Filas viejas borradas dentro de la ventana (se van a reemplazar): {resultado.rowcount}")
 
-        df.to_sql("fact_ventas", con, schema="gold", if_exists="append", index=False)
+        df.to_sql(TABLA, con, schema="gold", if_exists="append", index=False)
 
-    print("Guardado: gold.fact_ventas")
+    print(f"Guardado: gold.{TABLA}")
 
 
 def main():
@@ -1203,8 +1204,9 @@ def main():
         "--relleno", action="store_true",
         help="Modo relleno: reconstruye SOLO el rango --desde/--hasta, y solo "
              "esa --marca si se pasa. Es la unica forma de meter en gold "
-             f"ventas anteriores a {FECHA_CORTE}, y la unica que acota el "
-             "borrado por arriba. Se corre a mano.",
+             f"ventas anteriores a {FECHA_CORTE}. Escribe en "
+             f"gold.{relleno.TABLA_PREVIO}, no en la tabla que lee el "
+             "tablero. Se corre a mano.",
     )
     parser.add_argument("--desde", type=date.fromisoformat,
                         help="Solo con --relleno: primer dia (YYYY-MM-DD)")
@@ -1226,7 +1228,7 @@ def main():
     # ml_envios.py se pone al dia despues de meses sin correr -- ese dato nunca
     # entra a gold, porque gold ya no vuelve a mirar esas fechas. Para eso esta
     # --todo, que se corre a mano una vez y despues no se toca mas.
-    global CUTOFF, HASTA, MARCA
+    global CUTOFF, HASTA, MARCA, TABLA
 
     # EL RELLENO SE VA POR OTRO CAMINO ENTERO y sale antes de tocar nada de lo
     # de abajo. No mira la ventana, no estira por costos pendientes y no borra
@@ -1242,10 +1244,16 @@ def main():
         CUTOFF = args.desde
         HASTA = args.hasta
         MARCA = args.marca.strip().upper() if args.marca else None
+        # NO ESCRIBE EN LA TABLA QUE LEE EL TABLERO. Ver relleno.tabla_destino:
+        # un relleno de una marca sola haria que cualquier panel que mire ese
+        # mes vea esa marca como si fuera el mes entero.
+        TABLA = relleno.tabla_destino(es_relleno=True)
 
         print("=== MODO RELLENO ===")
         print(f"    Rango: {CUTOFF} a {HASTA}"
               + (f" · marca: {MARCA}" if MARCA else " · TODAS las marcas"))
+        print(f"    Escribe en gold.{TABLA}, NO en gold.{relleno.TABLA_NORMAL}:")
+        print("    el tablero sigue viendo lo mismo que antes.")
         print("    Fuera de ese rango no se toca ni una fila.\n")
         construir_fact_ventas()
         print("\n=== LISTO ===")
