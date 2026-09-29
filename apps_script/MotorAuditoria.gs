@@ -5,12 +5,18 @@
 //  COPIA DE RESPALDO. El original vive adentro del Google Sheet. Ver el
 //  README de esta carpeta.
 //
-//  PENDIENTE: `subirAuditoriaASupabase` (al final del archivo) es el camino
-//  viejo, por /rest/v1 con la SERVICE KEY guardada en la planilla. No puede
-//  escribir --bronze.auditoria_sevillanita no tiene permisos para ningun rol
-//  de la API-- y lo reemplaza `subirAuditoria`, en auditoria_sevillanita.gs,
-//  que va por la Edge Function. Se borra junto con la propiedad
-//  SUPABASE_SERVICE_KEY.
+//  YA NO ESTA `subirAuditoriaASupabase`, el camino viejo por /rest/v1 con la
+//  service key. Se borro el 29/09 despues de comprobar en la planilla que no
+//  podia escribir: devolvia 42501 permission denied, porque
+//  bronze.auditoria_sevillanita no le da permisos a ningun rol de la API.
+//
+//  Lo reemplaza `subirAuditoria`, en auditoria_sevillanita.gs, que va por la
+//  Edge Function y se conecta directo a Postgres.
+//
+//  OJO: la propiedad SUPABASE_SERVICE_KEY NO se borra. La siguen usando
+//  subirFletesASupabase, subirFleteProveedoresASupabase,
+//  guardarCorreccionesKgVolumen y registrarPedidoCorregido, todas en
+//  FLETE_AUTO.gs. Lo que corresponde con esa clave es rotarla.
 // ============================================================================
 
 // ============================================================================
@@ -558,49 +564,6 @@ function calcularMinimoDeCompra() {
 
   ui.alert('✅ Mínimo de compra calculado.\n\nMínimo de flete vigente: $' + minimoVigente.toLocaleString('es-AR', {minimumFractionDigits: 2, maximumFractionDigits: 2}) +
     '\nVenta mínima recomendada (15%): $' + ventaMinima.toLocaleString('es-AR', {minimumFractionDigits: 2, maximumFractionDigits: 2}));
-}
-
-// ===== SUBIR AUDITORÍA A SUPABASE =====
-function subirAuditoriaASupabase() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const ui = SpreadsheetApp.getUi();
-  const ac = ss.getSheetByName('ACCIONES');
-  if (!ac) { ui.alert('No encontré la hoja ACCIONES. Corré "Calcular acciones" primero.'); return; }
-
-  const datos = ac.getDataRange().getValues();
-  const filas = [];
-  for (let i = 1; i < datos.length; i++) {
-    const f = datos[i];
-    if (!f[0]) continue;
-    filas.push({
-      factura: String(f[0]), fecha: (f[1] instanceof Date) ? Utilities.formatDate(f[1], 'GMT-3', 'yyyy-MM-dd') : null,
-      localidad: f[2] || null, veredicto_tarifa: f[3] || null, veredicto_peso: f[4] || null, accion: f[5] || null, monto_en_juego: Number(f[6]) || 0
-    });
-  }
-  if (filas.length === 0) { ui.alert('No hay filas para subir.'); return; }
-
-  const url = PropertiesService.getScriptProperties().getProperty('SUPABASE_URL');
-  const serviceKey = PropertiesService.getScriptProperties().getProperty('SUPABASE_SERVICE_KEY');
-  if (!serviceKey) { ui.alert('Falta la Script Property SUPABASE_SERVICE_KEY.'); return; }
-
-  const endpoint = url + '/rest/v1/auditoria_sevillanita?on_conflict=factura';
-  const LOTE = 500;
-  let subidas = 0;
-  for (let i = 0; i < filas.length; i += LOTE) {
-    const lote = filas.slice(i, i + LOTE);
-    const resp = UrlFetchApp.fetch(endpoint, {
-      method: 'post', contentType: 'application/json',
-      headers: { apikey: serviceKey, Authorization: 'Bearer ' + serviceKey, 'Content-Profile': 'bronze', Prefer: 'resolution=merge-duplicates,return=minimal' },
-      payload: JSON.stringify(lote), muteHttpExceptions: true
-    });
-    if (resp.getResponseCode() >= 200 && resp.getResponseCode() < 300) subidas += lote.length;
-    else {
-      Logger.log('Error: ' + resp.getContentText().substring(0, 300));
-      ui.alert('Error al subir (revisá el log). Subidas ' + subidas + ' de ' + filas.length + ' antes de fallar.');
-      return;
-    }
-  }
-  ui.alert('✅ Subidas ' + subidas + ' filas a bronze.auditoria_sevillanita.');
 }
 
 // ===== HELPERS =====
