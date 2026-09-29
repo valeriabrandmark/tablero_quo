@@ -14,16 +14,15 @@ menús desaparecen por completo— sin ninguna forma de ver qué había cambiado
 | `sell_in.gs` | Sell in | Manda la hoja al tablero vía la función `sell-in` |
 | `FLETE_AUTO.gs` | Logística | Trae `reporte_logistica` a la hoja FLETE y sube lo cargado a mano |
 | `auditoria_sevillanita.gs` | Logística | Manda la hoja ACCIONES vía la función `auditoria-sevillanita` |
+| `MotorAuditoria.gs` | Logística | Pendientes de subir y los cinco cálculos: tarifa, peso, acciones, financiero y mínimo de compra |
+
+En la planilla, `auditoria_sevillanita.gs` está como **`No_tocar.gs`**. Es el
+mismo archivo.
 
 ## Lo que todavía no está acá
 
-De la planilla de logística faltan dos archivos, y son los más expuestos porque
-sólo existen adentro del Sheet:
-
 - **`Código.gs`** — la integración con la API de Sigma (clientes, notas de
-  crédito, proveedores).
-- **`MotorAuditoria.gs`** — el indicador de pendientes y los cinco cálculos:
-  tarifa, peso, acciones, análisis financiero y mínimo de compra.
+  crédito, proveedores). Sólo existe adentro del Sheet.
 
 ## LA TRAMPA QUE YA MORDIÓ DOS VECES
 
@@ -39,10 +38,17 @@ Las consecuencias no son simétricas:
   entero no compila. No corre `onOpen`, no aparece ningún menú, y el panel de
   Ejecuciones no muestra nada. Parece que la planilla se rompió.
 
-Pasó con `HOJA_FLETE_PS` (entre `PendienteSubir.gs` y `MotorAuditoria.gs`) y
-con `COLUMNAS` (entre `FLETE_AUTO.gs` y la primera versión de
-`auditoria_sevillanita.gs`, que declaraba `var COLUMNAS = 7` — ver el commit
-5e11b71 y su arreglo en b9dd5de).
+Pasó dos veces:
+
+1. `HOJA_FLETE_PS`, entre `PendienteSubir.gs` y `MotorAuditoria.gs`. Se
+   resolvió borrando el primero, cuyo contenido ya estaba en el segundo.
+2. `COLUMNAS`, entre el `const COLUMNAS = [...]` de `FLETE_AUTO.gs` y el
+   `var COLUMNAS = 7` de la primera versión de `auditoria_sevillanita.gs`
+   (commit 5e11b71, arreglado en b9dd5de). Esa versión vieja quedó en la
+   planilla bajo el nombre `No_tocar.gs` y volvió a romper el proyecto.
+
+El segundo caso traía además un `onOpen` propio, que aun sin el choque de
+`COLUMNAS` habría reemplazado al de los dos menús sin avisar.
 
 **Por eso, en un archivo nuevo, todo lo de nivel superior lleva un prefijo
 propio.** El de auditoría usa `AUD_DESTINO`, `AUD_HOJA`, `AUD_COLUMNAS`,
