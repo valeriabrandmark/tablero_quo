@@ -77,6 +77,10 @@ jobs:
       - name: Probar la huella de los Excel
         run: python probar_huella_costos.py
 
+      # Un precio para ganar que falta tiene que quedar en null, no en cero.
+      - name: Probar la lectura de la competencia
+        run: python probar_competencia.py
+
       # De esta tabla sale la pata de INGRESOS de la trazabilidad de Full:
       # contra ella se compara lo que Mercado Libre declara. Un item contado de
       # mas hace ver un faltante de ML donde no lo hay.
