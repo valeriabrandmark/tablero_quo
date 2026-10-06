@@ -143,6 +143,10 @@ jobs:
       DIGIP_API_KEY: ${{ secrets.DIGIP_API_KEY }}
       DIGIP_URL_BASE: ${{ secrets.DIGIP_URL_BASE }}
 
+      # El access token del usuario de integracion de Foxie. Sin el, foxie.py
+      # falla diciendo que falta y el resto del pipeline sigue (no es critico).
+      FOXIE_TOKEN: ${{ secrets.FOXIE_TOKEN }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -172,6 +176,10 @@ jobs:
       # orden de compra. Son 40 casos sin red ni base, un segundo.
       - name: Probar el lector de sell in
         run: python probar_sell_in.py
+
+      # Un precio para ganar que falta tiene que quedar en null, no en cero.
+      - name: Probar la lectura de la competencia
+        run: python probar_competencia.py
 
       # Cambia el token de GitHub por una credencial de Google de unos minutos,
       # y la deja donde google.auth la encuentra sola. NO CORRE si no estan los

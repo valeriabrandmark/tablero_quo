@@ -378,6 +378,26 @@ PASOS = [
      "cada_horas": None, "critico": False,
      "escribe": "sell_in", "techo": 5 * 60},
 
+    # COMPETENCIA EN CATALOGO: precio para ganar, competidores y comision de ML
+    # a ese precio. Lee `ml_publicaciones`, asi que va despues del catalogo.
+    #
+    # CADA 4 HORAS Y NO UNA VEZ POR DIA: los rivales y el repricer mueven el
+    # precio varias veces por dia, y un "precio para ganar" de la manana a la
+    # tarde ya no gana. Tampoco en cada corrida: son ~5.000 llamadas sin
+    # multiget, un par de minutos que no hace falta pagar cada hora.
+    {"comando": "ml_competencia.py",           "intentos": 2, "espera": 60,
+     "cada_horas": 4, "critico": False,
+     "escribe": "ml_competencia, ml_competidores, ml_vendedores",
+     "techo": 15 * 60},
+
+    # Lo que Foxie tiene cargado: costo por publicacion y estrategias. Sirve
+    # para ver si el costo con el que Foxie calcula el piso es el mismo que el
+    # del tablero. Cambia cuando alguien lo edita, una vez por dia sobra.
+    {"comando": "foxie.py",                    "intentos": 2, "espera": 30,
+     "cada_horas": None, "primera_del_dia": True, "critico": False,
+     "escribe": "foxie_publicaciones, foxie_estrategias, foxie_impuestos",
+     "techo": 5 * 60},
+
     # VA ULTIMO, Y NO ESCRIBE NADA. Revisa lo que los pasos de arriba acaban de
     # cargar: duplicados por clave repetida y ratos largos sin una sola venta.
     #
