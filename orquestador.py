@@ -44,7 +44,7 @@ import argparse
 import datetime
 import json
 import estado
-from ventana import registro, ultima_corrida
+from ventana import corrida_en_rojo, registro, ultima_corrida
 import os
 import subprocess
 import sys
@@ -129,6 +129,11 @@ TECHO_POR_DEFECTO = 10 * 60
 #   techo       segundos como maximo que se le dan al paso. Si no esta, se usa
 #               TECHO_POR_DEFECTO. Pasado ese tiempo se lo mata y cuenta como
 #               falla.
+#   avisar_tras cuantos fallos SEGUIDOS hacen falta para que la corrida
+#               termine en rojo. Si no esta, uno solo -- que es lo de siempre.
+#               Subirlo es para proveedores con hipos: ver `corrida_en_rojo`
+#               en ventana.py. NO cambia nada de lo que el paso hace ni de lo
+#               que se loguea: el fallo se avisa igual en la corrida.
 #   primera_del_dia  True = corre una vez por dia, en la PRIMERA corrida del
 #               dia. Reemplaza a cada_horas. Para los pasos caros: asi caen a la
 #               manana temprano y no en el medio de la tarde.
@@ -256,8 +261,12 @@ PASOS = [
 
     # Stock de DIGIP: dos llamadas, segundos. El stock se mueve durante el dia,
     # asi que va en cada corrida.
+    # avisar_tras 3: la API de DIGIP devuelve 500 cada tanto y se recompone
+    # sola en la corrida siguiente. Tres seguidos son ~3 horas sin refrescar
+    # el stock, que ahi si es una caida de verdad y no un hipo.
     {"comando": "digip.py",                    "intentos": 2, "espera": 30,
-     "cada_horas": None, "critico": False, "escribe": "digip_stock, digip_stock_detalle", "techo": 10 * 60},
+     "cada_horas": None, "critico": False, "escribe": "digip_stock, digip_stock_detalle", "techo": 10 * 60,
+     "avisar_tras": 3},
 
     # Alimenta la vista de Logistica, no el modelo de ventas.
     {"comando": "digip_pedidos.py",            "intentos": 3, "espera": 60,
@@ -759,6 +768,19 @@ def main():
 
     if fallados:
         log(f"TERMINADO CON AVISOS ({duracion} min). Fallaron: {', '.join(fallados)}")
+
+        # Que un paso falle y que la corrida tenga que salir en rojo dejaron de
+        # ser lo mismo: ver `corrida_en_rojo`. Lo que NO cambia es el log de
+        # arriba -- el fallo se cuenta siempre, se avise o no.
+        umbrales = {p["comando"]: p.get("avisar_tras") for p in PASOS}
+        en_rojo = corrida_en_rojo(fallados, estado, umbrales)
+        tolerados = [c for c in fallados if c not in en_rojo]
+        if tolerados:
+            log(f"Sin avisar todavia (no llegaron a su `avisar_tras`): {', '.join(tolerados)}")
+        if not en_rojo:
+            log(f"========== ORQUESTADOR TERMINADO CON AVISOS ({duracion} min) ==========")
+            return
+        log(f"Se avisa por: {', '.join(en_rojo)}")
         # SALE CON ERROR, aunque el pipeline haya seguido de largo.
         #
         # Las dos cosas no se contradicen: que un paso no critico falle no tiene

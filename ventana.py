@@ -135,3 +135,43 @@ def cutoff(comando, dias, piso, hoy=None, pasos=None):
         )
 
     return max(piso, elegido)
+
+
+# --- Cuando un fallo tiene que pintar la corrida de rojo -------------------
+
+AVISAR_TRAS_POR_DEFECTO = 1
+
+
+def corrida_en_rojo(fallados, pasos, umbrales=None):
+    """De los pasos que fallaron, cuales ameritan terminar en rojo.
+
+    El orquestador sale con error si fallo CUALQUIER paso, aunque no sea
+    critico y el pipeline haya seguido de largo. Eso esta bien pensado: en
+    GitHub Actions un `exit 0` no manda ningun mail, y un paso roto en
+    silencio puede quedarse semanas asi.
+
+    El problema aparece cuando el que falla es un proveedor con hipos. Entre
+    el 04 y el 05/10 la API de DIGIP devolvio 500 ocho veces en dos dias,
+    siempre con el paso recuperandose solo en la corrida siguiente: nunca
+    hubo mas de dos fallos seguidos, o sea que el stock jamas estuvo mas de
+    ~3 horas sin refrescarse. Ocho mails en rojo por eso no informan nada y
+    encima gastan lo unico que el rojo tiene de valor, que es que alguien lo
+    mire. El dia que se caiga Mercado Libre va a parecer "otro mas de DIGIP".
+
+    Asi que un paso puede pedir `avisar_tras: N`: recien pinta rojo cuando
+    acumulo N fallos SEGUIDOS. El contador sale de `fallos` en ops.estado,
+    que ya se resetea solo con el primer exito, asi que no hace falta
+    guardar nada nuevo.
+
+    Sin `avisar_tras` el comportamiento es el de siempre (N = 1).
+
+    `fallados` son los comandos que fallaron en ESTA corrida; `pasos` es el
+    estado YA actualizado, de donde sale el contador.
+    """
+    umbrales = umbrales or {}
+    en_rojo = []
+    for comando in fallados:
+        umbral = umbrales.get(comando) or AVISAR_TRAS_POR_DEFECTO
+        if registro(pasos, comando)["fallos"] >= umbral:
+            en_rojo.append(comando)
+    return en_rojo
