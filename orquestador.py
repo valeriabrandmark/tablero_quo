@@ -399,13 +399,16 @@ PASOS = [
      "escribe": "ml_competencia, ml_competidores, ml_vendedores",
      "techo": 15 * 60},
 
-    # Lo que Foxie tiene cargado: costo por publicacion y estrategias. Sirve
-    # para ver si el costo con el que Foxie calcula el piso es el mismo que el
-    # del tablero. Cambia cuando alguien lo edita, una vez por dia sobra.
-    {"comando": "foxie.py",                    "intentos": 2, "espera": 30,
-     "cada_horas": None, "primera_del_dia": True, "critico": False,
-     "escribe": "foxie_publicaciones, foxie_estrategias, foxie_impuestos",
-     "techo": 5 * 60},
+    # FOXIE ESTA APAGADO A PROPOSITO -- el paso se saco el 07/10/2026.
+    #
+    # Su API expone publicaciones, costos y estrategias, pero no los datos de
+    # competencia que es para lo que se la queria. `ml_competencia.py` ya los
+    # saca de Mercado Libre, que es donde estan de verdad (ver el comentario
+    # al principio de ese archivo).
+    #
+    # `foxie.py` sigue en el repo y el workflow sigue pasando FOXIE_TOKEN, asi
+    # que para volver a prenderlo alcanza con reponer el paso aca y cargar el
+    # secret. No hay nada mas que deshacer.
 
     # VA ULTIMO, Y NO ESCRIBE NADA. Revisa lo que los pasos de arriba acaban de
     # cargar: duplicados por clave repetida y ratos largos sin una sola venta.
