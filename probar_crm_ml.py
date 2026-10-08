@@ -67,6 +67,7 @@ ML_REDIRECT_URI, ML_USER_ID y la base para leer el token guardado.
 """
 
 import argparse
+import datetime
 import json
 import os
 from collections import Counter
@@ -122,11 +123,17 @@ def _filas(datos):
     `results`, `data` o una lista pelada. Si no se reconoce, se avisa en vez
     de devolver vacio en silencio -- que es como un sondeo termina diciendo
     "no hay reclamos" cuando en realidad no supo leer la respuesta.
+
+    La lista salio corta en la primera corrida: las preguntas vienen en
+    `questions` y la funcion no la tenia, asi que conto 2.004 preguntas y
+    despues dijo "no se reconocio la forma". Avisar en vez de callar es
+    justamente lo que permitio verlo.
     """
     if isinstance(datos, list):
         return datos, "lista pelada"
     if isinstance(datos, dict):
-        for clave in ("results", "data", "claims"):
+        for clave in ("results", "data", "claims", "questions", "messages",
+                      "conversations", "orders"):
             if isinstance(datos.get(clave), list):
                 return datos[clave], clave
     return [], None
@@ -145,12 +152,23 @@ def _total(datos):
 
 
 def probar_acceso(token):
-    """Lo primero: ¿la cuenta puede leer reclamos? Devuelve (puede, datos)."""
+    """Lo primero: ¿la cuenta puede leer reclamos? Devuelve (puede, datos).
+
+    LA BUSQUEDA EXIGE AL MENOS UN FILTRO. Pedirla pelada devuelve
+
+        400 atLeastOneFilterProvided: at least one filter parameter must be
+        provided
+
+    que en la primera corrida se leyo como "no tenemos acceso" cuando en
+    realidad la llamada ni se ejecuto. Por eso va con `status=opened`: es el
+    filtro mas barato que ademas contesta la pregunta que importa -- cuantos
+    reclamos hay abiertos ahora.
+    """
     print("\n" + "=" * 74)
     print(" 1. ¿TENEMOS ACCESO?")
     print("=" * 74)
 
-    datos, error = llamar(f"{BASE}/search", token, {"limit": 1})
+    datos, error = llamar(f"{BASE}/search", token, {"status": "opened", "limit": 1})
     if error:
         print(f"  NO: {error}")
         if "403" in error:
@@ -181,15 +199,29 @@ def contar(token):
     print(" 2. CUANTOS HAY Y SI LOS FILTROS ANDAN")
     print("=" * 74)
 
-    base_total = _total(llamar(f"{BASE}/search", token, {"limit": 1})[0] or {})
-    print(f"  Sin filtro: {base_total if base_total is not None else 'no lo dice'}")
+    # NO HAY "SIN FILTRO" CONTRA QUE COMPARAR: la busqueda lo rechaza con un
+    # 400. Asi que la referencia es la suma de abierto + cerrado, que por
+    # definicion es el total. Si una etapa diera mas que eso, algo no cierra.
+    totales = {}
+    for valor in ESTADOS:
+        datos, error = llamar(f"{BASE}/search", token, {"status": valor, "limit": 1})
+        if error:
+            print(f"  status {valor:<10} ERROR: {error}")
+            continue
+        totales[valor] = _total(datos)
+        print(f"  status {valor:<10} {totales[valor] if totales[valor] is not None else '?'}")
 
-    for campo, valores in (("status", ESTADOS), ("stage", ETAPAS)):
+    base_total = None
+    if len(totales) == len(ESTADOS) and all(v is not None for v in totales.values()):
+        base_total = sum(totales.values())
+        print(f"  {'TOTAL':<17} {base_total}")
+
+    for campo, valores in (("stage", ETAPAS),):
         print(f"\n  por {campo}:")
         for valor in valores:
             datos, error = llamar(f"{BASE}/search", token, {campo: valor, "limit": 1})
             if error:
-                print(f"    {valor:<12} ERROR: {error[:60]}")
+                print(f"    {valor:<12} ERROR: {error}")
                 continue
             total = _total(datos)
             # Si el filtro devuelve exactamente lo mismo que sin filtro, lo
@@ -201,19 +233,25 @@ def contar(token):
 
 
 def ver_detalle(token, cuantos, crudo):
-    """Abre unos reclamos y dice que campos traen de verdad."""
+    """Abre unos reclamos y dice que campos traen de verdad.
+
+    Se piden CERRADOS a proposito. Lo que hay que confirmar es
+    `resolution.benefited` --quien gano--, y eso solo existe una vez que el
+    reclamo se resolvio. Pidiendo los abiertos se veria `resolution` en null
+    en todos y no se probaria nada.
+    """
     print("\n" + "=" * 74)
-    print(f" 3. QUE TRAE UN RECLAMO (mirando {cuantos})")
+    print(f" 3. QUE TRAE UN RECLAMO CERRADO (mirando {cuantos})")
     print("=" * 74)
 
-    datos, error = llamar(f"{BASE}/search", token, {"limit": cuantos})
+    datos, error = llamar(f"{BASE}/search", token,
+                          {"status": "closed", "limit": cuantos})
     if error:
         print(f"  No se pudo listar: {error}")
         return
     filas, _ = _filas(datos)
     if not filas:
-        print("  La busqueda no devolvio ningun reclamo.")
-        print("  Puede ser que de verdad no haya, o que haga falta un filtro.")
+        print("  La busqueda no devolvio ningun reclamo cerrado.")
         return
 
     claves = Counter()
@@ -329,7 +367,7 @@ def probar_mensajes(token, filas):
     for ruta in rutas:
         datos, error = llamar(ruta, token)
         if error:
-            print(f"  {ruta}\n    no: {error[:80]}")
+            print(f"  {ruta}\n    no: {error}")
             continue
         mensajes, forma = _filas(datos)
         print(f"  {ruta}\n    SI — {len(mensajes)} mensajes (en '{forma}')")
@@ -367,7 +405,7 @@ def probar_preguntas(token, user_id):
         d, e = llamar("/questions/search", token,
                       dict(params, status=estado))
         if e:
-            print(f"  {estado:<12} ERROR: {e[:60]}")
+            print(f"  {estado:<12} ERROR: {e}")
             continue
         t = _total(d)
         if estado == "UNANSWERED":
@@ -407,24 +445,53 @@ def probar_mensajes_postventa(token, user_id):
     # existe, hay que recorrer orden por orden y ahi la cuenta se dispara.
     print("\n  a) ¿Hay un atajo para pedir solo lo que tiene mensajes nuevos?")
     atajo = False
-    datos, error = llamar("/messages/unread", token, {"role": "seller"})
-    if error:
-        print(f"     /messages/unread  no: {error[:70]}")
-    else:
+    for ruta, params in (
+        ("/messages/unread", {"role": "seller"}),
+        ("/messages/pending", {"role": "seller"}),
+        (f"/messages/packs/sellers/{user_id}/unread", None),
+    ):
+        datos, error = llamar(ruta, token, params)
+        if error:
+            # EL ERROR VA ENTERO. En la primera corrida se imprimia cortado a
+            # 70 caracteres y se perdia justo la parte donde Mercado Libre
+            # explica que falta -- que es todo lo que un sondeo tiene para dar.
+            print(f"     {ruta}\n       no: {error}")
+            continue
         atajo = True
-        print(f"     /messages/unread  SI — {json.dumps(datos, ensure_ascii=False)[:200]}")
+        print(f"     {ruta}\n       SI — {json.dumps(datos, ensure_ascii=False)[:300]}")
+        break
 
-    # Cuantas ordenes hay en una ventana corta, que es lo que se recorreria.
+    # CUANTAS ORDENES HABRIA QUE RECORRER, Y ESTA ES LA CUENTA QUE IMPORTA.
+    #
+    # En la primera corrida se pidio el total pelado y dio 148.700: TODAS las
+    # ordenes de la historia de la cuenta. Ese numero no sirve para decidir
+    # nada, porque nadie escribe por una compra de hace dos anios. Lo que hay
+    # que medir es cuantas ordenes entran en una ventana corta, que son las
+    # unicas que pueden tener conversacion viva.
     print("\n  b) ¿Cuantas ordenes habria que recorrer?")
-    ordenes, error = llamar("/orders/search", token, {
-        "seller": user_id, "sort": "date_desc", "limit": 1,
-    })
+    ordenes = None
     cuantas = None
-    if error:
-        print(f"     No se pudo listar ordenes: {error[:70]}")
-    else:
-        cuantas = _total(ordenes)
-        print(f"     Ordenes que devuelve la busqueda: {cuantas if cuantas is not None else '?'}")
+    for dias in (7, 30, None):
+        params = {"seller": user_id, "sort": "date_desc", "limit": 1}
+        if dias is not None:
+            desde = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=dias)
+            # El formato que pide la API: ISO con milisegundos y zona.
+            params["order.date_created.from"] = (
+                desde.strftime("%Y-%m-%dT%H:%M:%S.000") + "-00:00"
+            )
+        datos, error = llamar("/orders/search", token, params)
+        etiqueta = f"ultimos {dias} dias" if dias else "toda la historia"
+        if error:
+            print(f"     {etiqueta:<18} ERROR: {error}")
+            continue
+        total = _total(datos)
+        print(f"     {etiqueta:<18} {total if total is not None else '?'}")
+        # La ventana de 7 dias es la que manda para la cuenta del final, y la
+        # respuesta mas reciente es la que deja una orden para probar el pack.
+        if cuantas is None and total is not None:
+            cuantas = total
+        if ordenes is None:
+            ordenes = datos
 
     # Y por ultimo: ¿se puede leer la conversacion de una orden concreta?
     print("\n  c) ¿Se lee la conversacion de una orden?")
@@ -441,15 +508,29 @@ def probar_mensajes_postventa(token, user_id):
         print("     La orden no trae ni pack_id ni id.")
         return cuantas, atajo
 
-    ruta = f"/messages/packs/{pack}/sellers/{user_id}"
-    datos, error = llamar(ruta, token)
-    if error:
-        print(f"     {ruta}\n       no: {error[:80]}")
-    else:
+    print(f"     (orden {orden.get('id')}, pack_id {orden.get('pack_id')})")
+
+    # `tag=post_sale` NO ES OPCIONAL, y su falta fue lo que dio 404 en la
+    # primera corrida. Se prueban igual las dos variantes y la ruta de
+    # marketplace, porque la documentacion difiere entre sitios.
+    intentos = [
+        (f"/messages/packs/{pack}/sellers/{user_id}", {"tag": "post_sale"}),
+        (f"/messages/packs/{pack}/sellers/{user_id}", None),
+        (f"/marketplace/messages/packs/{pack}", {"tag": "post_sale"}),
+    ]
+    for ruta, params in intentos:
+        datos, error = llamar(ruta, token, params)
+        cola = f"?tag=post_sale" if params else ""
+        if error:
+            print(f"     {ruta}{cola}\n       no: {error}")
+            continue
         mensajes, forma = _filas(datos)
-        print(f"     {ruta}\n       SI — {len(mensajes)} mensajes (en '{forma}')")
+        print(f"     {ruta}{cola}\n       SI — {len(mensajes)} mensajes (en '{forma}')")
         if mensajes and isinstance(mensajes[0], dict):
             print(f"       campos: {sorted(mensajes[0])}")
+        else:
+            print(f"       claves de la respuesta: {sorted(datos)[:15] if isinstance(datos, dict) else type(datos)}")
+        break
 
     return cuantas, atajo
 
@@ -476,14 +557,18 @@ def resumen_de_costo(ordenes, hay_atajo, preguntas):
         print("  MENSAJES   HAY ATAJO: se piden solo las conversaciones con")
         print("             mensajes sin leer. Barato. Entra en cada corrida.")
     elif ordenes:
-        print(f"  MENSAJES   SIN ATAJO: una llamada por orden, y la busqueda")
-        print(f"             declara {ordenes} ordenes.")
+        # `ordenes` es la ventana de 7 dias, no el total historico. El total
+        # de la cuenta son casi 150.000 ordenes y no sirve para decidir:
+        # nadie escribe por una compra de hace dos anios.
+        print(f"  MENSAJES   SIN ATAJO: una llamada por orden, y en los ultimos")
+        print(f"             7 dias hay {ordenes} ordenes.")
         if ordenes > 2000:
-            print("             >>> NO ENTRA en una corrida. Hay que acotarlo:")
-            print("                 solo las ordenes de los ultimos N dias, o")
-            print("                 solo las que tienen reclamo abierto.")
+            print("             >>> NO ENTRA. Ni siquiera acotado a una semana.")
+            print("                 Queda colgarlo de los reclamos: pedir la")
+            print("                 conversacion solo de las ordenes que YA")
+            print("                 tienen un reclamo abierto, que son decenas.")
         else:
-            print("             Entraria, pero hay que medirlo en la primera.")
+            print("             Entra, acotado a esa ventana.")
     else:
         print("  MENSAJES   no se pudo contar. Es la que hay que mirar.")
 
