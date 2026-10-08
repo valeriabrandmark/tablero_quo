@@ -83,19 +83,78 @@ BASE = "/post-purchase/v1/claims"
 # a uno y se reporta cual anduvo: es la mitad del sondeo. Pedir con un filtro
 # que no existe no siempre da error -- a veces lo ignora y devuelve todo, que
 # es peor, porque uno cree que filtro.
-ETAPAS = ("claim", "dispute", "recontact")
+ETAPAS = ("claim", "dispute", "recontact", "none")
 ESTADOS = ("opened", "closed")
 
 # Lo que se espera encontrar en la resolucion. Si alguno no aparece en ninguna
 # respuesta real, el tablero no lo puede mostrar y hay que decirlo.
 CAMPOS_RESOLUCION = ("reason", "benefited", "closed_by", "date_created")
 
-# `benefited` viene en el idioma de la API. Nosotros somos SIEMPRE el
-# reclamado: los reclamos los abre el comprador.
-QUIEN_GANO = {
-    "complainant": "el comprador",
-    "respondent": "nosotros",
-}
+
+# NO HAY TABLA FIJA DE "QUIEN GANO", Y ESTE FUE EL ERROR GRUESO DEL SONDEO.
+#
+# Estaba escrito que nosotros somos SIEMPRE el reclamado, asi que
+# `complainant` seria el comprador y `respondent` nosotros. Es falso. La
+# corrida del 08/10 trajo este reclamo:
+#
+#     "type": "cancel_sale",
+#     "players": [
+#       {"role": "complainant", "type": "seller", "user_id": 270905522},
+#       {"role": "respondent",  "type": "buyer",  "user_id": 306890223}
+#     ]
+#
+# En una cancelacion de venta el que reclama es EL VENDEDOR -- nosotros. Con
+# la tabla fija esos casos se habrian dado vuelta: los ganados contados como
+# perdidos y al reves.
+#
+# El rol sale de `players`, buscando nuestro user_id en CADA reclamo. Es por
+# reclamo y no por tipo: no alcanza con mirar el `type`.
+def nuestro_rol(fila, user_id):
+    """Que rol tenemos nosotros en ESTE reclamo. None si no figuramos."""
+    jugadores = (fila or {}).get("players")
+    if not isinstance(jugadores, list):
+        return None
+    for jugador in jugadores:
+        if isinstance(jugador, dict) and str(jugador.get("user_id")) == str(user_id):
+            return jugador.get("role")
+    return None
+
+
+def beneficiados(resolucion):
+    """Los roles beneficiados, siempre como tupla ordenada.
+
+    `benefited` NO es un texto: viene como LISTA. El sondeo lo usaba de clave
+    de un contador y la corrida del 08/10 se corto con
+
+        TypeError: cannot use 'list' as a dict key
+
+    Se aceptan las dos formas por si cambia segun el caso.
+    """
+    if not isinstance(resolucion, dict):
+        return ()
+    valor = resolucion.get("benefited")
+    if valor is None:
+        return ()
+    if isinstance(valor, str):
+        return (valor,)
+    if isinstance(valor, list):
+        return tuple(sorted(str(v) for v in valor))
+    return (str(valor),)
+
+
+def quien_gano(fila, user_id):
+    """'nosotros', 'la otra parte', 'los dos', o None si no se puede saber."""
+    favorecidos = beneficiados((fila or {}).get("resolution"))
+    if not favorecidos:
+        return None
+    rol = nuestro_rol(fila, user_id)
+    if rol is None:
+        return None
+    if rol not in favorecidos:
+        return "la otra parte"
+    # Que figuren los dos roles pasa cuando la resolucion parte la diferencia.
+    # No es lo mismo que ganar, asi que se cuenta aparte.
+    return "los dos" if len(favorecidos) > 1 else "nosotros"
 
 
 def llamar(ruta, token, params=None):
@@ -232,13 +291,18 @@ def contar(token):
             print(f"    {valor:<12} {total if total is not None else '?'}{sospecha}")
 
 
-def ver_detalle(token, cuantos, crudo):
+def ver_detalle(token, cuantos, crudo, user_id):
     """Abre unos reclamos y dice que campos traen de verdad.
 
     Se piden CERRADOS a proposito. Lo que hay que confirmar es
     `resolution.benefited` --quien gano--, y eso solo existe una vez que el
     reclamo se resolvio. Pidiendo los abiertos se veria `resolution` en null
     en todos y no se probaria nada.
+
+    CADA RECLAMO SE MIRA ADENTRO DE UN try. Un sondeo que se corta con un
+    traceback no sirve: la corrida del 08/10 murio en el reclamo numero N por
+    un campo con un tipo inesperado y se llevo puestos los puntos 4 al 8, que
+    no tenian nada que ver. Lo raro se cuenta y se sigue.
     """
     print("\n" + "=" * 74)
     print(f" 3. QUE TRAE UN RECLAMO CERRADO (mirando {cuantos})")
@@ -257,29 +321,40 @@ def ver_detalle(token, cuantos, crudo):
     claves = Counter()
     con_resolucion = 0
     resolucion_claves = Counter()
-    ganadores = Counter()
+    favorecidos = Counter()
+    resultados = Counter()
+    roles = Counter()
     etapas = Counter()
     tipos = Counter()
     estados = Counter()
+    fechas = []
+    rotos = []
 
     for i, fila in enumerate(filas):
         if not isinstance(fila, dict):
             continue
-        claves.update(fila.keys())
-        etapas[fila.get("stage")] += 1
-        tipos[fila.get("type")] += 1
-        estados[fila.get("status")] += 1
+        try:
+            claves.update(fila.keys())
+            etapas[fila.get("stage")] += 1
+            tipos[fila.get("type")] += 1
+            estados[fila.get("status")] += 1
+            roles[nuestro_rol(fila, user_id)] += 1
+            if isinstance(fila.get("date_created"), str):
+                fechas.append(fila["date_created"])
 
-        resolucion = fila.get("resolution")
-        if isinstance(resolucion, dict):
-            con_resolucion += 1
-            resolucion_claves.update(resolucion.keys())
-            ganadores[resolucion.get("benefited")] += 1
+            resolucion = fila.get("resolution")
+            if isinstance(resolucion, dict):
+                con_resolucion += 1
+                resolucion_claves.update(resolucion.keys())
+                favorecidos[beneficiados(resolucion)] += 1
+                resultados[quien_gano(fila, user_id)] += 1
 
-        if crudo and i == 0:
-            print("\n  --- un reclamo entero, como viene ---")
-            print(json.dumps(fila, indent=2, ensure_ascii=False)[:3000])
-            print("  --- fin ---\n")
+            if crudo and i == 0:
+                print("\n  --- un reclamo entero, como viene ---")
+                print(json.dumps(fila, indent=2, ensure_ascii=False)[:3000])
+                print("  --- fin ---\n")
+        except Exception as e:                       # noqa: BLE001
+            rotos.append((fila.get("id"), f"{type(e).__name__}: {e}"))
 
     print(f"\n  Campos que trae la busqueda (de {len(filas)} reclamos):")
     for clave, veces in claves.most_common():
@@ -288,6 +363,20 @@ def ver_detalle(token, cuantos, crudo):
     print(f"\n  status: {dict(estados)}")
     print(f"  stage:  {dict(etapas)}")
     print(f"  type:   {dict(tipos)}")
+    if fechas:
+        print(f"  fechas: de {min(fechas)[:10]} a {max(fechas)[:10]}")
+    if rotos:
+        print(f"\n  {len(rotos)} reclamos no se pudieron leer (se siguio igual):")
+        for ident, motivo in rotos[:5]:
+            print(f"    {ident}: {motivo}")
+
+    # NUESTRO ROL NO ES FIJO, y de esto depende leer bien el resultado.
+    print(f"\n  Que rol tenemos nosotros (user_id {user_id}):")
+    for rol, veces in roles.most_common():
+        print(f"    {str(rol):<14} x{veces}")
+    if len(roles) > 1:
+        print("    >>> Cambia segun el reclamo: hay que sacarlo de `players`")
+        print("        en cada uno, no suponerlo.")
 
     print(f"\n  --- LA PREGUNTA QUE IMPORTA: ¿viene quien gano? ---")
     if not con_resolucion:
@@ -300,10 +389,14 @@ def ver_detalle(token, cuantos, crudo):
         faltan = [c for c in CAMPOS_RESOLUCION if c not in resolucion_claves]
         if faltan:
             print(f"    NO aparecieron: {faltan}")
-        if ganadores:
-            print("    benefited:")
-            for valor, veces in ganadores.most_common():
-                print(f"      {str(valor):<14} x{veces}   ({QUIEN_GANO.get(valor, '?')})")
+        if favorecidos:
+            print("    benefited, como viene:")
+            for valor, veces in favorecidos.most_common():
+                print(f"      {str(list(valor)):<28} x{veces}")
+        if resultados:
+            print("\n    Y leido contra NUESTRO rol en cada reclamo:")
+            for valor, veces in resultados.most_common():
+                print(f"      {str(valor):<14} x{veces}")
 
     return filas
 
@@ -597,7 +690,7 @@ def main():
     puede, _ = probar_acceso(token)
     if puede:
         contar(token)
-        filas = ver_detalle(token, args.detalle, args.crudo) or []
+        filas = ver_detalle(token, args.detalle, args.crudo, user_id) or []
         detalle_de_a_uno(token, filas)
         probar_mensajes(token, filas)
     else:
