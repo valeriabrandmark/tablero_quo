@@ -84,8 +84,8 @@ jobs:
       # "A favor del cliente o nuestro" NO sale de una tabla fija: nuestro rol
       # cambia segun quien abrio el reclamo. En una cancelacion de venta el que
       # reclama es el vendedor. Leerlo al reves da vuelta el resultado.
-      - name: Probar a favor de quien se resolvio un reclamo
-        run: python probar_quien_gano.py
+      - name: Probar las cuentas del CRM
+        run: python probar_crm.py
 
       # De esta tabla sale la pata de INGRESOS de la trazabilidad de Full:
       # contra ella se compara lo que Mercado Libre declara. Un item contado de
