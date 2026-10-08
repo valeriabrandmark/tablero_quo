@@ -81,6 +81,12 @@ jobs:
       - name: Probar la lectura de la competencia
         run: python probar_competencia.py
 
+      # "A favor del cliente o nuestro" NO sale de una tabla fija: nuestro rol
+      # cambia segun quien abrio el reclamo. En una cancelacion de venta el que
+      # reclama es el vendedor. Leerlo al reves da vuelta el resultado.
+      - name: Probar a favor de quien se resolvio un reclamo
+        run: python probar_quien_gano.py
+
       # De esta tabla sale la pata de INGRESOS de la trazabilidad de Full:
       # contra ella se compara lo que Mercado Libre declara. Un item contado de
       # mas hace ver un faltante de ML donde no lo hay.
