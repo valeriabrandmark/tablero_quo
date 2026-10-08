@@ -1,11 +1,17 @@
-"""Sondeo: que nos deja ver Mercado Libre de los reclamos y mediaciones.
+"""Sondeo: que nos deja ver Mercado Libre para el tablero de CRM.
+
+Mira las TRES fuentes que va a juntar el tablero:
+
+  RECLAMOS Y MEDIACIONES   `/post-purchase/v1/claims`  -- y quien gano cada uno
+  PREGUNTAS DE PUBLICACION `/questions/search`         -- la pre-venta
+  MENSAJES POST-VENTA      `/messages/packs/...`       -- la charla de la orden
 
 ============================================================================
  POR QUE UN SONDEO Y NO EL EXTRACTOR DERECHO
 ============================================================================
 
-Porque hay tres cosas que NO se pueden dar por sabidas, y las tres cambian
-como hay que armar el tablero:
+Porque hay cosas que NO se pueden dar por sabidas, y todas cambian como hay
+que armar el tablero. Tres son de los reclamos:
 
   1. SI EL TOKEN TIENE ACCESO. La documentacion dice que los vendedores
      clasificados como "Modelo 6" reciben 403 en los endpoints de reclamos y
@@ -22,6 +28,15 @@ como hay que armar el tablero:
 
   3. HASTA DONDE LLEGA EL HISTORICO. El listado de cerrados se puede llenar
      hacia atras solo hasta donde la API deje buscar.
+
+Y la cuarta es la que decide si el tablero entra en la corrida:
+
+  4. CUANTAS LLAMADAS CUESTA CADA FUENTE. Los reclamos y las preguntas se
+     piden de a muchos por llamada. Los mensajes post-venta NO: van de a UNA
+     ORDEN POR VEZ. Con miles de ordenes en la ventana eso son miles de
+     llamadas, y la corrida entera tiene 50 minutos de presupuesto. Si el
+     numero no entra, la fuente no va en cada corrida -- o va filtrada por
+     las que tienen mensajes sin leer, que es lo que el punto 7 averigua.
 
 El sondeo no escribe NADA en la base. Solo mira y cuenta.
 
@@ -43,9 +58,9 @@ ejemplos con la ruta vieja, son de antes.
  COMO SE CORRE
 ============================================================================
 
-    python probar_reclamos_ml.py              # el sondeo completo
-    python probar_reclamos_ml.py --detalle 5  # solo 5 reclamos al detalle
-    python probar_reclamos_ml.py --crudo      # ademas, un reclamo entero
+    python probar_crm_ml.py              # el sondeo completo
+    python probar_crm_ml.py --detalle 5  # solo 5 reclamos al detalle
+    python probar_crm_ml.py --crudo      # ademas, un reclamo entero
 
 Necesita las mismas variables que el resto: ML_CLIENT_ID, ML_CLIENT_SECRET,
 ML_REDIRECT_URI, ML_USER_ID y la base para leer el token guardado.
@@ -324,6 +339,155 @@ def probar_mensajes(token, filas):
     print("\n  Ninguna de las dos rutas contesto. Hay que buscar cual es.")
 
 
+def probar_preguntas(token, user_id):
+    """Las preguntas de las publicaciones: la pata de pre-venta.
+
+    Devuelve cuantas hay en total, para la cuenta de llamadas del final.
+    """
+    print("\n" + "=" * 74)
+    print(" 6. PREGUNTAS DE LAS PUBLICACIONES (pre-venta)")
+    print("=" * 74)
+
+    # `api_version=4` no es decoracion: sin eso la ruta contesta con el
+    # formato viejo, que agrupa por publicacion en vez de devolver una
+    # pregunta por fila. Con 4 se pagina como cualquier otra busqueda.
+    params = {"seller_id": user_id, "api_version": 4, "limit": 1}
+    datos, error = llamar("/questions/search", token, params)
+    if error:
+        print(f"  No se pudo: {error}")
+        return None
+
+    total = _total(datos)
+    print(f"  Total historico: {total if total is not None else 'no lo dice'}")
+
+    # Lo que importa para el tablero es cuantas estan SIN CONTESTAR: son las
+    # que alguien tiene que mirar hoy.
+    sin_contestar = None
+    for estado in ("UNANSWERED", "ANSWERED"):
+        d, e = llamar("/questions/search", token,
+                      dict(params, status=estado))
+        if e:
+            print(f"  {estado:<12} ERROR: {e[:60]}")
+            continue
+        t = _total(d)
+        if estado == "UNANSWERED":
+            sin_contestar = t
+        print(f"  {estado:<12} {t if t is not None else '?'}")
+
+    filas, forma = _filas(datos)
+    if filas and isinstance(filas[0], dict):
+        print(f"\n  Las filas vienen en '{forma}'. Campos de una pregunta:")
+        print(f"    {sorted(filas[0])}")
+        respuesta = filas[0].get("answer")
+        if isinstance(respuesta, dict):
+            print(f"    answer: {sorted(respuesta)}")
+        elif respuesta is None:
+            print("    answer: viene en null cuando todavia no se contesto")
+    else:
+        print(f"\n  No se reconocio la forma de la respuesta: {forma}")
+
+    if sin_contestar:
+        print(f"\n  >>> {sin_contestar} preguntas sin contestar ahora mismo.")
+    return total
+
+
+def probar_mensajes_postventa(token, user_id):
+    """Los mensajes de las ordenes. La fuente cara, y hay que medir cuanto.
+
+    Devuelve (ordenes_en_ventana, hay_atajo_de_no_leidos).
+    """
+    print("\n" + "=" * 74)
+    print(" 7. MENSAJES POST-VENTA (la fuente cara)")
+    print("=" * 74)
+
+    # PRIMERO EL ATAJO, QUE ES LO QUE DECIDE EL DISENO.
+    #
+    # Si existe una ruta que diga "estas son las conversaciones con mensajes
+    # sin leer", se piden solo esas y la fuente sale casi gratis. Si no
+    # existe, hay que recorrer orden por orden y ahi la cuenta se dispara.
+    print("\n  a) ¿Hay un atajo para pedir solo lo que tiene mensajes nuevos?")
+    atajo = False
+    datos, error = llamar("/messages/unread", token, {"role": "seller"})
+    if error:
+        print(f"     /messages/unread  no: {error[:70]}")
+    else:
+        atajo = True
+        print(f"     /messages/unread  SI — {json.dumps(datos, ensure_ascii=False)[:200]}")
+
+    # Cuantas ordenes hay en una ventana corta, que es lo que se recorreria.
+    print("\n  b) ¿Cuantas ordenes habria que recorrer?")
+    ordenes, error = llamar("/orders/search", token, {
+        "seller": user_id, "sort": "date_desc", "limit": 1,
+    })
+    cuantas = None
+    if error:
+        print(f"     No se pudo listar ordenes: {error[:70]}")
+    else:
+        cuantas = _total(ordenes)
+        print(f"     Ordenes que devuelve la busqueda: {cuantas if cuantas is not None else '?'}")
+
+    # Y por ultimo: ¿se puede leer la conversacion de una orden concreta?
+    print("\n  c) ¿Se lee la conversacion de una orden?")
+    filas, _ = _filas(ordenes or {})
+    if not filas:
+        print("     Sin ordenes no se puede probar.")
+        return cuantas, atajo
+
+    orden = filas[0] if isinstance(filas[0], dict) else {}
+    # El `pack_id` agrupa las ordenes de un mismo carrito. Cuando la compra
+    # fue de un solo articulo viene en null y el pack ES la orden.
+    pack = orden.get("pack_id") or orden.get("id")
+    if pack is None:
+        print("     La orden no trae ni pack_id ni id.")
+        return cuantas, atajo
+
+    ruta = f"/messages/packs/{pack}/sellers/{user_id}"
+    datos, error = llamar(ruta, token)
+    if error:
+        print(f"     {ruta}\n       no: {error[:80]}")
+    else:
+        mensajes, forma = _filas(datos)
+        print(f"     {ruta}\n       SI — {len(mensajes)} mensajes (en '{forma}')")
+        if mensajes and isinstance(mensajes[0], dict):
+            print(f"       campos: {sorted(mensajes[0])}")
+
+    return cuantas, atajo
+
+
+def resumen_de_costo(ordenes, hay_atajo, preguntas):
+    """Lo unico que decide si esto entra en la corrida o no."""
+    print("\n" + "=" * 74)
+    print(" 8. ¿ENTRA EN LA CORRIDA?")
+    print("=" * 74)
+    print("  La corrida entera tiene 50 minutos de presupuesto, y a este paso")
+    print("  le tocarian 10 o 15. A ~3 llamadas por segundo con los hilos que")
+    print("  ya usa el stock Full, eso son unas 2.000 a 2.700 llamadas.")
+    print()
+    print("  RECLAMOS   se piden de a muchos: son decenas de llamadas. Entra.")
+
+    if preguntas:
+        paginas = -(-preguntas // 50)        # division para arriba
+        print(f"  PREGUNTAS  {preguntas} historicas = ~{paginas} paginas de 50.")
+        print("             En cada corrida solo haria falta lo nuevo. Entra.")
+    else:
+        print("  PREGUNTAS  no se pudo contar.")
+
+    if hay_atajo:
+        print("  MENSAJES   HAY ATAJO: se piden solo las conversaciones con")
+        print("             mensajes sin leer. Barato. Entra en cada corrida.")
+    elif ordenes:
+        print(f"  MENSAJES   SIN ATAJO: una llamada por orden, y la busqueda")
+        print(f"             declara {ordenes} ordenes.")
+        if ordenes > 2000:
+            print("             >>> NO ENTRA en una corrida. Hay que acotarlo:")
+            print("                 solo las ordenes de los ultimos N dias, o")
+            print("                 solo las que tienen reclamo abierto.")
+        else:
+            print("             Entraria, pero hay que medirlo en la primera.")
+    else:
+        print("  MENSAJES   no se pudo contar. Es la que hay que mirar.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--detalle", type=int, default=20, metavar="N",
@@ -332,26 +496,39 @@ def main():
                         help="ademas, imprime un reclamo entero como viene")
     args = parser.parse_args()
 
-    if not os.getenv("ML_USER_ID"):
+    user_id = os.getenv("ML_USER_ID")
+    if not user_id:
         print("Falta ML_USER_ID. Es la misma variable que usa el resto.")
         raise SystemExit(2)
 
     token = token_ml()
-    print("Token conseguido. Sondeando reclamos...")
+    print("Token conseguido. Sondeando las tres fuentes del CRM...")
 
+    # LOS RECLAMOS SON LO UNICO QUE PUEDE CORTAR EL SONDEO.
+    #
+    # Si dan 403 no hay tablero de reclamos, pero las preguntas y los mensajes
+    # son otros endpoints y pueden andar igual. Asi que se avisa y se sigue:
+    # cortar aca dejaria sin medir las otras dos y haria falta otra corrida.
     puede, _ = probar_acceso(token)
-    if not puede:
-        print("\nSin acceso no tiene sentido seguir. Nada que hacer en el codigo.")
-        raise SystemExit(1)
+    if puede:
+        contar(token)
+        filas = ver_detalle(token, args.detalle, args.crudo) or []
+        detalle_de_a_uno(token, filas)
+        probar_mensajes(token, filas)
+    else:
+        print("\n  Se saltean los puntos 2 a 5 y se sigue con las otras dos")
+        print("  fuentes, que son endpoints distintos y pueden andar igual.")
 
-    contar(token)
-    filas = ver_detalle(token, args.detalle, args.crudo) or []
-    detalle_de_a_uno(token, filas)
-    probar_mensajes(token, filas)
+    preguntas = probar_preguntas(token, user_id)
+    ordenes, hay_atajo = probar_mensajes_postventa(token, user_id)
+    resumen_de_costo(ordenes, hay_atajo, preguntas)
 
     print("\n" + "=" * 74)
     print(" Pegale la salida al chat y con eso se arma el extractor.")
     print("=" * 74 + "\n")
+
+    if not puede:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
