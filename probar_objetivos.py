@@ -96,6 +96,24 @@ revisar("items: empresa por su nombre, en minuscula",
 revisar("items: empresa mal escrita", p.leer_items("EMPRESA", "Quo Marketing")[0], None)
 revisar("items: dos marcas en una fila", p.leer_items("MARCA", "AVENO, DOVE")[0], None)
 
+# --- El nombre del archivo ----------------------------------------------------
+
+# " objetivos" para no confundirlo con la lista de costos, que es 2026-10.xlsx.
+revisar("archivo: con objetivos", p.mes_del_archivo("2026-10 objetivos.xlsx"), "2026-10")
+revisar("archivo: con guion bajo y mayuscula", p.mes_del_archivo("2026-10_Objetivos.xlsx"), "2026-10")
+revisar("archivo: con la carpeta adelante",
+        p.mes_del_archivo(os.path.join("objetivos_mensuales", "2026-10 objetivos.xlsx")), "2026-10")
+revisar("archivo: el mes pelado, como se llamaban antes", p.mes_del_archivo("2026-10.xlsx"), "2026-10")
+# Una lista de costos de media de mes subida a la carpeta equivocada.
+revisar("archivo: 2026-10-18 no es un mes", p.mes_del_archivo("2026-10-18.xlsx"), None)
+revisar("archivo: la plantilla no es un mes", p.mes_del_archivo("PLANTILLA.xlsx"), None)
+revisar("archivo: el que arma el codigo se lee", p.mes_del_archivo(p.nombre_de_archivo("2026-11")),
+        "2026-11")
+revisar("archivo: el viejo y el nuevo del mismo mes",
+        p.meses_repetidos(["x/2026-10.xlsx", "x/2026-10 objetivos.xlsx", "x/2026-09 objetivos.xlsx"]),
+        ["2026-10 tiene dos archivos (2026-10 objetivos.xlsx y 2026-10.xlsx): "
+         "tiene que quedar uno solo"])
+
 # --- Una hoja entera ---------------------------------------------------------
 
 # Lo de 2026-08: GERMAN con la mitad, en otra fila del mismo NOMBRE.
@@ -116,7 +134,7 @@ revisar("hoja: la nota de la segunda fila", g["IMPULSE TRUE LOVE 150 ML"]["nota"
 _, _, e = p.leer_hoja("2026-10.xlsx", hoja(
     ("2026-09", "AVENO", "MARCA", "AVENO", None, "TODOS", 60)))
 revisar("hoja: mes de la columna distinto del archivo",
-        hay_error(e, "fila 2: MES_COMERCIAL dice 2026-09 pero el archivo es 2026-10"), True)
+        hay_error(e, "fila 2: MES_COMERCIAL dice 2026-09 pero el archivo es el de 2026-10"), True)
 
 # El mismo NOMBRE con otros SKUs en la misma hoja.
 _, _, e = p.leer_hoja("2026-10.xlsx", hoja(
@@ -158,7 +176,7 @@ octu = p.leer_hoja("2026-10.xlsx", hoja(
     ("2026-10", "X5 INSECTICIDAS", "MIX", "SS07013, SS07014, SS07020", None, "TODOS", 300)))
 _, e = p.combinar({"2026-08": ago[:2], "2026-10": octu[:2]})
 revisar("meses: mismo NOMBRE con otros SKUs en otro mes",
-        hay_error(e, "'X5 INSECTICIDAS' tiene otro SKU en 2026-08.xlsx que en 2026-10.xlsx"), True)
+        hay_error(e, "'X5 INSECTICIDAS' tiene otro SKU en 2026-08 que en 2026-10"), True)
 
 octu = p.leer_hoja("2026-10.xlsx", hoja(
     ("2026-10", "Aveno", "MARCA", "AVENO", None, "TODOS", 60)))
@@ -166,7 +184,7 @@ ago = p.leer_hoja("2026-08.xlsx", hoja(
     ("2026-08", "AVENO", "MARCA", "AVENO", None, "TODOS", 60)))
 _, e = p.combinar({"2026-08": ago[:2], "2026-10": octu[:2]})
 revisar("meses: el mismo NOMBRE con otra mayuscula en otro mes",
-        hay_error(e, "'AVENO' en 2026-08.xlsx y 'Aveno' en 2026-10.xlsx"), True)
+        hay_error(e, "'AVENO' en 2026-08 y 'Aveno' en 2026-10"), True)
 
 sep = p.leer_hoja("2026-09.xlsx", hoja(
     ("2026-09", "ORAL B CEPILLO MICKEY 2 U", "SKU", "GL05011", None, "SILVIO", 80),
@@ -201,7 +219,7 @@ try:
             ("RICARDO", "IMPULSE TRUE LOVE 150 ML", 480.0), ("GERMAN", "IMPULSE TRUE LOVE 150 ML", 240.0),
             ("SILVIO", "JARDIN DESODORANTE 25 GR", 480.0)]
     base += [(v, "Ventas netas Brandmark", 45000000.0) for v in p.VENDEDORES_CON_PAGINA]
-    ruta = os.path.join(carpeta, "2026-08.xlsx")
+    ruta = os.path.join(carpeta, "2026-08 objetivos.xlsx")
     filas = p.filas_desde_base("2026-08", base, base_grupos)
     revisar("exportar: los cuatro con el mismo numero son TODOS",
             [f["VENDEDORES"] for f in filas if f["NOMBRE"] == "Ventas netas Brandmark"], ["TODOS"])
@@ -209,7 +227,7 @@ try:
             [f["SKU"] for f in filas if f["NOMBRE"] == "Ventas netas Brandmark"], ["BRANDMARK"])
     p.escribir_planilla(ruta, filas)
     wb = load_workbook(ruta, data_only=True)
-    o, g, e = p.leer_hoja("2026-08.xlsx", wb[p.HOJA].iter_rows(values_only=True))
+    o, g, e = p.leer_hoja("2026-08 objetivos.xlsx", wb[p.HOJA].iter_rows(values_only=True))
     revisar("ida y vuelta: sin errores", e, [])
     revisar("ida y vuelta: los mismos objetivos", o, {(v, gr): c for v, gr, c in base})
     revisar("ida y vuelta: los mismos grupos",

@@ -1,6 +1,6 @@
 """Carga los Excel de objetivos de los vendedores a gold.objetivos.
 
-    objetivos_mensuales/2026-10.xlsx  ->  los objetivos del mes comercial 2026-10
+    objetivos_mensuales/2026-10 objetivos.xlsx  ->  los del mes comercial 2026-10
 
 Como es la planilla y por que, en objetivos_planilla.py. Aca esta lo que
 necesita la base.
@@ -26,7 +26,7 @@ en la base sin molestar a nadie.
     python objetivos.py                   carga todo lo que hay en la carpeta
     python objetivos.py --revisar         valida y muestra que cambiaria, sin guardar
     python objetivos.py --si-cambio       lo que corre el orquestador
-    python objetivos.py --exportar 2026-09  arma 2026-09.xlsx con lo que hay en la base
+    python objetivos.py --exportar 2026-09  arma "2026-09 objetivos.xlsx" desde la base
 """
 
 import argparse
@@ -47,15 +47,16 @@ CLAVE_ESTADO = "objetivos"
 
 
 def leer_carpeta(carpeta):
-    """Lee y valida todos los AAAA-MM.xlsx. Devuelve (por_mes, errores)."""
+    """Lee y valida todos los archivos de mes. Devuelve (por_mes, errores)."""
     validos, ignorados = planilla.archivos(carpeta)
     for ruta in ignorados:
-        print(f"  (se ignora {os.path.basename(ruta)}: el nombre no es AAAA-MM)")
+        print(f"  (se ignora {os.path.basename(ruta)}: el nombre no es "
+              "'AAAA-MM objetivos')")
 
-    por_mes, errores = {}, []
+    por_mes, errores = {}, planilla.meses_repetidos(validos)
     for ruta in validos:
         nombre = os.path.basename(ruta)
-        mes = os.path.splitext(nombre)[0]
+        mes = planilla.mes_del_archivo(nombre)
         if mes < planilla.MES_MINIMO:
             errores.append(f"{nombre}: el tablero arranca en {planilla.MES_MINIMO}, "
                            "antes no hay ventas contra las que medir")
@@ -219,7 +220,7 @@ def cargar(carpeta, solo_revisar=False):
     """Devuelve True si quedo todo bien (o no habia nada), False si hubo errores."""
     por_mes, errores = leer_carpeta(carpeta)
     if not por_mes and not errores:
-        print(f"  No hay ningun AAAA-MM.xlsx en {carpeta}/. No hay nada que hacer.")
+        print(f"  No hay ningun 'AAAA-MM objetivos.xlsx' en {carpeta}/. No hay nada que hacer.")
         return True
 
     grupos, errs = planilla.combinar(por_mes)
@@ -256,15 +257,16 @@ def cargar(carpeta, solo_revisar=False):
 
 
 def exportar(mes, carpeta):
-    """Arma AAAA-MM.xlsx con lo que hay en la base para ese mes.
+    """Arma "AAAA-MM objetivos.xlsx" con lo que hay en la base para ese mes.
 
     Sirve para pasar a planilla lo que se cargo a mano antes de que existiera
     esto: con el archivo exportado en la carpeta, la primera carga da "sin
     cambios" y queda probado que el circuito no pisa nada.
     """
-    ruta = os.path.join(carpeta, f"{mes}.xlsx")
-    if os.path.exists(ruta):
-        sys.exit(f"Ya existe {ruta}: no se pisa. Borralo o movelo primero.")
+    ruta = os.path.join(carpeta, planilla.nombre_de_archivo(mes))
+    ya = [r for r in planilla.archivos(carpeta)[0] if planilla.mes_del_archivo(r) == mes]
+    if ya:
+        sys.exit(f"Ya existe {ya[0]}: no se pisa. Borralo o movelo primero.")
     with crear_engine().begin() as con:
         grupos = grupos_en_base(con)
         objetivos = con.execute(text(
@@ -280,7 +282,7 @@ def exportar(mes, carpeta):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Carga objetivos_mensuales/AAAA-MM.xlsx a gold.objetivos.")
+        description="Carga objetivos_mensuales/'AAAA-MM objetivos.xlsx' a gold.objetivos.")
     parser.add_argument("--revisar", action="store_true",
                         help="Valida y muestra que cambiaria, sin guardar")
     parser.add_argument("--si-cambio", action="store_true",

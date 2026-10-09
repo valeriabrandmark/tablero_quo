@@ -11,7 +11,12 @@ probarse en el pull request sin credenciales (probar_objetivos.py).
 
 Un archivo por mes comercial en objetivos_mensuales/, igual que los costos:
 
-    objetivos_mensuales/2026-10.xlsx
+    objetivos_mensuales/2026-10 objetivos.xlsx
+
+El " objetivos" del nombre es para no confundirlo con la lista de costos, que
+se llama 2026-10.xlsx a secas: los dos andan juntos por el escritorio y las
+descargas antes de subirse, y el nombre es lo unico que los distingue de
+lejos. Ver mes_del_archivo.
 
 Hoja "Objetivos", una fila por objetivo:
 
@@ -100,6 +105,11 @@ ATAJOS_EMPRESA = {
 MES_MINIMO = "2026-05"
 
 PATRON_MES = re.compile(r"\d{4}-\d{2}")
+# "2026-10 objetivos", y tambien "2026-10_objetivos", "2026-10-Objetivos" o
+# "2026-10" pelado. Lo que NO entra es "2026-10-18": eso es una lista de costos
+# de media de mes que se subio a la carpeta equivocada, y tomarla por los
+# objetivos de octubre seria peor que ignorarla.
+PATRON_ARCHIVO = re.compile(r"(\d{4}-\d{2})(?:[ _-]+objetivos)?", re.IGNORECASE)
 SEPARADORES = re.compile(r"\s*[,;/\n]\s*")
 # 45.000.000 -> miles con punto, a la argentina.
 MILES_CON_PUNTO = re.compile(r"\d{1,3}(\.\d{3})+")
@@ -244,7 +254,7 @@ def leer_hoja(nombre_archivo, filas):
     """
     errores = []
     objetivos, grupos = {}, {}
-    mes_archivo = os.path.splitext(os.path.basename(nombre_archivo))[0]
+    mes_archivo = mes_del_archivo(nombre_archivo)
 
     filas = list(filas)
     if not filas:
@@ -274,7 +284,7 @@ def leer_hoja(nombre_archivo, filas):
             # El error de siempre: copiar el archivo del mes pasado, cambiarle
             # el nombre y olvidarse de la columna.
             errores.append(f"{donde}: MES_COMERCIAL dice {mes} pero el archivo es "
-                           f"{mes_archivo}.xlsx")
+                           f"el de {mes_archivo}")
 
         if vacio(celda["NOMBRE"]):
             errores.append(f"{donde}: NOMBRE esta vacio")
@@ -388,8 +398,8 @@ def combinar(por_mes):
             clave = normalizar(grupo)
             if clave in escrito and escrito[clave][0] != grupo:
                 errores.append(
-                    f"'{grupo}' en {mes}.xlsx y '{escrito[clave][0]}' en "
-                    f"{escrito[clave][1]}.xlsx son el mismo NOMBRE escrito distinto: "
+                    f"'{grupo}' en {mes} y '{escrito[clave][0]}' en "
+                    f"{escrito[clave][1]} son el mismo NOMBRE escrito distinto: "
                     "tiene que ir igual en todos los meses")
                 continue
             escrito.setdefault(clave, (grupo, mes))
@@ -402,7 +412,7 @@ def combinar(por_mes):
             distinto = diferencia(ya, d)
             if distinto:
                 errores.append(
-                    f"'{grupo}' tiene otro {distinto} en {mes}.xlsx que en {ya['mes']}.xlsx. "
+                    f"'{grupo}' tiene otro {distinto} en {mes} que en {ya['mes']}. "
                     "El avance se calcula en vivo, asi que cambiarlo reescribiria el "
                     f"avance de {mes}: el objetivo nuevo tiene que llevar otro NOMBRE")
             elif not ya["descripcion"] and d["nota"]:
@@ -410,22 +420,52 @@ def combinar(por_mes):
     return final, errores
 
 
+def mes_del_archivo(nombre):
+    """'2026-10 objetivos.xlsx' -> '2026-10'. None si el nombre no es de un mes.
+
+    Admite el mes pelado ("2026-10.xlsx"), que es como se llamaban al
+    principio: renombrar un archivo no tiene que dejarlo afuera.
+    """
+    base = os.path.splitext(os.path.basename(nombre))[0].strip()
+    m = PATRON_ARCHIVO.fullmatch(base)
+    return m.group(1) if m else None
+
+
+def nombre_de_archivo(mes):
+    """Como se llama el archivo de un mes cuando lo arma este codigo."""
+    return f"{mes} objetivos.xlsx"
+
+
 def archivos(carpeta=CARPETA):
-    """Los AAAA-MM.xlsx de la carpeta, y aparte los que no tienen ese nombre.
+    """Los archivos de un mes, y aparte los que no tienen ese nombre.
 
     PLANTILLA.xlsx vive en la misma carpeta a proposito, para tenerla a mano,
-    y se ignora por el nombre. El "~$2026-10.xlsx" que deja Excel abierto
-    tambien.
+    y se ignora por el nombre. El "~$2026-10 objetivos.xlsx" que deja Excel
+    abierto tambien.
     """
     validos, ignorados = [], []
     for ruta in sorted(glob.glob(os.path.join(carpeta, "*.xlsx"))):
-        nombre = os.path.splitext(os.path.basename(ruta))[0]
-        (validos if PATRON_MES.fullmatch(nombre) else ignorados).append(ruta)
+        (validos if mes_del_archivo(ruta) else ignorados).append(ruta)
     return validos, ignorados
 
 
+def meses_repetidos(rutas):
+    """Errores por cada mes que tiene mas de un archivo.
+
+    Pasa al renombrar: se sube "2026-10 objetivos.xlsx" y queda tambien el
+    "2026-10.xlsx" viejo. Elegir uno de los dos seria adivinar cual es el
+    bueno, y si se elige el viejo el tablero muestra objetivos que nadie
+    quiso cargar.
+    """
+    por_mes = {}
+    for r in rutas:
+        por_mes.setdefault(mes_del_archivo(r), []).append(os.path.basename(r))
+    return [f"{mes} tiene dos archivos ({' y '.join(sorted(ns))}): tiene que quedar uno solo"
+            for mes, ns in sorted(por_mes.items()) if len(ns) > 1]
+
+
 def huella(carpeta=CARPETA):
-    """Firma del CONTENIDO de los AAAA-MM.xlsx, como la de costos.py.
+    """Firma del CONTENIDO de los archivos de cada mes, como la de costos.py.
 
     No la fecha de modificacion: GitHub Actions hace checkout limpio en cada
     corrida y la fecha cambia siempre. Eso hizo que costos.py recargara los
@@ -453,7 +493,7 @@ ANCHOS = {"MES_COMERCIAL": 15, "NOMBRE": 38, "TIPO": 11, "SKU": 34, "MEDIDA": 14
 
 AYUDA = [
     ("COMO SE LLENA", None),
-    ("Una fila por objetivo. El archivo se llama como el mes comercial (2026-10.xlsx) "
+    ("Una fila por objetivo. El archivo se llama con el mes comercial: «2026-10 objetivos.xlsx» "
      "y va en la carpeta objetivos_mensuales del repo tablero_quo.", None),
     ("Al subirlo a main, la corrida siguiente del orquestador (cada hora y media) lo "
      "carga y la pagina de cada vendedor se actualiza sola.", None),
@@ -483,7 +523,7 @@ AYUDA = [
      "Se puede probar antes con: python objetivos.py --revisar", None),
     ("", None),
     ("PARA ARRANCAR UN MES", None),
-    ("Copiar el archivo del mes anterior, renombrarlo (2026-11.xlsx), cambiar "
+    ("Copiar el archivo del mes anterior, renombrarlo («2026-11 objetivos.xlsx»), cambiar "
      "MES_COMERCIAL en todas las filas y ajustar los numeros.", None),
 ]
 

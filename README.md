@@ -768,8 +768,12 @@ Excel.
 
 ## El Excel de objetivos de los vendedores
 
-`objetivos_mensuales/`. Un archivo por mes comercial, `2026-10.xlsx`, con una
-fila por objetivo. Para arrancar se copia
+`objetivos_mensuales/`. Un archivo por mes comercial, **`2026-10 objetivos.xlsx`**,
+con una fila por objetivo. El « objetivos» del nombre es para no confundirlo con
+la lista de costos del mismo mes, que se llama `2026-10.xlsx` a secas. Se acepta
+también con guion o guion bajo (`2026-10_objetivos.xlsx`) y el mes pelado, pero
+no dos archivos del mismo mes: eso frena la carga hasta que quede uno solo. Un
+`2026-10-18.xlsx` de costos subido a esta carpeta por error se ignora. Para arrancar se copia
 [`objetivos_mensuales/PLANTILLA.xlsx`](objetivos_mensuales/PLANTILLA.xlsx), o el
 archivo del mes anterior. La hoja «Como llenarla» de la plantilla tiene esto
 mismo.
@@ -786,7 +790,7 @@ mismo.
 | `NOTA` | Opcional |
 
 Si un vendedor tiene otro número para el mismo objetivo, va en otra fila con el
-mismo `NOMBRE`: así está `2026-08.xlsx`, con GERMAN a la mitad.
+mismo `NOMBRE`: así está `2026-08 objetivos.xlsx`, con GERMAN a la mitad.
 
 Se sube a `main` y la corrida siguiente lo carga. **Cada archivo reemplaza su mes
 entero** en `gold.objetivos`; los meses sin archivo no se tocan, y sacar un
@@ -817,7 +821,7 @@ El orden en que se ven los objetivos en el tablero es el orden de las filas del
 mes más nuevo. Los grupos no se borran nunca: `gold.objetivos` cuelga de ellos
 con `on delete cascade`.
 
-`2026-08.xlsx` y `2026-09.xlsx` salieron de la base con
+`2026-08 objetivos.xlsx` y `2026-09 objetivos.xlsx` salieron de la base con
 `python objetivos.py --exportar 2026-09`, para que la primera carga diera «sin
 cambios».
 
