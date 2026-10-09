@@ -68,6 +68,7 @@ esperaba media hora por datos que no usa.
 | 15 | `foto_cuentas.py` | siempre | `bronze.cuentas_corrientes_historial_diario`, `_historial_scoring` | no |
 | 16 | `mercadolibre.py --catalogo` | **1/día** | `bronze.ml_publicaciones`, `ml_stock_full`, `ml_stock_full_historico` | no |
 | 17 | `sell_in.py` | **1/día** | `bronze.sell_in` | no |
+| 18 | `objetivos.py --si-cambio` | si cambió un Excel | `gold.objetivos` | no |
 
 #### Aparte: `Antiguedad Full` (workflow propio)
 
@@ -764,6 +765,61 @@ tenga un número parecido al anterior; si bajó mucho, algo se movió de lugar e
 Excel.
 
 ---
+
+## El Excel de objetivos de los vendedores
+
+`objetivos_mensuales/`. Un archivo por mes comercial, `2026-10.xlsx`, con una
+fila por objetivo. Para arrancar se copia
+[`objetivos_mensuales/PLANTILLA.xlsx`](objetivos_mensuales/PLANTILLA.xlsx), o el
+archivo del mes anterior. La hoja «Como llenarla» de la plantilla tiene esto
+mismo.
+
+| Columna | Qué va |
+|---|---|
+| `MES_COMERCIAL` | `2026-10`. Tiene que coincidir con el nombre del archivo |
+| `NOMBRE` | Como se ve en el tablero |
+| `TIPO` | `SKU` (uno solo), `MIX` (varios, sumados), `MARCA` o `EMPRESA` |
+| `SKU` | El SKU; los del MIX separados por coma; la marca; o `BRANDMARK` / `NOA` |
+| `MEDIDA` | `UNIDADES` (si queda vacía), `FACTURACION` o `CLIENTES` |
+| `VENDEDORES` | `SILVIO, GERMAN`… o `TODOS` |
+| `CANTIDAD` | El objetivo de **cada** vendedor de la fila |
+| `NOTA` | Opcional |
+
+Si un vendedor tiene otro número para el mismo objetivo, va en otra fila con el
+mismo `NOMBRE`: así está `2026-08.xlsx`, con GERMAN a la mitad.
+
+Se sube a `main` y la corrida siguiente lo carga. **Cada archivo reemplaza su mes
+entero** en `gold.objetivos`; los meses sin archivo no se tocan, y sacar un
+archivo de la carpeta no borra su mes.
+
+**Si hay un solo error no se carga nada**, y la corrida queda en rojo con la
+lista completa, fila por fila. Para mirarlo antes de subirlo:
+
+```bash
+python objetivos.py --revisar
+```
+
+Lo que frena:
+
+- un vendedor sin página de objetivos, o mal escrito (la tilde de «Germán» se
+  acepta);
+- un SKU que no está en `bronze.sigma_articulos`, o una marca que no está en el
+  catálogo;
+- `MES_COMERCIAL` distinto del nombre del archivo: es el archivo del mes pasado
+  copiado sin cambiar la columna;
+- un `TIPO SKU` con varios SKUs (es un `MIX`), o un `MIX` de uno;
+- **un `NOMBRE` que ya existe con otros SKUs, otro `TIPO` u otra `MEDIDA`**, en
+  cualquier mes. El grupo no tiene mes en la base y el avance se calcula en vivo,
+  así que cambiarlo cambiaría también el avance de los meses viejos. Objetivo
+  distinto, nombre distinto: es lo que se hizo en 2026-09 con los insecticidas X5.
+
+El orden en que se ven los objetivos en el tablero es el orden de las filas del
+mes más nuevo. Los grupos no se borran nunca: `gold.objetivos` cuelga de ellos
+con `on delete cascade`.
+
+`2026-08.xlsx` y `2026-09.xlsx` salieron de la base con
+`python objetivos.py --exportar 2026-09`, para que la primera carga diera «sin
+cambios».
 
 ## Qué se está actualizando y qué no
 
