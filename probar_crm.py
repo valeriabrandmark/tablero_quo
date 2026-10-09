@@ -186,12 +186,16 @@ import types
 _ARBOL = ast.parse(open("ml_crm.py", encoding="utf-8").read())
 _MOD = ast.Module(
     body=[n for n in _ARBOL.body
-          if isinstance(n, ast.FunctionDef) and n.name in {"_filas", "_paginar"}],
+          if isinstance(n, ast.FunctionDef)
+          and n.name in {"_filas", "_paginar", "_detalle_error",
+                         "pack_de_la_orden"}],
     type_ignores=[],
 )
 _NS = {"PAGINA": 50, "PAGINAS_MAX": 400}
 exec(compile(_MOD, "ml_crm.py", "exec"), _NS)            # noqa: S102
 _filas, _paginar = _NS["_filas"], _NS["_paginar"]
+_detalle_error = _NS["_detalle_error"]
+_pack_de_la_orden = _NS["pack_de_la_orden"]
 
 print("\nCADA RUTA DEVUELVE LAS FILAS EN OTRA CLAVE")
 probar("data, la de reclamos", _filas({"data": [1, 2]}, "data", "results"), [1, 2])
@@ -229,6 +233,57 @@ for _total, _llamadas in ((0, 1), (10, 1), (50, 2), (100, 3), (120, 3)):
 _NS["ml"] = types.SimpleNamespace(
     llamar_ml=lambda ruta, token, params: {"data": list(range(params["limit"]))})
 probar("el tope corta el bucle", len(_paginar("t", "/x", {}, ("data",), tope=3)), 150)
+
+
+class _Respuesta:
+    def __init__(self, codigo, texto):
+        self.status_code = codigo
+        self.text = texto
+
+
+class _ErrorHttp(Exception):
+    def __init__(self, codigo, texto):
+        super().__init__(f"{codigo}")
+        self.response = _Respuesta(codigo, texto)
+
+
+print("\nUN ERROR TIENE QUE DECIR QUE PASO")
+probar("el codigo y el cuerpo, no la clase",
+       _detalle_error(_ErrorHttp(404, '{"error":"resource not found"}')),
+       'HTTP 404 — {"error":"resource not found"}')
+probar("un cuerpo largo se recorta pero se ve",
+       _detalle_error(_ErrorHttp(500, "x" * 500)).startswith("HTTP 500 — xxx"), True)
+probar("sin response, la clase y el texto",
+       _detalle_error(ValueError("se rompio")), "ValueError: se rompio")
+
+
+print("\nLA RUTA DE MENSAJES PIDE UN PACK, NO UNA ORDEN")
+# Lo que dejo 24 conversaciones en 404: una orden de carrito tiene pack_id
+# propio y distinto del id de la orden.
+_NS["ml"] = types.SimpleNamespace(
+    llamar_ml=lambda ruta, token, params=None: {"id": 111, "pack_id": 999})
+probar("con pack_id se usa el pack", _pack_de_la_orden("t", 111), 999)
+
+_NS["ml"] = types.SimpleNamespace(
+    llamar_ml=lambda ruta, token, params=None: {"id": 111, "pack_id": None})
+probar("sin pack_id el pack es la orden", _pack_de_la_orden("t", 111), 111)
+
+_NS["ml"] = types.SimpleNamespace(
+    llamar_ml=lambda ruta, token, params=None: {})
+probar("una orden sin id cae en la que se pidio", _pack_de_la_orden("t", 111), 111)
+
+
+def _explota(ruta, token, params=None):
+    raise _ErrorHttp(404, "no existe")
+
+
+_NS["ml"] = types.SimpleNamespace(llamar_ml=_explota)
+probar("si la orden no se puede leer, None y no un id inventado",
+       _pack_de_la_orden("t", 111), None)
+
+_NS["ml"] = types.SimpleNamespace(
+    llamar_ml=lambda ruta, token, params=None: "no soy un dict")
+probar("una respuesta rara no explota", _pack_de_la_orden("t", 111), None)
 
 
 print(f"\n{'TODO OK' if not MAL else 'HAY FALLAS'}: {OK} ok, {MAL} mal\n")
