@@ -387,7 +387,7 @@ PASOS = [
      "cada_horas": None, "critico": False,
      "escribe": "sell_in", "techo": 5 * 60},
 
-    # LOS OBJETIVOS DE LOS VENDEDORES, de objetivos_mensuales/AAAA-MM.xlsx.
+    # LOS OBJETIVOS DE LOS VENDEDORES, de objetivos_mensuales/'AAAA-MM objetivos.xlsx'.
     # Mismo esquema que costos.py: se llama en cada corrida y la huella decide,
     # asi que un Excel subido a main entra en la corrida siguiente. Sin cambios
     # son dos segundos.
