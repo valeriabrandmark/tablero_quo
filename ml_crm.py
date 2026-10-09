@@ -73,6 +73,21 @@ PAGINA = 50
 PAGINAS_MAX = 400
 
 
+def _detalle_error(e):
+    """El codigo y el cuerpo de un error de la API, no solo su clase.
+
+    Se imprimia `type(e).__name__`, o sea "HTTPError" a secas, y con eso la
+    corrida del 08/10 informo 24 ordenes fallando sin decir POR QUE. Es el
+    mismo error que ya se habia cometido truncando los mensajes del sondeo a
+    70 caracteres: lo unico util de un fallo es lo que la API explica.
+    """
+    respuesta = getattr(e, "response", None)
+    if respuesta is None:
+        return f"{type(e).__name__}: {str(e)[:200]}"
+    cuerpo = (getattr(respuesta, "text", "") or "")[:300]
+    return f"HTTP {respuesta.status_code} — {cuerpo}"
+
+
 def _filas(datos, *claves):
     """Las filas de una respuesta, probando las claves que puede traer."""
     if isinstance(datos, list):
@@ -165,7 +180,7 @@ def pedir_cerrados_nuevos(token, user_id, ids):
             # Que uno no se pueda leer no puede costar los demas: el resto de
             # la corrida sigue y ese reclamo se reintenta en la proxima,
             # porque sin fila nueva se queda como estaba.
-            print(f"  No se pudo leer el reclamo {ident}: {type(e).__name__}")
+            print(f"  No se pudo leer el reclamo {ident}: {_detalle_error(e)}")
             continue
         fila = crm.fila_reclamo(datos, user_id)
         if fila:
@@ -192,7 +207,7 @@ def pedir_mensajes(token, ids):
         try:
             datos = ml.llamar_ml(f"{BASE}/{ident}/messages", token)
         except Exception as e:                       # noqa: BLE001
-            print(f"  Sin mensajes del reclamo {ident}: {type(e).__name__}")
+            print(f"  Sin mensajes del reclamo {ident}: {_detalle_error(e)}")
             continue
         for i, mensaje in enumerate(_filas(datos, "messages", "data")):
             if not isinstance(mensaje, dict):
@@ -241,6 +256,32 @@ def pedir_preguntas(token, user_id, todas=False):
 #  MENSAJES POST-VENTA
 # ============================================================
 
+def pack_de_la_orden(token, orden):
+    """El pack al que pertenece una orden. Si no tiene, la orden misma.
+
+    LA RUTA DE MENSAJES PIDE UN PACK, NO UNA ORDEN, y confundirlos fue lo que
+    dejo las 24 conversaciones en 404 el 08/10. El `pack_id` agrupa las
+    ordenes de un mismo carrito: cuando la compra fue de un solo articulo
+    viene en null y entonces el pack ES la orden -- que es el unico caso que
+    el sondeo habia probado, y por eso parecia que alcanzaba con la orden.
+
+    `resource_id` del reclamo es la ORDEN, asi que hay que pasar por aca
+    antes de pedir la conversacion. Es una llamada mas por reclamo: con 24
+    abiertos, 24 llamadas.
+
+    Devuelve None si la orden no se puede leer: sin pack no hay conversacion
+    que pedir, y es mejor saltearla que inventar un id.
+    """
+    try:
+        datos = ml.llamar_ml(f"/orders/{orden}", token)
+    except Exception as e:                           # noqa: BLE001
+        print(f"  No se pudo leer la orden {orden}: {_detalle_error(e)}")
+        return None
+    if not isinstance(datos, dict):
+        return None
+    return datos.get("pack_id") or datos.get("id") or orden
+
+
 def pedir_mensajes_orden(token, user_id, ordenes):
     """La charla post-venta, SOLO de las ordenes que tienen reclamo.
 
@@ -249,11 +290,17 @@ def pedir_mensajes_orden(token, user_id, ordenes):
     """
     filas = []
     for orden in ordenes:
-        ruta = f"/messages/packs/{orden}/sellers/{user_id}"
+        pack = pack_de_la_orden(token, orden)
+        if pack is None:
+            continue
+        ruta = f"/messages/packs/{pack}/sellers/{user_id}"
         try:
             datos = ml.llamar_ml(ruta, token, {"tag": "post_sale"})
         except Exception as e:                       # noqa: BLE001
-            print(f"  Sin conversacion de la orden {orden}: {type(e).__name__}")
+            # Se nombran LAS DOS: con un pack distinto de la orden, saber cual
+            # de los dos id fallo es la mitad del diagnostico.
+            print(f"  Sin conversacion de la orden {orden} "
+                  f"(pack {pack}): {_detalle_error(e)}")
             continue
         for mensaje in _filas(datos, "messages"):
             if not isinstance(mensaje, dict) or mensaje.get("id") is None:
