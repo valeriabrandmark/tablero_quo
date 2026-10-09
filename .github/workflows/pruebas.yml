@@ -77,6 +77,13 @@ jobs:
       - name: Probar la huella de los Excel
         run: python probar_huella_costos.py
 
+      # Casi nada de lo que sale mal en un objetivo da error en la base: da
+      # avance cero, o le cambia el avance a un mes viejo. Un "Germán" con
+      # tilde, un MIX sin la palabra MIX, el archivo del mes pasado copiado
+      # sin cambiar la columna del mes.
+      - name: Probar la planilla de objetivos
+        run: python probar_objetivos.py
+
       # Un precio para ganar que falta tiene que quedar en null, no en cero.
       - name: Probar la lectura de la competencia
         run: python probar_competencia.py

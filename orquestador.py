@@ -387,6 +387,22 @@ PASOS = [
      "cada_horas": None, "critico": False,
      "escribe": "sell_in", "techo": 5 * 60},
 
+    # LOS OBJETIVOS DE LOS VENDEDORES, de objetivos_mensuales/AAAA-MM.xlsx.
+    # Mismo esquema que costos.py: se llama en cada corrida y la huella decide,
+    # asi que un Excel subido a main entra en la corrida siguiente. Sin cambios
+    # son dos segundos.
+    #
+    # Va en este bloque porque modelo.py no lo lee: la pagina de objetivos
+    # calcula el avance en vivo contra gold.fact_ventas.
+    #
+    # `avisar_tras` 1 Y NO MAS. Aca un fallo casi nunca es un hipo de la red:
+    # es una fila mal escrita en la planilla, y mientras nadie la arregle el
+    # tablero sigue con los objetivos de antes. Tiene que verse en la primera
+    # corrida. `intentos` 1 por lo mismo: reintentar no arregla la planilla.
+    {"comando": "objetivos.py --si-cambio",    "intentos": 1, "espera": 0,
+     "cada_horas": None, "critico": False, "avisar_tras": 1,
+     "escribe": "gold.objetivos", "techo": 5 * 60},
+
     # COMPETENCIA EN CATALOGO: precio para ganar, competidores y comision de ML
     # a ese precio. Lee `ml_publicaciones`, asi que va despues del catalogo.
     #
