@@ -112,6 +112,10 @@ probar("nuestro rol queda escrito", fila["nuestro_rol"], "complainant")
 probar("sin resolucion, quien_gano en None", fila["quien_gano"], None)
 probar("sin resolucion, beneficiado en None", fila["beneficiado"], None)
 probar("fecha de creacion entera", fila["fecha_creado"], "2019-12-02T10:23:19.000-04:00")
+# El sitio decide el dominio de los links del tablero.
+probar("el sitio se guarda", fila["sitio"], "MLA")
+probar("sin site_id queda en None",
+       crm.fila_reclamo({"id": 1, "players": []}, YO)["sitio"], None)
 
 resuelto = dict(DEL_COMPRADOR, resolution={
     "benefited": ["complainant", "respondent"], "reason": "refund",

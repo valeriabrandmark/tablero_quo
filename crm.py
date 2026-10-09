@@ -135,6 +135,11 @@ def fila_reclamo(reclamo, user_id):
         "etapa": _texto(reclamo.get("stage")),
         "tipo": _texto(reclamo.get("type")),
         "motivo": _texto(reclamo.get("reason_id")),
+        # El sitio decide el DOMINIO de los links del tablero: un reclamo de
+        # MLA se abre en mercadolibre.com.ar y uno de MLB en .com.br. Hoy la
+        # cuenta es una sola, pero guardarlo cuesta una columna y evita tener
+        # el pais escrito a mano del otro lado.
+        "sitio": _texto(reclamo.get("site_id")),
         "nuestro_rol": _texto(nuestro_rol(reclamo, user_id)),
         "quien_gano": _texto(quien_gano(reclamo, user_id)),
         "beneficiado": _texto(list(beneficiados(resolucion))),
