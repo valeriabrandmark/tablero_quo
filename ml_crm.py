@@ -54,7 +54,6 @@ import pandas as pd
 import crm
 import estado
 import mercadolibre as ml
-from errores_bd import es_tabla_inexistente
 from mercadolibre import token_ml
 
 BASE = "/post-purchase/v1/claims"
@@ -118,6 +117,50 @@ def _paginar(token, ruta, params, claves, tope=PAGINAS_MAX):
     return todas
 
 
+def existe_tabla(con, tabla, esquema="bronze"):
+    """Si la tabla ya esta creada. `to_regclass` devuelve NULL si no existe.
+
+    SE PREGUNTA ANTES EN VEZ DE INTENTAR Y ATAJAR EL ERROR, y la diferencia
+    no es de estilo: es lo que rompio las cuatro corridas del 09/10.
+
+    El codigo anterior hacia el DELETE dentro de un `try` y, si la tabla no
+    estaba, se daba por enterado y seguia. En Python eso parece razonable. En
+    Postgres NO: un error adentro de una transaccion LA DEJA ABORTADA, y desde
+    ahi todo lo que se mande contesta
+
+        InFailedSqlTransaction: current transaction is aborted, commands
+        ignored until end of transaction block
+
+    Atajar la excepcion en Python no deshace eso. Asi que la primera corrida
+    --justamente la unica en la que la tabla no existe-- fallaba siempre, y el
+    paso nunca llego a crear ninguna de las cuatro tablas: `ok` quedo en null
+    con cuatro fallos seguidos.
+
+    `to_regclass` no lanza nada: contesta NULL y la transaccion sigue limpia.
+    """
+    return con.exec_driver_sql(
+        "SELECT to_regclass(%(nombre)s)", {"nombre": f'{esquema}."{tabla}"'}
+    ).scalar() is not None
+
+
+def _escribir(con, df, tabla, clave):
+    """El reemplazo por clave, sobre una conexion ya abierta.
+
+    Vive aparte de `_guardar` para poder probarlo sin base: lo que hay que
+    verificar es QUE SE MANDA Y EN QUE ORDEN, no que Postgres conteste.
+    """
+    con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
+    # En la primera corrida no hay nada que borrar, y preguntar cuesta una
+    # consulta al catalogo: muchisimo menos que una transaccion abortada.
+    if existe_tabla(con, tabla):
+        ids = [str(v) for v in df[clave].tolist()]
+        con.exec_driver_sql(
+            f'DELETE FROM bronze."{tabla}" WHERE "{clave}"::text = ANY(%(ids)s)',
+            {"ids": ids},
+        )
+    df.to_sql(tabla, con, schema="bronze", if_exists="append", index=False)
+
+
 def _guardar(filas, tabla, clave="id"):
     """Reemplaza por clave: borra las filas que se vuelven a escribir e inserta.
 
@@ -134,21 +177,8 @@ def _guardar(filas, tabla, clave="id"):
         return
     df = pd.DataFrame(filas)
     engine = ml._crear_engine()
-    ids = tuple(str(v) for v in df[clave].tolist())
     with engine.begin() as con:
-        con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
-        try:
-            con.exec_driver_sql(
-                f'DELETE FROM bronze."{tabla}" WHERE "{clave}"::text = ANY(%(ids)s)',
-                {"ids": list(ids)},
-            )
-        except Exception as e:                       # noqa: BLE001
-            # La primera corrida en una base limpia: la tabla todavia no
-            # existe y la crea el to_sql de abajo. Cualquier otro error tiene
-            # que explotar -- si el borrado no se hizo, insertar duplica.
-            if not es_tabla_inexistente(e):
-                raise
-        df.to_sql(tabla, con, schema="bronze", if_exists="append", index=False)
+        _escribir(con, df, tabla, clave)
     print(f"  Guardado: bronze.{tabla} ({len(df)} filas)")
 
 

@@ -188,7 +188,7 @@ _MOD = ast.Module(
     body=[n for n in _ARBOL.body
           if isinstance(n, ast.FunctionDef)
           and n.name in {"_filas", "_paginar", "_detalle_error",
-                         "pack_de_la_orden"}],
+                         "pack_de_la_orden", "existe_tabla", "_escribir"}],
     type_ignores=[],
 )
 _NS = {"PAGINA": 50, "PAGINAS_MAX": 400}
@@ -196,6 +196,8 @@ exec(compile(_MOD, "ml_crm.py", "exec"), _NS)            # noqa: S102
 _filas, _paginar = _NS["_filas"], _NS["_paginar"]
 _detalle_error = _NS["_detalle_error"]
 _pack_de_la_orden = _NS["pack_de_la_orden"]
+_existe_tabla = _NS["existe_tabla"]
+_escribir = _NS["_escribir"]
 
 print("\nCADA RUTA DEVUELVE LAS FILAS EN OTRA CLAVE")
 probar("data, la de reclamos", _filas({"data": [1, 2]}, "data", "results"), [1, 2])
@@ -284,6 +286,86 @@ probar("si la orden no se puede leer, None y no un id inventado",
 _NS["ml"] = types.SimpleNamespace(
     llamar_ml=lambda ruta, token, params=None: "no soy un dict")
 probar("una respuesta rara no explota", _pack_de_la_orden("t", 111), None)
+
+
+# ===========================================================================
+#  LA PRIMERA CORRIDA, CUANDO LAS TABLAS TODAVIA NO EXISTEN
+# ===========================================================================
+#
+# Es el caso que rompio las cuatro corridas del 09/10. El DELETE iba adentro
+# de un try y, si la tabla no estaba, se atajaba el error y se seguia. Pero en
+# Postgres un error ABORTA LA TRANSACCION: atajarlo en Python no la recupera,
+# y todo lo que viene despues contesta InFailedSqlTransaction. O sea que la
+# primera corrida --la unica en la que la tabla no existe-- no podia terminar
+# nunca, y por eso el paso jamas llego a crear ninguna de las cuatro tablas.
+#
+# Estas pruebas miran QUE SE MANDA Y EN QUE ORDEN, con una conexion falsa.
+
+
+class _ConexionFalsa:
+    """Anota cada sentencia. `existe` decide que contesta `to_regclass`."""
+
+    def __init__(self, existe):
+        self.existe = existe
+        self.sentencias: list[str] = []
+        self.tablas_escritas: list[str] = []
+
+    def exec_driver_sql(self, sql, params=None):
+        self.sentencias.append(" ".join(sql.split()))
+        conexion = self
+
+        class _Resultado:
+            def scalar(self_inner):
+                return "bronze.tabla" if conexion.existe else None
+
+        return _Resultado()
+
+
+class _DataFrameFalso:
+    def __init__(self, ids):
+        self._ids = ids
+
+    def __getitem__(self, clave):
+        return self
+
+    def tolist(self):
+        return self._ids
+
+    def to_sql(self, tabla, con, **kwargs):
+        con.tablas_escritas.append(tabla)
+
+
+def _corrida(existe):
+    con = _ConexionFalsa(existe)
+    _escribir(con, _DataFrameFalso(["1", "2"]), "ml_reclamos", "id")
+    return con
+
+
+print("\nPRIMERA CORRIDA: LA TABLA NO EXISTE")
+_primera = _corrida(existe=False)
+probar("NO se manda el DELETE",
+       any("DELETE" in s for s in _primera.sentencias), False)
+probar("se pregunta con to_regclass",
+       any("to_regclass" in s for s in _primera.sentencias), True)
+probar("se crea el esquema",
+       any("CREATE SCHEMA" in s for s in _primera.sentencias), True)
+probar("y la tabla se escribe igual", _primera.tablas_escritas, ["ml_reclamos"])
+
+print("\nCORRIDA NORMAL: LA TABLA YA ESTA")
+_normal = _corrida(existe=True)
+probar("se manda el DELETE",
+       any("DELETE" in s for s in _normal.sentencias), True)
+probar("el DELETE va DESPUES de preguntar",
+       [i for i, s in enumerate(_normal.sentencias) if "to_regclass" in s][0]
+       < [i for i, s in enumerate(_normal.sentencias) if "DELETE" in s][0], True)
+probar("borra por la clave, no la tabla entera",
+       any("DELETE FROM bronze.\"ml_reclamos\" WHERE \"id\"::text = ANY" in s
+           for s in _normal.sentencias), True)
+probar("y escribe", _normal.tablas_escritas, ["ml_reclamos"])
+
+print("\n`existe_tabla` LEE to_regclass Y NO LANZA NADA")
+probar("NULL es que no existe", _existe_tabla(_ConexionFalsa(False), "x"), False)
+probar("un oid es que existe", _existe_tabla(_ConexionFalsa(True), "x"), True)
 
 
 print(f"\n{'TODO OK' if not MAL else 'HAY FALLAS'}: {OK} ok, {MAL} mal\n")
