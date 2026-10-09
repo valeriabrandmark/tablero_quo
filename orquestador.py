@@ -410,6 +410,24 @@ PASOS = [
     # que para volver a prenderlo alcanza con reponer el paso aca y cargar el
     # secret. No hay nada mas que deshacer.
 
+    # CRM: reclamos, mediaciones, sus mensajes y las preguntas sin contestar.
+    #
+    # EN CADA CORRIDA Y NO UNA VEZ POR DIA, que es lo contrario de lo que pide
+    # el resto de este bloque. La razon no es que el dato sea mas importante
+    # sino que ACA SE PIERDE INFORMACION SI NO SE MIRA SEGUIDO: un reclamo que
+    # se abre y se cierra entre dos corridas no deja rastro en la lista de
+    # abiertos, y es de esa lista de donde `crm.cerrados_nuevos` deduce los
+    # cierres. Saltearlo un dia entero seria perder las resoluciones de ese
+    # dia, que es justo el listado que se quiere.
+    #
+    # Es barato igual: los abiertos son 24 (una pagina), los cerrados nuevos
+    # son unos pocos por dia y los mensajes salen solo de esos. Nada de pedir
+    # las 2.790 ordenes de la semana -- ver el encabezado de ml_crm.py.
+    {"comando": "ml_crm.py",                   "intentos": 2, "espera": 30,
+     "cada_horas": None, "critico": False,
+     "escribe": "ml_reclamos, ml_reclamos_mensajes, ml_mensajes_orden, ml_preguntas",
+     "techo": 10 * 60},
+
     # VA ULTIMO, Y NO ESCRIBE NADA. Revisa lo que los pasos de arriba acaban de
     # cargar: duplicados por clave repetida y ratos largos sin una sola venta.
     #
