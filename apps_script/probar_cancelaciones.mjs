@@ -59,7 +59,7 @@ const api = new Function(
   ...nombres,
   FUENTE +
     "\nreturn { detectarCancelaciones, guardarSnapshot, leerHistorial," +
-    " generarScoringClientes, claveCuit, formatearCampoPeriodo, sigmaToken_, limpiarHistorialCancelaciones, periodoNormalizado_ };",
+    " generarScoringClientes, normCuit, normPeriodo, formatearCampoPeriodo, sigmaToken_, limpiarHistorialScoring, limpiarHistorialCancelaciones, periodoNormalizado_ };",
 )(...nombres.map((n) => ambito[n]));
 
 const FALLOS = [];
@@ -194,9 +194,9 @@ console.log("\nNO SE REGISTRA DOS VECES LA MISMA CANCELACION");
 console.log("\nEL CUIT ES LA CLAVE, NO EL ClienteId");
 // El mismo CUIT en dos empresas es un solo cliente. Y 47 de las 211 filas de
 // Historial_Scoring no tienen ClienteId: por eso no sirve como clave.
-revisar("el CUIT se normaliza sin guiones", api.claveCuit("20-11111111-1"), "20111111111");
-revisar("con espacios y puntos tambien", api.claveCuit(" 20.111.111/11 1 "), "20111111111");
-revisar("vacio da vacio", api.claveCuit(null), "");
+revisar("normCuit saca los guiones", api.normCuit("20-11111111-1"), "20111111111");
+revisar("con espacios y puntos tambien", api.normCuit(" 20.111.111/11 1 "), "20111111111");
+revisar("vacio da vacio", api.normCuit(null), "");
 
 console.log("\nEL FRENO DE SEGURIDAD");
 // "Cancelo" se deduce de una AUSENCIA. Si Sigma devuelve la mitad, esa
@@ -340,6 +340,43 @@ revisar("vacio da vacio", api.periodoNormalizado_(""), "");
   const ss = libro({ Historial_Cancelaciones: h });
   revisar("segunda corrida: no borra nada", api.limpiarHistorialCancelaciones(ss), 0);
   revisar("y la fila queda igual", h.escritas[0][1], "2026-07");
+}
+
+console.log("\nlimpiarHistorialScoring: LAS 7.796 FILAS REPETIDAS");
+// guardarSnapshot nunca reconocia que la foto del mes ya existia, asi que
+// cada corrida agregaba otra entera. Al 13/10/2026 la hoja tiene 8.391 filas
+// para 595 (periodo, cliente) reales.
+revisar("normPeriodo: una fecha da yyyy-MM", api.normPeriodo(JUL), "2026-07");
+revisar("normPeriodo: un texto se corta en 7", api.normPeriodo("2026-07-01"), "2026-07");
+revisar("formatearCampoPeriodo es el mismo",
+  api.formatearCampoPeriodo(JUL), api.normPeriodo(JUL));
+
+{
+  // Tres capturas del MISMO cliente y el MISMO mes, en dias distintos.
+  // [fecha, periodo, clienteId, ...]
+  const f = (fecha, per, cat) =>
+    [fecha, per, "005105", "UNO", "20-11111111-1", "006", "0001",
+     1000000, 2, 1, 1, 30, 25, cat, 500000];
+  const h = hoja([
+    f(new Date(2026, 6, 8),  JUL, "RIESGOSO"),
+    f(new Date(2026, 6, 14), JUL, "CRÍTICO"),   // la mas nueva de julio
+    f(new Date(2026, 7, 10), AGO, "AL DÍA"),
+  ], 15);
+  const ss = libro({ Historial_Scoring: h });
+  revisar("borra 1 repetida de julio", api.limpiarHistorialScoring(ss), 1);
+  revisar("quedan 2 filas (julio y agosto)", h.escritas.length, 2);
+  revisar("el periodo queda normalizado", h.escritas[0][1], "2026-07");
+  revisar("gana la captura MAS NUEVA", h.escritas[0][13], "CRÍTICO");
+  revisar("y el orden es por periodo", h.escritas[1][1], "2026-08");
+}
+{
+  // Idempotente, igual que la otra limpieza.
+  const f = (fecha, per) =>
+    [fecha, per, "005105", "UNO", "20-11111111-1", "006", "0001",
+     1000000, 2, 1, 1, 30, 25, "AL DÍA", 500000];
+  const h = hoja([f("08/07/2026", "2026-07")], 15);
+  const ss = libro({ Historial_Scoring: h });
+  revisar("segunda corrida: no borra nada", api.limpiarHistorialScoring(ss), 0);
 }
 
 console.log(FALLOS.length ? `\n${FALLOS.length} FALLARON: ${FALLOS.join(", ")}` : "\nTODO OK");

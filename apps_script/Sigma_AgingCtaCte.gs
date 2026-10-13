@@ -55,6 +55,21 @@ function sigmaToken_() {
 }
 
 /**
+ * El período en "yyyy-MM", venga como celda de fecha o como texto.
+ *
+ * MISMA FUNCION, MISMO NOMBRE Y MISMO CUERPO que en la planilla "Analisis de
+ * cuenta corriente", que es la que viene funcionando: ahi los periodos son
+ * 2026-08 y 2026-09, detectados en ocho fechas distintas hasta el 05/10.
+ * Aca faltaba, y por eso esta planilla quedo congelada en julio.
+ */
+function normPeriodo(val) {
+  if (val instanceof Date) {
+    return Utilities.formatDate(val, 'GMT-3', 'yyyy-MM');
+  }
+  return String(val || '').substring(0, 7);
+}
+
+/**
  * El CUIT como clave para cruzar hojas, sin guiones, espacios ni puntos.
  *
  * POR QUE EL CUIT Y NO EL ClienteId. El CUIT es el mismo número en las cuatro
@@ -63,8 +78,8 @@ function sigmaToken_() {
  * Cruzando por CUIT, los 118 clientes del scoring encuentran su historial
  * (verificado: 118 de 118).
  */
-function claveCuit(valor) {
-  return String(valor || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+function normCuit(val) {
+  return String(val || '').replace(/[^0-9A-Za-z]/g, '').toUpperCase();
 }
 
 function normVendedor(val) {
@@ -213,13 +228,13 @@ function leerHistorial(ss) {
     // Consecuencia: el filtro de los ultimos 6 meses no deja pasar ninguna
     // (NaN >= fecha es false), asi que mesesEnMora daba 0 y peorCategoria
     // 'BUENO' para todo el mundo. Verificado en node.
-    const periodo   = formatearCampoPeriodo(fila[1]);
-    const cuit      = claveCuit(fila[4]);
+    const periodo   = normPeriodo(fila[1]);
+    const cuit      = normCuit(fila[4]);
     const categoria = String(fila[13]);
     const vendedor  = normVendedor(fila[5]);
     const empresa   = normEmpresa(fila[6]);
 
-    // La clave pasa a ser el CUIT: ver claveCuit() arriba.
+    // La clave pasa a ser el CUIT: ver normCuit() arriba.
     if (!periodo || !cuit || periodo.length < 7) return;
     if (!CFG.vendedores.includes(vendedor)) return;
     if (!CFG.empresas.includes(empresa))    return;
@@ -302,7 +317,7 @@ function guardarSnapshot(ss, filasScoring) {
     // borrar esos duplicados a mano; esta no, asi que el arreglo es lo unico
     // que los frena.)
     const periodos = hoja.getRange(2, 2, ultimaFila - 1, 1).getValues()
-                         .map(function(r) { return formatearCampoPeriodo(r[0]); });
+                         .map(function(r) { return normPeriodo(r[0]); });
     if (periodos.indexOf(periodoActual) !== -1) {
       Logger.log('Foto de ' + periodoActual + ' ya existe — no se duplica.');
       return false;
@@ -360,7 +375,7 @@ function detectarCancelaciones(ss, filasScoring) {
   // formatearCampoPeriodo ya existe en este archivo y devuelve "yyyy-MM".
   let ultimoPeriodo = '';
   datos.forEach(function(fila) {
-    const p        = formatearCampoPeriodo(fila[1]);
+    const p        = normPeriodo(fila[1]);
     const vendedor = normVendedor(fila[5]);
     const empresa  = normEmpresa(fila[6]);
     if (!CFG.vendedores.includes(vendedor)) return;
@@ -378,14 +393,14 @@ function detectarCancelaciones(ss, filasScoring) {
   const estadoAnterior = {};
   const vistosAnt = {};
   datos.forEach(function(fila) {
-    if (formatearCampoPeriodo(fila[1]) !== ultimoPeriodo) return;
+    if (normPeriodo(fila[1]) !== ultimoPeriodo) return;
     const vendedor = normVendedor(fila[5]);
     const empresa  = normEmpresa(fila[6]);
     if (!CFG.vendedores.includes(vendedor)) return;
     if (!CFG.empresas.includes(empresa))    return;
 
     // Por CUIT y no por clienteId: mismo criterio que leerHistorial.
-    const cuit = claveCuit(fila[4]);
+    const cuit = normCuit(fila[4]);
     if (!cuit) return;
     vistosAnt[cuit] = true;
 
@@ -434,13 +449,13 @@ function detectarCancelaciones(ss, filasScoring) {
     const datosCan = hojaCanExistente
       .getRange(2, 1, hojaCanExistente.getLastRow() - 1, 5).getValues();
     datosCan.forEach(function(fila) {
-      yaRegistrado[claveCuit(fila[4]) + '|' + formatearCampoPeriodo(fila[1])] = true;
+      yaRegistrado[normCuit(fila[4]) + '|' + normPeriodo(fila[1])] = true;
     });
   }
 
   const estadoActual = {};
   filasScoring.forEach(function(f) {
-    const cuit = claveCuit(f.cuit);
+    const cuit = normCuit(f.cuit);
     if (cuit) estadoActual[cuit] = f;
   });
 
@@ -578,7 +593,7 @@ function generarScoringClientes(facturas, historial) {
     // Por CUIT y no por clienteId: es la clave con la que leerHistorial arma
     // el indice. Antes buscaba por clienteId y no encontraba nada --los 118
     // clientes decian "Sin historial" teniendo cuatro meses de fotos.
-    const hist = historial[claveCuit(c.cuit)] || null;
+    const hist = historial[normCuit(c.cuit)] || null;
     const mesesEnMoraHist   = hist ? hist.mesesEnMora   : '-';
     const peorCategoriaHist = hist ? hist.peorCategoria : 'Sin historial';
     var tendencia = 'Sin historial';
@@ -1009,11 +1024,10 @@ function formatearCampoFecha(valor) {
 // a un Date real, y String() sobre ese Date da un formato en inglés con timezone
 // que puede variar entre lecturas, generando 2 strings distintos para el MISMO
 // período (bug visto en el gráfico "saldo_vencido por periodo").
+// Queda como alias de normPeriodo: las dos hacian lo mismo y tener dos
+// definiciones del mismo formato es como terminan dos planillas distintas.
 function formatearCampoPeriodo(valor) {
-  if (valor instanceof Date) {
-    return Utilities.formatDate(valor, 'GMT-3', 'yyyy-MM');
-  }
-  return String(valor || '').trim();
+  return normPeriodo(valor);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1138,6 +1152,7 @@ function onOpen() {
     .addSeparator()
     .addItem('🧪 Simular corrida del trigger (sin pantalla)', 'procesoDiarioCompleto')
     .addSeparator()
+    .addItem('🧹 Limpiar Historial_Scoring (una sola vez)', 'limpiarHistorialScoring')
     .addItem('🧹 Limpiar Historial_Cancelaciones (una sola vez)', 'limpiarHistorialCancelaciones')
     .addToUi();
 }
@@ -1368,7 +1383,7 @@ function subirHistorialScoringASupabase() {
   for (let i = 1; i < datos.length; i++) {
     const fila = datos[i];
     const cuit = String(fila[idx.cuit] || '').trim();
-    const periodo = formatearCampoPeriodo(fila[idx.periodo]);
+    const periodo = normPeriodo(fila[idx.periodo]);
     if (!cuit || !periodo) continue;
 
     filasPorClave[cuit + '|' + periodo] = {
@@ -1493,7 +1508,7 @@ function subirCancelacionesASupabase() {
   for (let i = 1; i < datos.length; i++) {
     const fila = datos[i];
     const cuit = String(fila[idx.cuit] || '').trim();
-    const periodo = formatearCampoPeriodo(fila[idx.periodoConMora]);
+    const periodo = normPeriodo(fila[idx.periodoConMora]);
     if (!cuit || !periodo) continue;
 
     filasPorClave[cuit + '|' + periodo] = {
@@ -1707,6 +1722,98 @@ function arreglarIndices() {
     'Sin SUMAR.SI, sin CONTAR.SI, sin SIERROR.');
 }
 
+/**
+ * Deduplica Historial_Scoring. Se corre UNA VEZ, a mano.
+ *
+ * PORTADA DE LA PLANILLA "Analisis de cuenta corriente", donde esta funcion
+ * ya existia. Acá no estaba, y se nota: al 13/10/2026 esta hoja tiene 8.391
+ * filas para 595 (período, cliente) reales. 7.796 repetidas.
+ *
+ * DE DONDE SALEN. guardarSnapshot comparaba la celda CRUDA de Periodo contra
+ * el texto "2026-10" para ver si la foto del mes ya existía. Una celda de
+ * fecha nunca es igual a un texto, así que el chequeo no frenaba nada y cada
+ * corrida agregaba otra foto entera. Catorce corridas, catorce copias.
+ *
+ * Gana la captura MAS NUEVA de cada (cliente, período): es la que vio el mes
+ * más completo. Es al revés que en cancelaciones, donde gana la más vieja,
+ * y la razón es distinta en cada caso --acá son fotos del mismo mes tomadas
+ * en días distintos, allá son re-detecciones de un hecho que ya pasó.
+ *
+ * El único cambio contra la versión original es que avisa con avisar() en vez
+ * de ui.alert(): en esta planilla getUi() tira excepción sin pantalla, y esa
+ * es la regla que ya tiene escrita el resto del archivo.
+ */
+function limpiarHistorialScoring(ss) {
+  ss = ss || SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = ss.getSheetByName('Historial_Scoring');
+  if (!hoja || hoja.getLastRow() <= 1) {
+    avisar('No hay datos en Historial_Scoring para limpiar.');
+    return 0;
+  }
+
+  const ultimaFila = hoja.getLastRow();
+  const numCols    = hoja.getLastColumn();
+  const datos      = hoja.getRange(2, 1, ultimaFila - 1, numCols).getValues();
+
+  // EL RESPALDO VA PRIMERO. Son cuatro meses de fotos que Sigma no vuelve a
+  // dar: lo que se pierda acá no se reconstruye.
+  const sello    = Utilities.formatDate(new Date(), 'GMT-3', 'yyyy-MM-dd_HHmm');
+  const respaldo = hoja.copyTo(ss).setName('Historial_Scoring_RESPALDO_' + sello);
+  respaldo.hideSheet();
+
+  const grupos = {};
+  datos.forEach(function(fila) {
+    if (!fila[2]) return;
+    const clienteId = String(fila[2]);
+    const periodo   = normPeriodo(fila[1]);
+    const fechaCap  = fila[0] instanceof Date ? fila[0] : new Date(fila[0]);
+    const key = clienteId + '|' + periodo;
+
+    if (!grupos[key] || fechaCap > grupos[key].fechaCap) {
+      const filaLimpia = fila.slice();
+      filaLimpia[1] = periodo;
+      grupos[key] = { fechaCap: fechaCap, fila: filaLimpia };
+    }
+  });
+
+  const filasLimpias = Object.keys(grupos).map(function(k) { return grupos[k].fila; });
+  filasLimpias.sort(function(a, b) {
+    if (a[1] !== b[1]) return String(a[1]).localeCompare(String(b[1]));
+    return String(a[2]).localeCompare(String(b[2]));
+  });
+
+  const totalOriginal = datos.filter(function(f) { return f[2]; }).length;
+  const totalLimpio   = filasLimpias.length;
+
+  if (totalOriginal === totalLimpio) {
+    avisar('✅ Historial_Scoring ya está limpio (' + totalLimpio + ' filas). No se modificó nada.');
+    return 0;
+  }
+
+  hoja.getRange(2, 1, ultimaFila - 1, numCols).clearContent();
+  hoja.getRange(2, 1, filasLimpias.length, numCols).setValues(filasLimpias);
+  // Período, ClienteId, CUIT, Vendedor y Empresa como TEXTO. Sin esto, Sheets
+  // vuelve a convertir "2026-10" en una fecha y todo esto se deshace solo.
+  hoja.getRange(1, 2, hoja.getMaxRows(), 1).setNumberFormat('@');
+  hoja.getRange(1, 3, hoja.getMaxRows(), 1).setNumberFormat('@');
+  hoja.getRange(1, 5, hoja.getMaxRows(), 1).setNumberFormat('@');
+  hoja.getRange(1, 6, hoja.getMaxRows(), 1).setNumberFormat('@');
+  hoja.getRange(1, 7, hoja.getMaxRows(), 1).setNumberFormat('@');
+  hoja.getRange(2, 8,  filasLimpias.length, 1).setNumberFormat('#,##0.00');
+  if (numCols >= 15) {
+    hoja.getRange(2, 15, filasLimpias.length, 1).setNumberFormat('#,##0.00');
+  }
+
+  const msg = '🧹 Historial_Scoring limpio\n' +
+    'Antes: '    + totalOriginal + ' filas\n' +
+    'Ahora: '    + totalLimpio + ' filas\n' +
+    'Borradas: ' + (totalOriginal - totalLimpio) + ' repetidas\n' +
+    '\nRespaldo en la hoja oculta ' + respaldo.getName() + '.';
+  Logger.log(msg);
+  avisar(msg);
+  return totalOriginal - totalLimpio;
+}
+
 // ═══════════════════════════════════════════════════════════
 // LIMPIEZA DE Historial_Cancelaciones
 //
@@ -1799,7 +1906,7 @@ function limpiarHistorialCancelaciones(ss) {
   const sinEntender = [];
   for (let i = 1; i < datos.length; i++) {
     const fila = datos[i].slice();
-    const cuit = claveCuit(fila[iCuit]);
+    const cuit = normCuit(fila[iCuit]);
     const per  = periodoNormalizado_(fila[iPeriodo]);
 
     if (!cuit || !per) { sinEntender.push(fila); continue; }
