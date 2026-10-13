@@ -16,10 +16,16 @@ menús desaparecen por completo— sin ninguna forma de ver qué había cambiado
 | `auditoria_sevillanita.gs` | Logística | Manda la hoja ACCIONES vía la función `auditoria-sevillanita` |
 | `MotorAuditoria.gs` | Logística | Pendientes de subir y los cinco cálculos: tarifa, peso, acciones, financiero y mínimo de compra |
 | `Codigo.gs` | Logística | La integración con la API de Sigma: clientes, notas de crédito y proveedores |
-| `cancelaciones_periodo.gs` | Cuentas corrientes | Arreglo de `detectarCancelaciones` y `guardarSnapshot` — **se pega encima**, no se agrega |
+| `Sigma_AgingCtaCte.gs` | Cuentas corrientes | La planilla *Analisis de cuenta corriente* entera: Sigma → aging, scoring, historial, cancelaciones y las subidas a Supabase |
 
 En la planilla, `auditoria_sevillanita.gs` está como **`No_tocar.gs`**. Es el
 mismo archivo.
+
+`Sigma_AgingCtaCte.gs` tiene **el token afuera**: en la planilla, `CFG.token`
+era una cadena en texto plano. Acá se lee de `SIGMA_TOKEN` en las Propiedades
+del script, como ya hacía con `SUPABASE_URL` y `SUPABASE_SERVICE_KEY`. La
+versión del repo es la buena; si se copia desde la planilla hay que volver a
+sacarlo.
 
 Ya está respaldado todo el proyecto de logística.
 
