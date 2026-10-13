@@ -16,11 +16,19 @@ menús desaparecen por completo— sin ninguna forma de ver qué había cambiado
 | `auditoria_sevillanita.gs` | Logística | Manda la hoja ACCIONES vía la función `auditoria-sevillanita` |
 | `MotorAuditoria.gs` | Logística | Pendientes de subir y los cinco cálculos: tarifa, peso, acciones, financiero y mínimo de compra |
 | `Codigo.gs` | Logística | La integración con la API de Sigma: clientes, notas de crédito y proveedores |
+| `cuentas_corrientes.gs` | Cuentas corrientes | Sube scoring, aging y cancelaciones a `bronze` |
 
 En la planilla, `auditoria_sevillanita.gs` está como **`No_tocar.gs`**. Es el
 mismo archivo.
 
 Ya está respaldado todo el proyecto de logística.
+
+`cuentas_corrientes.gs` es el único que tiene pruebas
+(`apps_script/probar_cuentas_corrientes.mjs`, en `pruebas.yml`): evalúa el
+`.gs` tal como está y verifica lo que se corrompe en silencio —el formato
+argentino de los números, las fechas `dd/MM/yyyy` y el cero de adelante del
+CUIT— más que las claves declaradas coincidan con las primarias reales de
+Postgres.
 
 ## La otra forma del mismo problema: la función duplicada
 

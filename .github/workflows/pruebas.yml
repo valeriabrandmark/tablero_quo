@@ -88,6 +88,13 @@ jobs:
       - name: Probar la lectura de la competencia
         run: python probar_competencia.py
 
+      # Lo que el .gs de cuentas corrientes convierte --"$ 1.234,50", fechas
+      # dd/MM/yyyy, el cero de adelante del CUIT-- se corrompe en SILENCIO: un
+      # saldo mal parseado entra en la base y se ve como un saldo, no como un
+      # error. Es JavaScript, pero el runner ya trae node.
+      - name: Probar el .gs de cuentas corrientes
+        run: node apps_script/probar_cuentas_corrientes.mjs
+
       # "A favor del cliente o nuestro" NO sale de una tabla fija: nuestro rol
       # cambia segun quien abrio el reclamo. En una cancelacion de venta el que
       # reclama es el vendedor. Leerlo al reves da vuelta el resultado.
