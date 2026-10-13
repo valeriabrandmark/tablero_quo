@@ -17,6 +17,7 @@ menús desaparecen por completo— sin ninguna forma de ver qué había cambiado
 | `MotorAuditoria.gs` | Logística | Pendientes de subir y los cinco cálculos: tarifa, peso, acciones, financiero y mínimo de compra |
 | `Codigo.gs` | Logística | La integración con la API de Sigma: clientes, notas de crédito y proveedores |
 | `Sigma_AgingCtaCte.gs` | Cuentas corrientes | La planilla *Analisis de cuenta corriente* entera: Sigma → aging, scoring, historial, cancelaciones y las subidas a Supabase |
+| `Indices_Financieros.gs` | Cuentas corrientes | Arma la hoja `Indices_Financieros`: los KPI como fórmulas que apuntan a `Scoring_Clientes` y al aging |
 
 En la planilla, `auditoria_sevillanita.gs` está como **`No_tocar.gs`**. Es el
 mismo archivo.
