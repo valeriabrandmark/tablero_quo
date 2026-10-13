@@ -298,8 +298,9 @@ function guardarSnapshot(ss, filasScoring) {
     // ⬇️ ARREGLADO. Antes era .map(function(r){ return r[0]; }), que devuelve
     // la celda CRUDA: un Date nunca es igual al texto "2026-10", asi que este
     // chequeo no frenaba nada y cada corrida agregaba otra foto del mismo mes.
-    // Por eso existe limpiarHistorialScoring, para borrar a mano duplicados
-    // que no deberian generarse.
+    // (La otra version de esta planilla tiene una limpiarHistorialScoring para
+    // borrar esos duplicados a mano; esta no, asi que el arreglo es lo unico
+    // que los frena.)
     const periodos = hoja.getRange(2, 2, ultimaFila - 1, 1).getValues()
                          .map(function(r) { return formatearCampoPeriodo(r[0]); });
     if (periodos.indexOf(periodoActual) !== -1) {
@@ -1136,6 +1137,8 @@ function onOpen() {
     .addItem('☁️ Subir TODO a Supabase (Scoring+Historial+Cancelaciones+Aging)', 'subirTodoCtaCteASupabase')
     .addSeparator()
     .addItem('🧪 Simular corrida del trigger (sin pantalla)', 'procesoDiarioCompleto')
+    .addSeparator()
+    .addItem('🧹 Limpiar Historial_Cancelaciones (una sola vez)', 'limpiarHistorialCancelaciones')
     .addToUi();
 }
 
@@ -1702,4 +1705,143 @@ function arreglarIndices() {
     '• SUMA y MAX → para sumas simples\n' +
     '• K.ESIMO.MAYOR → para Top 5 y Top 10\n' +
     'Sin SUMAR.SI, sin CONTAR.SI, sin SIERROR.');
+}
+
+// ═══════════════════════════════════════════════════════════
+// LIMPIEZA DE Historial_Cancelaciones
+//
+// Se corre UNA VEZ, a mano, para arreglar lo que dejó el bug del período.
+// Después de arreglado el código no hace falta nunca más, pero es idempotente:
+// corrida sobre datos limpios no cambia nada.
+//
+// QUE ARREGLA. Las filas viejas tienen en "Período con Mora" el texto que
+// salía de String(celdaDeFecha):
+//
+//     "Wed Jul 01 2026 00:00:00 GMT-0300 (Argentina Standard Time)"
+//     "Wed Jul 01 2026 00:00:00 GMT-0300 (hora estándar de Argentina)"
+//
+// Dos textos distintos para el mismo mes, porque el nombre de la zona horaria
+// cambia con el idioma del servidor que corrió el trigger. Como la clave para
+// no repetir era cliente+período, los mismos 76 clientes entraron DOS VECES.
+//
+// POR QUE HAY QUE LIMPIAR LA PLANILLA Y NO SUPABASE. subirLoteASupabase hace
+// upsert y después borra lo que no vino en la corrida, así que la tabla de
+// Supabase es un ESPEJO de esta hoja. Borrar allá sin arreglar acá no sirve:
+// la próxima subida vuelve a poner las 152 filas.
+//
+// NO TIRA NINGUNA FILA QUE NO ENTIENDA. Si un período no se puede normalizar
+// se deja como está y se avisa cuántos quedaron. Perder una cancelación es
+// perder historia que no se puede reconstruir: Sigma no la guarda.
+// ═══════════════════════════════════════════════════════════
+
+/**
+ * Un período en "yyyy-MM", venga como venga.
+ *
+ * Es formatearCampoPeriodo MAS el caso de la fila vieja, que ya es texto y por
+ * eso formatearCampoPeriodo la devolvía intacta. El guion bajo final la hace
+ * privada: no tiene por qué aparecer en el menú de ejecución.
+ */
+function periodoNormalizado_(valor) {
+  if (valor instanceof Date) {
+    return Utilities.formatDate(valor, 'GMT-3', 'yyyy-MM');
+  }
+  const txt = String(valor || '').trim();
+  if (!txt) return '';
+  // Ya está bien: "2026-07" o "2026-07-01".
+  if (/^\d{4}-\d{2}/.test(txt)) return txt.substring(0, 7);
+  // La forma vieja. El parentesis final es un comentario para el parser de
+  // JavaScript y lo ignora, asi que las dos variantes de idioma caen en la
+  // misma fecha. Verificado: las dos dan 2026-07-01T03:00:00Z.
+  const d = new Date(txt);
+  if (!isNaN(d.getTime())) return Utilities.formatDate(d, 'GMT-3', 'yyyy-MM');
+  return '';   // no se entendió: la fila se deja como está
+}
+
+function limpiarHistorialCancelaciones(ss) {
+  // `ss` opcional: desde el menu llega sin argumentos y se toma la planilla
+  // activa; las pruebas le pasan una de mentira. Es el mismo patron que
+  // detectarCancelaciones y guardarSnapshot, que ya reciben la planilla.
+  ss = ss || SpreadsheetApp.getActiveSpreadsheet();
+  const hoja = ss.getSheetByName('Historial_Cancelaciones');
+  if (!hoja || hoja.getLastRow() <= 1) {
+    avisar('No hay nada en Historial_Cancelaciones.');
+    return 0;
+  }
+
+  const datos    = hoja.getDataRange().getValues();
+  const HEADERS  = datos[0];
+  const iPeriodo = HEADERS.indexOf('Período con Mora');
+  const iCuit    = HEADERS.indexOf('CUIT');
+  const iFecha   = HEADERS.indexOf('Fecha Detección');
+  if (iPeriodo < 0 || iCuit < 0 || iFecha < 0) {
+    avisar('❌ Historial_Cancelaciones no tiene los encabezados esperados ' +
+           '(Fecha Detección, Período con Mora, CUIT). No se tocó nada.');
+    return -1;
+  }
+
+  // EL RESPALDO VA PRIMERO, antes de tocar un solo valor. Esta hoja es la
+  // única copia de la historia de cancelaciones: si la limpieza sale mal no
+  // hay de dónde reconstruirla.
+  const sello    = Utilities.formatDate(new Date(), 'GMT-3', 'yyyy-MM-dd_HHmm');
+  const respaldo = hoja.copyTo(ss).setName('Historial_Cancelaciones_RESPALDO_' + sello);
+  respaldo.hideSheet();
+
+  // Para desempatar: la detección MAS VIEJA es la que vale, porque es cuando
+  // el cliente realmente se puso al día. Las repetidas son re-detecciones.
+  function alOrden(f) {
+    const partes = String(f || '').split('/');      // dd/MM/yyyy
+    return partes.length === 3
+      ? partes[2] + partes[1] + partes[0]
+      : String(f || '');
+  }
+
+  const porClave = {};
+  const sinEntender = [];
+  for (let i = 1; i < datos.length; i++) {
+    const fila = datos[i].slice();
+    const cuit = claveCuit(fila[iCuit]);
+    const per  = periodoNormalizado_(fila[iPeriodo]);
+
+    if (!cuit || !per) { sinEntender.push(fila); continue; }
+
+    fila[iPeriodo] = per;                           // se guarda ya normalizado
+    const clave = cuit + '|' + per;
+    const previo = porClave[clave];
+    if (!previo || alOrden(fila[iFecha]) < alOrden(previo[iFecha])) {
+      porClave[clave] = fila;
+    }
+  }
+
+  const limpias = Object.keys(porClave).sort().map(function(k) { return porClave[k]; });
+  const finales = limpias.concat(sinEntender);
+  const borradas = (datos.length - 1) - finales.length;
+
+  const nCols = HEADERS.length;
+  hoja.getRange(2, 1, hoja.getLastRow() - 1, nCols).clearContent();
+
+  // El período, el ClienteId y el CUIT como TEXTO, o la próxima lectura
+  // vuelve a traer un Date y todo esto se deshace.
+  hoja.getRange(1, 2, hoja.getMaxRows(), 1).setNumberFormat('@');
+  hoja.getRange(1, 3, hoja.getMaxRows(), 1).setNumberFormat('@');
+  hoja.getRange(1, 5, hoja.getMaxRows(), 1).setNumberFormat('@');
+
+  if (finales.length > 0) {
+    hoja.getRange(2, 1, finales.length, nCols).setValues(finales);
+    hoja.getRange(2, 8, finales.length, 1).setNumberFormat('$ #,##0.00');
+  }
+
+  const msg = '🧹 Historial_Cancelaciones limpio\n' +
+    'Antes: '   + (datos.length - 1) + ' filas\n' +
+    'Ahora: '   + finales.length + ' filas\n' +
+    'Borradas: ' + borradas + ' repetidas\n' +
+    (sinEntender.length
+      ? '⚠️ ' + sinEntender.length + ' filas con un período que no se pudo leer: ' +
+        'quedaron al final, sin tocar.\n'
+      : '') +
+    '\nRespaldo en la hoja oculta ' + respaldo.getName() + '.\n' +
+    '\nAhora corré "Subir TODO a Supabase" para que la base quede igual: ' +
+    'la subida borra lo que no vino en la corrida.';
+  Logger.log(msg);
+  avisar(msg);
+  return borradas;
 }

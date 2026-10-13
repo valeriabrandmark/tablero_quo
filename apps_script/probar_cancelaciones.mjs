@@ -35,6 +35,12 @@ const Utilities = {
     if (fmt === "yyyy-MM") return `${f.getFullYear()}-${mm}`;
     if (fmt === "yyyy-MM-dd") return `${f.getFullYear()}-${mm}-${dd}`;
     if (fmt === "dd/MM/yyyy") return `${dd}/${mm}/${f.getFullYear()}`;
+    // El sello del nombre de la hoja de respaldo.
+    if (fmt === "yyyy-MM-dd_HHmm") {
+      const hh = String(f.getHours()).padStart(2, "0");
+      const mi = String(f.getMinutes()).padStart(2, "0");
+      return `${f.getFullYear()}-${mm}-${dd}_${hh}${mi}`;
+    }
     throw new Error("formato no previsto: " + fmt);
   },
 };
@@ -53,7 +59,7 @@ const api = new Function(
   ...nombres,
   FUENTE +
     "\nreturn { detectarCancelaciones, guardarSnapshot, leerHistorial," +
-    " generarScoringClientes, claveCuit, formatearCampoPeriodo, sigmaToken_ };",
+    " generarScoringClientes, claveCuit, formatearCampoPeriodo, sigmaToken_, limpiarHistorialCancelaciones, periodoNormalizado_ };",
 )(...nombres.map((n) => ambito[n]));
 
 const FALLOS = [];
@@ -99,6 +105,11 @@ function hoja(filas, cols) {
     },
     setFrozenRows: () => {},
     setColumnWidth: () => {},
+    getDataRange() { return this.getRange(2, 1, filas.length, cols); },
+    // copyTo/hideSheet: el respaldo que limpiarHistorialCancelaciones saca
+    // ANTES de tocar nada. Devuelve un objeto con la misma forma.
+    copyTo() { return { _nombre: "", setName(n) { this._nombre = n; return this; },
+                        hideSheet() {}, getName() { return this._nombre; } }; },
   };
 }
 
@@ -259,6 +270,76 @@ console.log("\nleerHistorial: LOS MESES EN MORA Y LA PEOR CATEGORIA");
   revisar("el scoring encuentra su historial", filas[0].peorCategoriaHist, "CRÍTICO");
   revisar("y ya no dice 'Sin historial'", filas[0].mesesEnMoraHist, 1);
   revisar("la tendencia se calcula", filas[0].tendencia !== "Sin historial", true);
+}
+
+console.log("\nLA LIMPIEZA DE LAS FILAS VIEJAS");
+// Las dos variantes son las que estan HOY en Supabase: mismo mes, dos textos,
+// porque el nombre de la zona horaria cambia con el idioma del servidor.
+const CRUDO_EN = "Wed Jul 01 2026 00:00:00 GMT-0300 (Argentina Standard Time)";
+const CRUDO_ES = "Wed Jul 01 2026 00:00:00 GMT-0300 (hora estándar de Argentina)";
+
+revisar("la variante en ingles da 2026-07", api.periodoNormalizado_(CRUDO_EN), "2026-07");
+revisar("la variante en castellano tambien", api.periodoNormalizado_(CRUDO_ES), "2026-07");
+revisar("una celda de fecha tambien", api.periodoNormalizado_(JUL), "2026-07");
+revisar("un periodo ya correcto no se toca", api.periodoNormalizado_("2026-07"), "2026-07");
+revisar("un 'yyyy-MM-dd' se corta en el mes", api.periodoNormalizado_("2026-07-01"), "2026-07");
+revisar("un texto cualquiera no se inventa", api.periodoNormalizado_("cualquier cosa"), "");
+revisar("vacio da vacio", api.periodoNormalizado_(""), "");
+
+{
+  // Historial_Cancelaciones: 12 columnas. El mismo CUIT dos veces, con las dos
+  // variantes del mismo mes y dos fechas de deteccion distintas.
+  const ENC = ["Fecha Detección", "Período con Mora", "ClienteId", "Razón Social",
+               "CUIT", "Vendedor", "Empresa", "Saldo Vencido Cancelado ($)",
+               "Categoría que Tenía", "Días Atraso Máx al Cancelar",
+               "Días Atraso Prom al Cancelar", "Tipo de Cancelación"];
+  const can = (fecha, per, cuit) =>
+    [fecha, per, "005105", "UNO", cuit, "006", "0001", 500000, "RIESGOSO", 30, 25, "total"];
+
+  const h = hoja([ENC,
+    can("09/08/2026", CRUDO_EN, "20-11111111-1"),
+    can("05/08/2026", CRUDO_ES, "20-11111111-1"),   // el mismo, re-detectado
+    can("09/08/2026", CRUDO_EN, "20-22222222-2"),
+  ], 12);
+  const ss = libro({ Historial_Cancelaciones: h });
+  const borradas = api.limpiarHistorialCancelaciones(ss);
+  revisar("borra la repetida y deja 2", borradas, 1);
+  revisar("quedan 2 filas", h.escritas.length, 2);
+  revisar("con el periodo normalizado", h.escritas[0][1], "2026-07");
+  revisar("gana la deteccion MAS VIEJA", h.escritas[0][0], "05/08/2026");
+}
+{
+  // Una fila que no se entiende NO se tira: perder una cancelacion es perder
+  // historia que Sigma no guarda.
+  const ENC = ["Fecha Detección", "Período con Mora", "ClienteId", "Razón Social",
+               "CUIT", "Vendedor", "Empresa", "Saldo Vencido Cancelado ($)",
+               "Categoría que Tenía", "Días Atraso Máx al Cancelar",
+               "Días Atraso Prom al Cancelar", "Tipo de Cancelación"];
+  const h = hoja([ENC,
+    ["09/08/2026", "???", "005105", "RARA", "20-33333333-3", "006", "0001",
+     1, "RIESGOSO", 1, 1, "total"],
+    ["09/08/2026", CRUDO_EN, "005105", "UNO", "20-11111111-1", "006", "0001",
+     500000, "RIESGOSO", 30, 25, "total"],
+  ], 12);
+  const ss = libro({ Historial_Cancelaciones: h });
+  api.limpiarHistorialCancelaciones(ss);
+  revisar("la fila ilegible sobrevive", h.escritas.length, 2);
+  revisar("y queda al final, sin tocar",
+    h.escritas[h.escritas.length - 1][3], "RARA");
+}
+{
+  // Idempotente: sobre datos ya limpios no cambia nada.
+  const ENC = ["Fecha Detección", "Período con Mora", "ClienteId", "Razón Social",
+               "CUIT", "Vendedor", "Empresa", "Saldo Vencido Cancelado ($)",
+               "Categoría que Tenía", "Días Atraso Máx al Cancelar",
+               "Días Atraso Prom al Cancelar", "Tipo de Cancelación"];
+  const h = hoja([ENC,
+    ["05/08/2026", "2026-07", "005105", "UNO", "20-11111111-1", "006", "0001",
+     500000, "RIESGOSO", 30, 25, "total"],
+  ], 12);
+  const ss = libro({ Historial_Cancelaciones: h });
+  revisar("segunda corrida: no borra nada", api.limpiarHistorialCancelaciones(ss), 0);
+  revisar("y la fila queda igual", h.escritas[0][1], "2026-07");
 }
 
 console.log(FALLOS.length ? `\n${FALLOS.length} FALLARON: ${FALLOS.join(", ")}` : "\nTODO OK");
