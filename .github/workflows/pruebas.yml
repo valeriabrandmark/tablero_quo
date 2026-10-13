@@ -88,10 +88,18 @@ jobs:
       - name: Probar la lectura de la competencia
         run: python probar_competencia.py
 
-      # El bug de cancelaciones no se veia: no tiraba error ni dejaba un hueco.
-      # Dejaba la deteccion CONGELADA en julio y duplicando las mismas 76
-      # filas, y eso se lee como "ese mes no cancelo nadie". Estuvo dos meses.
-      - name: Probar la deteccion de cancelaciones
+      # Lo que el .gs de cuentas corrientes convierte --"$ 1.234,50", fechas
+      # dd/MM/yyyy, el cero de adelante del CUIT-- se corrompe en SILENCIO: un
+      # saldo mal parseado entra en la base y se ve como un saldo, no como un
+      # error. Es JavaScript, pero el runner ya trae node.
+      - name: Probar el .gs de cuentas corrientes
+        run: node apps_script/probar_cuentas_corrientes.mjs
+
+      # Los tres bugs del periodo no se veian: ninguno tiraba error ni dejaba
+      # un hueco. Dejaban la deteccion CONGELADA en julio duplicando las mismas
+      # 76 filas, y los 118 clientes del scoring diciendo "Sin historial" con
+      # cuatro meses de fotos guardadas. Estuvo asi dos meses.
+      - name: Probar el .gs de aging y cancelaciones
         run: node apps_script/probar_cancelaciones.mjs
 
       # "A favor del cliente o nuestro" NO sale de una tabla fija: nuestro rol
