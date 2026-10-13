@@ -88,6 +88,12 @@ jobs:
       - name: Probar la lectura de la competencia
         run: python probar_competencia.py
 
+      # El bug de cancelaciones no se veia: no tiraba error ni dejaba un hueco.
+      # Dejaba la deteccion CONGELADA en julio y duplicando las mismas 76
+      # filas, y eso se lee como "ese mes no cancelo nadie". Estuvo dos meses.
+      - name: Probar la deteccion de cancelaciones
+        run: node apps_script/probar_cancelaciones.mjs
+
       # "A favor del cliente o nuestro" NO sale de una tabla fija: nuestro rol
       # cambia segun quien abrio el reclamo. En una cancelacion de venta el que
       # reclama es el vendedor. Leerlo al reves da vuelta el resultado.

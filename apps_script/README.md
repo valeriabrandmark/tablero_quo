@@ -16,6 +16,7 @@ menús desaparecen por completo— sin ninguna forma de ver qué había cambiado
 | `auditoria_sevillanita.gs` | Logística | Manda la hoja ACCIONES vía la función `auditoria-sevillanita` |
 | `MotorAuditoria.gs` | Logística | Pendientes de subir y los cinco cálculos: tarifa, peso, acciones, financiero y mínimo de compra |
 | `Codigo.gs` | Logística | La integración con la API de Sigma: clientes, notas de crédito y proveedores |
+| `cancelaciones_periodo.gs` | Cuentas corrientes | Arreglo de `detectarCancelaciones` y `guardarSnapshot` — **se pega encima**, no se agrega |
 
 En la planilla, `auditoria_sevillanita.gs` está como **`No_tocar.gs`**. Es el
 mismo archivo.
