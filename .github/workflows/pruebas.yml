@@ -95,6 +95,13 @@ jobs:
       - name: Probar el .gs de cuentas corrientes
         run: node apps_script/probar_cuentas_corrientes.mjs
 
+      # Los tres bugs del periodo no se veian: ninguno tiraba error ni dejaba
+      # un hueco. Dejaban la deteccion CONGELADA en julio duplicando las mismas
+      # 76 filas, y los 118 clientes del scoring diciendo "Sin historial" con
+      # cuatro meses de fotos guardadas. Estuvo asi dos meses.
+      - name: Probar el .gs de aging y cancelaciones
+        run: node apps_script/probar_cancelaciones.mjs
+
       # "A favor del cliente o nuestro" NO sale de una tabla fija: nuestro rol
       # cambia segun quien abrio el reclamo. En una cancelacion de venta el que
       # reclama es el vendedor. Leerlo al reves da vuelta el resultado.

@@ -16,15 +16,39 @@ menús desaparecen por completo— sin ninguna forma de ver qué había cambiado
 | `auditoria_sevillanita.gs` | Logística | Manda la hoja ACCIONES vía la función `auditoria-sevillanita` |
 | `MotorAuditoria.gs` | Logística | Pendientes de subir y los cinco cálculos: tarifa, peso, acciones, financiero y mínimo de compra |
 | `Codigo.gs` | Logística | La integración con la API de Sigma: clientes, notas de crédito y proveedores |
-| `cuentas_corrientes.gs` | Cuentas corrientes | Sube scoring, aging y cancelaciones a `bronze` |
+| `Sigma_AgingCtaCte.gs` | Cuentas corrientes | La planilla *Analisis de cuenta corriente* entera: Sigma → aging, scoring, historial, cancelaciones y las subidas a Supabase |
+| `Indices_Financieros.gs` | Cuentas corrientes | Arma la hoja `Indices_Financieros`: los KPI como fórmulas que apuntan a `Scoring_Clientes` y al aging |
+| `cuentas_corrientes.gs` | Cuentas corrientes | Subida alternativa de scoring, aging y cancelaciones a `bronze` — **no es el que corre**, ver abajo |
 
 En la planilla, `auditoria_sevillanita.gs` está como **`No_tocar.gs`**. Es el
 mismo archivo.
 
+`Sigma_AgingCtaCte.gs` tiene **el token afuera**: en la planilla, `CFG.token`
+era una cadena en texto plano. Acá se lee de `SIGMA_TOKEN` en las Propiedades
+del script, como ya hacía con `SUPABASE_URL` y `SUPABASE_SERVICE_KEY`. La
+versión del repo es la buena; si se copia desde la planilla hay que volver a
+sacarlo.
+
+## Cuál de los dos sube cuentas corrientes
+
+Hay **dos** caminos en el repo para las mismas tres tablas de `bronze`, y
+conviene saber cuál corre antes de tocar uno y esperar que cambie algo:
+
+- `Sigma_AgingCtaCte.gs` trae sus propias `subirScoringASupabase`,
+  `subirAgingASupabase`, `subirCancelacionesASupabase` y
+  `subirHistorialScoringASupabase`. **Éstas son las que corren**: son las que
+  están en la planilla y las que dispara el menú.
+- `cuentas_corrientes.gs` hace lo mismo mapeando por nombre de encabezado.
+  Se escribió para una fuente distinta que al final no se usó, y quedó en el
+  repo como la versión con pruebas del mapeo de formatos.
+
 Ya está respaldado todo el proyecto de logística.
 
-`cuentas_corrientes.gs` es el único que tiene pruebas
-(`apps_script/probar_cuentas_corrientes.mjs`, en `pruebas.yml`): evalúa el
+Los dos de cuentas corrientes tienen pruebas en `pruebas.yml`
+(`probar_cuentas_corrientes.mjs` y `probar_cancelaciones.mjs`), y las dos
+evalúan el `.gs` de verdad con `new Function`, no una copia a mano.
+
+`cuentas_corrientes.gs` evalúa el
 `.gs` tal como está y verifica lo que se corrompe en silencio —el formato
 argentino de los números, las fechas `dd/MM/yyyy` y el cero de adelante del
 CUIT— más que las claves declaradas coincidan con las primarias reales de
