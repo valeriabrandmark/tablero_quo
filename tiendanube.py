@@ -277,6 +277,9 @@ def extraer_pedidos_y_items():
         # (era GANADOR100K, el premio de un sorteo).
         cupones = [c.get("code") for c in (pedido.get("coupon") or []) if c.get("code")]
 
+        pago = pedido.get("payment_details") or {}
+        promo = pedido.get("promotional_discount") or {}
+
         # Se arma una vez por pedido y se repite en cada linea: son atributos
         # del pedido, no del producto.
         cabecera = {
@@ -302,9 +305,35 @@ def extraer_pedidos_y_items():
             # -- una transferencia por Pago Nube cuesta 0,85% y una tarjeta
             # 2,99%. Sin estos dos campos no hay forma de saber cual aplicar.
             "gateway": pedido.get("gateway"),
-            "metodo_pago": (pedido.get("payment_details") or {}).get("method"),
+            "metodo_pago": pago.get("method"),
+            "cuotas": pago.get("installments"),
+            "tarjeta": pago.get("credit_card_company"),
             "provincia": direccion.get("province"),
             "ciudad": direccion.get("city"),
+            "codigo_postal": direccion.get("zipcode"),
+
+            # Lo que el cliente pago de verdad. Suele ser igual a `total`, pero
+            # no en un pago que se cayo o se devolvio en parte.
+            "total_pagado": pedido.get("total_paid"),
+
+            # El desglose de `descuento`, que es la SUMA de los tres. Por
+            # separado se ve si el descuento salio de un cupon, de pagar con
+            # transferencia (lo aplica la pasarela) o de una promocion de la
+            # tienda -- el pedido 187 tiene $2.010 de descuento y es todo por
+            # transferencia, sin cupon.
+            "descuento_cupon": pedido.get("discount_coupon"),
+            "descuento_pasarela": pedido.get("discount_gateway"),
+            "descuento_promocion": promo.get("total_discount_amount"),
+
+            # Modalidad de envio. `envio_opcion` es el nombre que ve el cliente;
+            # estos dicen QUIEN lleva el paquete ("Envio Nube" o vacio si es
+            # reparto propio), con que servicio, y si es a domicilio (`ship`) o
+            # a sucursal (`pickup`).
+            "envio_codigo": pedido.get("shipping_option_code"),
+            "envio_transportista": pedido.get("shipping_carrier_name"),
+            "envio_tipo": pedido.get("shipping_pickup_type"),
+            "envio_tracking": pedido.get("shipping_tracking_number") or None,
+            "peso_pedido": pedido.get("weight"),
         }
 
         for prod in pedido.get("products", []):
@@ -318,6 +347,13 @@ def extraer_pedidos_y_items():
                 "precio": prod.get("price"),
                 "costo": prod.get("cost"),
                 "total_linea": prod.get("total"),
+                # Peso (kg) y medidas (cm) de UNA unidad, como estan cargadas en
+                # el producto al momento de la venta. Para el bulto de la linea
+                # hay que multiplicar por `cantidad`.
+                "peso": prod.get("weight"),
+                "ancho": prod.get("width"),
+                "alto": prod.get("height"),
+                "profundidad": prod.get("depth"),
             })
 
     df = pd.DataFrame(filas)
