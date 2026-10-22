@@ -204,6 +204,15 @@ CANDIDATOS_ENVIO = [
      "stock de Full, variante marketplace (documentada en Global Selling)"),
     ("/marketplace/fbm/user-products/{up}/replenishment",
      "reposicion: la que habla de 'producto con restriccion' (Global Selling)"),
+    # La primera corrida (22/10/2026) contesto 400 "Required query parameter
+    # 'country' is missing": el endpoint EXISTE y acepta nuestro token. No se
+    # sabe si quiere el pais (AR) o el sitio (MLA), asi que van los dos.
+    ("/marketplace/fbm/user-products/{up}/replenishment?country=AR",
+     "reposicion con country=AR"),
+    ("/marketplace/fbm/user-products/{up}/replenishment?country=MLA",
+     "reposicion con country=MLA"),
+    ("/marketplace/fbm/user-products/{up}/replenishment?country=AR&seller_id={uid}",
+     "reposicion con country=AR y seller_id"),
     ("/fbm/user-products/{up}/replenishment", "reposicion, sin /marketplace"),
     ("/user-products/{up}", "el user product (documentado)"),
     ("/user-products/{up}/fulfillment", "adivinado"),
@@ -278,7 +287,7 @@ def restricciones_envio(inventarios, token):
             if datos is None:
                 continue
             if status == 200:
-                print("        " + json.dumps(datos, ensure_ascii=False)[:600])
+                print("        " + json.dumps(datos, ensure_ascii=False)[:2500])
                 for p in pistas_en(datos)[:15]:
                     print(f"        PISTA: {p}")
             else:
