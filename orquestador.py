@@ -415,6 +415,18 @@ PASOS = [
      "escribe": "ml_competencia, ml_competidores, ml_vendedores",
      "techo": 15 * 60},
 
+    # REPOSICION DE FULL: si el producto esta restringido para mandar a Full y
+    # cuanto sugiere ML mandar. Lee `ml_publicaciones`, asi que va despues del
+    # catalogo, y como el catalogo es `primera_del_dia`, queda en la misma
+    # corrida.
+    #
+    # UNA VEZ POR DIA: la recomendacion de ML es semanal (las ventas vienen por
+    # semana y el plazo dice THIS_WEEK), pedirla cada hora no la cambia. Son
+    # unas 1.800 llamadas sin multiget, en paralelo.
+    {"comando": "ml_reposicion_full.py",       "intentos": 2, "espera": 60,
+     "cada_horas": None, "primera_del_dia": True, "critico": False,
+     "escribe": "ml_reposicion_full", "techo": 15 * 60},
+
     # FOXIE ESTA APAGADO A PROPOSITO -- el paso se saco el 07/10/2026.
     #
     # Su API expone publicaciones, costos y estrategias, pero no los datos de

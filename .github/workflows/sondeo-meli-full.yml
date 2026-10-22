@@ -24,6 +24,10 @@ on:
         description: 'Cuántos artículos de cada grupo comparar'
         required: false
         default: '8'
+      inventarios:
+        description: 'Códigos ML (inventory_id) separados por coma. Si se completa, corre SOLO las restricciones de envío a Full'
+        required: false
+        default: 'ZTHJ78898,ZQBH00926,ZMJF42153'
 
 concurrency:
   group: orquestador
@@ -60,4 +64,4 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Sondear
-        run: python explorar_ml_full.py --muestra "${{ inputs.muestra }}"
+        run: python explorar_ml_full.py --muestra "${{ inputs.muestra }}" --inventarios "${{ inputs.inventarios }}"

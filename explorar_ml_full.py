@@ -28,6 +28,20 @@ averigua si existe, de dos formas:
      cada una. El de catalogo va como CONTROL: si ese da 200 y los otros 404,
      la respuesta es que el endpoint no existe, no que el token no alcanza.
 
+  3. RESTRICCIONES DE ENVIO A FULL (`--inventarios`). Otra pregunta: no "puede
+     estar en Full" sino "por que ML no me deja MANDAR stock". En la pantalla
+     de envios a Full aparecen leyendas como "temporalmente no lo estamos
+     recibiendo", "prohibido para vender en Full" o "no podes enviar stock
+     hasta que mejores las ventas", y ninguna esta en `tags`, `shipping.tags`
+     ni en el stock de Full (verificado el 21/10/2026 con ZTHJ78898 y
+     ZMJF42153). La unica API documentada que habla de "productos con
+     restriccion" es la de reposicion de Global Selling
+     (/marketplace/fbm/user-products/{id}/replenishment), documentada solo
+     para Fulfillment China. Se prueba igual con nuestro token, mas variantes.
+     El stock de Full va de CONTROL: sabemos que contesta.
+
+     Solo GET: el alta de un envio (POST /marketplace/fbm/inbounds) no se toca.
+
 Se corre a mano desde Actions (workflow "Sondeo Meli Full").
 """
 
@@ -181,14 +195,127 @@ def endpoints(en_full, fuera, token):
         print(f"        -> {que_es}\n")
 
 
+# Para la seccion 3. `{inv}` es el inventory_id (el "Codigo ML" de la pantalla
+# de envios a Full), `{up}` el user_product_id, `{id}` la publicacion.
+CANDIDATOS_ENVIO = [
+    ("/inventories/{inv}/stock/fulfillment?include_attributes=conditions",
+     "CONTROL: stock de Full, documentado"),
+    ("/marketplace/inventories/{inv}/stock/fulfillment?include_attributes=conditions&seller_id={uid}",
+     "stock de Full, variante marketplace (documentada en Global Selling)"),
+    ("/marketplace/fbm/user-products/{up}/replenishment",
+     "reposicion: la que habla de 'producto con restriccion' (Global Selling)"),
+    # La primera corrida (22/10/2026) contesto 400 "Required query parameter
+    # 'country' is missing": el endpoint EXISTE y acepta nuestro token. No se
+    # sabe si quiere el pais (AR) o el sitio (MLA), asi que van los dos.
+    ("/marketplace/fbm/user-products/{up}/replenishment?country=AR",
+     "reposicion con country=AR"),
+    ("/marketplace/fbm/user-products/{up}/replenishment?country=MLA",
+     "reposicion con country=MLA"),
+    ("/marketplace/fbm/user-products/{up}/replenishment?country=AR&seller_id={uid}",
+     "reposicion con country=AR y seller_id"),
+    ("/fbm/user-products/{up}/replenishment", "reposicion, sin /marketplace"),
+    ("/user-products/{up}", "el user product (documentado)"),
+    ("/user-products/{up}/fulfillment", "adivinado"),
+    ("/inventories/{inv}/restrictions", "adivinado"),
+    ("/inventories/{inv}", "adivinado: el inventario en si"),
+    ("/items/{id}/fulfillment", "adivinado"),
+]
+
+# Lo que se busca en cualquier respuesta 200. Son las palabras que aparecerian
+# si la API explicara alguna de las leyendas de la pantalla.
+PISTAS = ("restric", "prohib", "inbound", "eligib", "allowed", "blocked",
+          "recommend", "replenish", "receiv", "not_available", "reason")
+
+
+def pistas_en(datos):
+    """Los caminos 'a.b.c = valor' cuyo nombre o valor contiene una pista."""
+    encontradas = []
+
+    def recorrer(x, camino):
+        if isinstance(x, dict):
+            for k, v in x.items():
+                recorrer(v, f"{camino}.{k}" if camino else str(k))
+        elif isinstance(x, list):
+            for i, v in enumerate(x[:20]):
+                recorrer(v, f"{camino}[{i}]")
+        else:
+            texto = f"{camino}={x}".lower()
+            if any(p in texto for p in PISTAS):
+                encontradas.append(f"{camino} = {str(x)[:100]}")
+
+    recorrer(datos, "")
+    return encontradas
+
+
+def productos_por_inventario(inventarios):
+    """inventory_id -> (item_id, user_product_id) desde la foto del catalogo."""
+    sql = """
+        SELECT inventory_id, id AS item_id, user_product_id
+        FROM bronze.ml_publicaciones
+        WHERE inventory_id = ANY(%(inv)s)
+    """
+    df = pd.read_sql(sql, engine, params={"inv": list(inventarios)})
+    return {inv: g.iloc[0] for inv, g in df.groupby("inventory_id")}
+
+
+def restricciones_envio(inventarios, token):
+    titulo("3. Restricciones de envio a Full, por producto")
+    print("  El primero de cada producto es el CONTROL. Solo GET.\n")
+    mapa = productos_por_inventario(inventarios)
+
+    for inv in inventarios:
+        fila = mapa.get(inv)
+        item = str(fila["item_id"]) if fila is not None else None
+        up = fila["user_product_id"] if fila is not None else None
+        up = None if up is None or pd.isna(up) else str(up)
+        if item and not up:
+            # La foto del catalogo puede no tenerlo: se pide a la publicacion.
+            st, d = probar(f"/items/{item}?attributes=user_product_id", token)
+            if st == 200 and isinstance(d, dict) and d.get("user_product_id"):
+                up = str(d["user_product_id"])
+        print(f"  --- {inv}  publicacion={item or '(no esta en ml_publicaciones)'}  "
+              f"user_product={up or '(sin dato)'}")
+
+        for plantilla, que_es in CANDIDATOS_ENVIO:
+            if ("{id}" in plantilla and not item) or ("{up}" in plantilla and not up):
+                print(f"  [--] {plantilla}   (falta el id para armarlo)")
+                continue
+            endpoint = (plantilla.replace("{inv}", inv).replace("{id}", item or "")
+                        .replace("{up}", up or "").replace("{uid}", USER_ID or ""))
+            status, datos = probar(endpoint, token)
+            print(f"  [{status}] {endpoint}\n        -> {que_es}")
+            if datos is None:
+                continue
+            if status == 200:
+                print("        " + json.dumps(datos, ensure_ascii=False)[:2500])
+                for p in pistas_en(datos)[:15]:
+                    print(f"        PISTA: {p}")
+            else:
+                # El mensaje de error tambien dice cosas: "not found" no es lo
+                # mismo que "forbidden for this site" o "invalid scope".
+                print("        " + json.dumps(datos, ensure_ascii=False)[:200])
+        print()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--muestra", type=int, default=8,
                     help="Cuantos articulos de cada grupo comparar (default 8)")
+    ap.add_argument("--inventarios", default="",
+                    help="inventory_id separados por coma: corre SOLO la seccion 3")
     args = ap.parse_args()
 
     token = token_ml()
     print("Sondeo de Mercado Libre. NO ESCRIBE NADA EN LA BASE.")
+
+    inventarios = [i.strip() for i in args.inventarios.split(",") if i.strip()]
+    if inventarios:
+        restricciones_envio(inventarios, token)
+        titulo("Fin")
+        print("  Si algun endpoint dio 200 con PISTAS, de ahi sale la columna de")
+        print("  'no se puede enviar a Full' para Stock Full y Competencia. Si todos")
+        print("  dan 404/403, la API no lo expone para Argentina.")
+        return
 
     en_full, fuera = muestras(args.muestra)
     print(f"Muestra: {len(en_full)} en Full, {len(fuera)} fuera.")
