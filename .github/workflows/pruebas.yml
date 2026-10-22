@@ -88,6 +88,11 @@ jobs:
       - name: Probar la lectura de la competencia
         run: python probar_competencia.py
 
+      # Un producto restringido para Full sin sugerencia tiene que quedar con
+      # la sugerencia en null, no en cero: cero se leeria como "no mandes".
+      - name: Probar la lectura de la reposicion de Full
+        run: python probar_reposicion.py
+
       # Lo que el .gs de cuentas corrientes convierte --"$ 1.234,50", fechas
       # dd/MM/yyyy, el cero de adelante del CUIT-- se corrompe en SILENCIO: un
       # saldo mal parseado entra en la base y se ve como un saldo, no como un
