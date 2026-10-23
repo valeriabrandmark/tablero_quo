@@ -29,6 +29,10 @@ on:
       - probar_descarte_ml.py
       - .github/workflows/sondeo-descarte-ml.yml
 
+# Para dejar el resumen como comentario del commit (ver el ultimo paso).
+permissions:
+  contents: write
+
 concurrency:
   group: orquestador
   cancel-in-progress: false
@@ -64,4 +68,15 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Sondear
-        run: python probar_descarte_ml.py --muestra "${{ inputs.muestra || '4' }}"
+        run: python probar_descarte_ml.py --muestra "${{ inputs.muestra || '4' }}" | tee salida.txt
+
+      # El RESUMEN (solo nombres de campos, ningun dato de stock) va como
+      # comentario del commit: se lee por la API de GitHub sin tener que bajar
+      # el log, que desde algunos entornos no se alcanza.
+      - name: Dejar el resumen en el commit
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          { echo '```'; sed -n '/^RESUMEN/,$p' salida.txt | head -c 60000; echo '```'; } > resumen.md
+          gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -F body=@resumen.md
