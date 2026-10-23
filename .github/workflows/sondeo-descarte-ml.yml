@@ -1,0 +1,67 @@
+name: Sondeo descarte Full
+
+# ============================================================================
+#  MIRA, NO TOCA.
+#
+#  Corre `probar_descarte_ml.py`, que le pregunta a la API de Mercado Libre si
+#  dice algo de antiguedad o riesgo de descarte del stock en Full. No escribe
+#  en la base y no forma parte del pipeline.
+#
+#  Corre a mano, y tambien al pushear a la rama del sondeo: un
+#  workflow_dispatch solo se puede disparar si el archivo ya esta en main, y
+#  esto no tiene por que llegar a main para contestar la pregunta. Cuando se
+#  sepa la respuesta, este workflow se borra.
+#
+#  OJO CON EL TOKEN: comparte el grupo de concurrencia con el orquestador por
+#  lo mismo que sondeo-meli-full.yml.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      muestra:
+        description: 'Cuántos inventarios de cada grupo probar'
+        required: false
+        default: '4'
+  push:
+    branches: [claude/sondeo-descarte-ml]
+    paths:
+      - probar_descarte_ml.py
+      - .github/workflows/sondeo-descarte-ml.yml
+
+concurrency:
+  group: orquestador
+  cancel-in-progress: false
+
+jobs:
+  sondear:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      TZ: America/Argentina/Buenos_Aires
+
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASS: ${{ secrets.DB_PASS }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+
+      ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+      ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+      ML_REDIRECT_URI: ${{ secrets.ML_REDIRECT_URI }}
+      ML_USER_ID: ${{ secrets.ML_USER_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Sondear
+        run: python probar_descarte_ml.py --muestra "${{ inputs.muestra || '4' }}"
