@@ -165,5 +165,34 @@ revisar("la clave del aviso es la misma en los dos",
         costos.CLAVE_RECONSTRUIR, modelo.CLAVE_COSTOS_PENDIENTES)
 
 
+# --- EL BORRADO NO SE PUEDE LLEVAR PUESTO LO QUE ESTE SCRIPT NO ESCRIBIO ----
+#
+# Desde que el tablero tambien puede crear tramos, el DELETE de aca tiene que
+# acotarse a los suyos. Sin eso, "sin objetivo" borra la tabla entera: alguien
+# edita un Excel de julio y, sin enterarse, le borra a otro la actualizacion
+# que acaba de aplicar desde el boton.
+#
+# Se prueba la clausula y no la carga porque es UNA LINEA la que decide esto, y
+# es la que no se ve cuando se lee el codigo de arriba.
+for objetivo, etiqueta in [(None, "sin objetivo"), ("2026-09", "un mes"),
+                           ("2026-09-18", "un dia")]:
+    where, _params, _que = costos.clausula_de_borrado(objetivo)
+    revisar(f"{etiqueta}: solo borra lo del Excel",
+            "origen = 'excel'" in where, True)
+
+# Y cada objetivo sigue acotando lo suyo, que es lo de antes.
+revisar("sin objetivo no filtra por mes",
+        "mes_comercial" not in costos.clausula_de_borrado(None)[0], True)
+revisar("un mes filtra por mes y no por vigencia",
+        [t in costos.clausula_de_borrado("2026-09")[0]
+         for t in ("mes_comercial", "vigente_desde")], [True, False])
+revisar("un dia filtra por los dos",
+        [t in costos.clausula_de_borrado("2026-09-18")[0]
+         for t in ("mes_comercial", "vigente_desde")], [True, True])
+revisar("y el dia saca el mes del nombre",
+        costos.clausula_de_borrado("2026-09-18")[1],
+        {"mes": "2026-09", "vig": date(2026, 9, 18)})
+
+
 print("\nTODO OK" if not FALLOS else f"\n{len(FALLOS)} FALLARON: {', '.join(FALLOS)}")
 raise SystemExit(1 if FALLOS else 0)
