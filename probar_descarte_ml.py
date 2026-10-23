@@ -148,6 +148,7 @@ def main():
     objetivos = args.inventarios or inventarios_de_prueba(args.muestra)
 
     contestaron = {}   # (ruta sin inventario, params) -> set de claves
+    estados = {}       # status de not_available_detail -> unidades
     for inv_id in objetivos:
         print("\n" + "=" * 74)
         print(f"INVENTARIO {inv_id}")
@@ -156,12 +157,18 @@ def main():
             datos = llamar(ruta, params, token)
             if datos is None:
                 continue
+            if not params:
+                for d in datos.get("not_available_detail") or []:
+                    estados[d.get("status")] = estados.get(d.get("status"), 0) + (d.get("quantity") or 0)
             clave = (ruta.replace(inv_id, "{id}"), json.dumps(params))
             contestaron.setdefault(clave, set()).update(claves(datos))
 
     print("\n" + "=" * 74)
     print("RESUMEN")
     print("=" * 74)
+    print("Motivos de no disponible vistos (status: unidades):")
+    for st, q in sorted(estados.items(), key=lambda x: -x[1]):
+        print(f"    {st}: {q}")
     if not contestaron:
         print("Ninguna variante contesto 200.")
         return
