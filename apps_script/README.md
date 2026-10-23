@@ -12,6 +12,7 @@ menús desaparecen por completo— sin ninguna forma de ver qué había cambiado
 | Archivo | De qué planilla | Qué hace |
 |---|---|---|
 | `sell_in.gs` | Sell in | Manda la hoja al tablero vía la función `sell-in` |
+| `ofertas.gs` | Consolidador Ofertas | Manda la hoja `TABLERO` vía la función `ofertas`. Gemelo del de sell in |
 | `FLETE_AUTO.gs` | Logística | Trae `reporte_logistica` a la hoja FLETE y sube lo cargado a mano |
 | `auditoria_sevillanita.gs` | Logística | Manda la hoja ACCIONES vía la función `auditoria-sevillanita` |
 | `MotorAuditoria.gs` | Logística | Pendientes de subir y los cinco cálculos: tarifa, peso, acciones, financiero y mínimo de compra |
