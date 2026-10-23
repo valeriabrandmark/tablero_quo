@@ -411,6 +411,14 @@ def asegurar_columnas(con):
         "ALTER TABLE bronze.costos_historicos "
         "ADD COLUMN IF NOT EXISTS vigente_desde date"
     )
+    # DE DONDE VINO CADA FILA. Ver el borrado de `guardar`: desde que el
+    # tablero tambien puede crear tramos, este script NO puede borrar lo que no
+    # escribio el. Con DEFAULT 'excel' porque todo lo que habia antes de esta
+    # columna salio de un archivo.
+    con.exec_driver_sql(
+        "ALTER TABLE bronze.costos_historicos "
+        "ADD COLUMN IF NOT EXISTS origen text NOT NULL DEFAULT 'excel'"
+    )
 
 
 # La anotacion que deja este script y levanta modelo.py. Los dos nombres tienen
@@ -431,6 +439,44 @@ def _numero(valor):
     except (TypeError, ValueError):
         return None
     return None if v != v else round(v, 6)
+
+
+# De donde salio cada fila de costos_historicos. Ver `clausula_de_borrado`.
+ORIGEN_EXCEL = "excel"
+
+
+def clausula_de_borrado(objetivo):
+    """Que filas se borran antes de escribir. Devuelve (where, params, texto).
+
+    QUE SE BORRA SEGUN EL OBJETIVO. Sin objetivo, todo lo del Excel. Con un
+    mes, ese mes con todas sus vigencias (asi desaparece un tramo cuyo archivo
+    se borro de la carpeta). Con un dia, solo ese tramo.
+
+    Y SOLO LO QUE ESCRIBIO ESTE SCRIPT (origen = 'excel'), que es la parte que
+    importa. El tablero tambien puede crear tramos --el boton de actualizar
+    costos-- y los suyos no salen de ningun archivo de esta carpeta.
+
+    Sin ese filtro, el borrado de "toda la tabla" se los lleva puestos:
+    cualquiera que edite un Excel haria desaparecer, sin enterarse, una
+    actualizacion que alguien aplico a mano desde el tablero. Era correcto
+    cuando este era el unico camino; con dos, no.
+    """
+    propio = f"origen = '{ORIGEN_EXCEL}'"
+    if objetivo is None:
+        return f" WHERE {propio}", {}, "toda la tabla (del Excel)"
+    if PATRON_DIA.fullmatch(objetivo):
+        mes, vigencia = mes_y_vigencia(objetivo)
+        return (
+            f" WHERE {propio} AND mes_comercial = %(mes)s"
+            " AND vigente_desde = %(vig)s",
+            {"mes": mes, "vig": vigencia},
+            f"{mes} desde {vigencia}",
+        )
+    return (
+        f" WHERE {propio} AND mes_comercial = %(mes)s",
+        {"mes": objetivo},
+        objetivo,
+    )
 
 
 def vigencia_mas_vieja_que_cambia(con, final, borrado, params):
@@ -627,21 +673,11 @@ def cargar_costos(objetivo=None, revisar_solo=False):
         subset=["sku", "mes_comercial", "vigente_desde"], keep="last")
     final = final[["sku", "mes_comercial", "vigente_desde", "costo_teorico",
                    "oferta_pct", "desc_propio_pct", "costo_real"]]
+    # Para que el borrado de arriba sepa cuales son las suyas.
+    final["origen"] = ORIGEN_EXCEL
 
-    # QUE SE BORRA ANTES DE ESCRIBIR.
-    #
-    # Sin objetivo se rehace la tabla entera. Con un mes, ese mes con todas sus
-    # vigencias (asi desaparece un tramo cuyo archivo se borro de la carpeta).
-    # Con un dia, solo ese tramo: los demas del mes no se tocan.
-    if objetivo is None:
-        borrado, params, que = "", {}, "toda la tabla"
-    elif PATRON_DIA.fullmatch(objetivo):
-        mes, vigencia = mes_y_vigencia(objetivo)
-        borrado = " WHERE mes_comercial = %(mes)s AND vigente_desde = %(vig)s"
-        params, que = {"mes": mes, "vig": vigencia}, f"{mes} desde {vigencia}"
-    else:
-        borrado = " WHERE mes_comercial = %(mes)s"
-        params, que = {"mes": objetivo}, objetivo
+    # QUE SE BORRA ANTES DE ESCRIBIR. Ver `clausula_de_borrado`.
+    borrado, params, que = clausula_de_borrado(objetivo)
 
     # DELETE + APPEND EN UNA SOLA TRANSACCION, y no `if_exists="replace"`:
     # replace hace DROP, y el DROP falla si alguien crea una vista encima de la
