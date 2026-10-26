@@ -59,6 +59,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 
 from conexion import crear_engine
+from errores_bd import es_tabla_inexistente
 from mercadolibre import HILOS_STOCK, guardar_en_bd, llamar_ml, token_ml
 
 PAIS = "AR"
@@ -212,6 +213,117 @@ def pedir_reposicion(token, productos):
     return df
 
 
+def cambios_de_restriccion(previo, productos, fecha):
+    """Que cambio de estado entre la foto anterior y esta. Sin base.
+
+    `previo` es {user_product_id: restringido} de la corrida pasada, y
+    `productos` las filas de ahora. Devuelve una fila por cambio, con el
+    estado NUEVO.
+
+    TRES CASOS NO SON UN CAMBIO, y los tres se confunden facil:
+
+      - el producto no estaba en la foto anterior: no cambio, recien lo
+        conocemos. Pasa con cada publicacion nueva en Full;
+      - la API no contesto por el: un `None` no es "salio de restriccion", y
+        tratarlo asi mandaria a cargar stock de algo que sigue bloqueado;
+      - el estado es el mismo: es el 99 % de las filas de cada corrida.
+    """
+    filas = []
+    for p in productos:
+        ahora = p.get("restringido")
+        if ahora is None or (isinstance(ahora, float) and ahora != ahora):
+            continue
+        ahora = bool(ahora)
+        up = str(p.get("user_product_id"))
+        if up not in previo or previo[up] == ahora:
+            continue
+        filas.append({
+            "user_product_id": up,
+            "sku_ml": p.get("sku") or p.get("sku_ml"),
+            "inventory_id": p.get("inventory_id"),
+            "restringido": ahora,
+            "fecha": fecha,
+        })
+    return filas
+
+
+def registrar_cambios(engine, df):
+    """Anota los productos que ENTRARON o SALIERON de restriccion.
+
+    ========================================================================
+     POR QUE HACE FALTA GUARDAR ESTO APARTE
+    ========================================================================
+
+    `ml_reposicion_full` es una FOTO: se reemplaza entera en cada corrida. Dice
+    quien esta restringido hoy y no deja rastro de quien lo estaba ayer, asi
+    que el dato que de verdad importa --que algo CAMBIO-- se pierde entre dos
+    corridas y nadie se entera.
+
+    Y el que importa mas es el que SALE. Ya paso de estar restringidos un
+    tiempo y que despues nos liberaran: hasta que alguien lo nota a mano, son
+    semanas sin poder mandar stock de algo que ya se podia mandar. Entrar
+    tambien importa, pero eso se ve solo --el stock deja de reponerse--;
+    salir no avisa.
+
+    Hoy esto se sigue en una planilla a mano, exportando "Elimina este
+    producto" de la pantalla de ML cada semana y consolidando: 184 SKU, de los
+    cuales 61 aparecieron UNA sola vez (entraron y salieron) y 34 aparecieron
+    las diez. O sea que el movimiento es la regla, no la excepcion.
+
+    ========================================================================
+     LA PRIMERA CORRIDA NO ESCRIBE NADA, A PROPOSITO
+    ========================================================================
+
+    Sin estado anterior, todo producto restringido parece "recien
+    restringido". Serian 552 avisos falsos el primer dia, y el aviso quedaria
+    desacreditado justo cuando se estrena. Si no hay foto previa, se guarda el
+    punto de partida y se sale en silencio.
+
+    Lo mismo con un producto que aparece por primera vez: no cambio de estado,
+    recien lo conocemos.
+
+    NO SE GUARDA EL MOTIVO porque la API no lo manda: "vendedores autorizados",
+    "mejora las ventas", "prohibido en Full" y "no lo estamos recibiendo"
+    llegan los cuatro como el mismo `is_restricted`. El motivo sigue estando
+    solo en la pantalla de ML.
+    """
+    try:
+        antes = pd.read_sql(
+            "select user_product_id, restringido from bronze.ml_reposicion_full",
+            engine,
+        )
+    except Exception as e:
+        if not es_tabla_inexistente(e):
+            raise
+        print("  (primera corrida: no hay foto anterior, no se anotan cambios)")
+        return
+
+    if antes.empty:
+        print("  (foto anterior vacia: no se anotan cambios)")
+        return
+
+    previo = {
+        str(r.user_product_id): bool(r.restringido)
+        for r in antes.itertuples()
+        if pd.notna(r.restringido)
+    }
+
+    filas = cambios_de_restriccion(previo, df.to_dict("records"),
+                                   pd.Timestamp.now(
+                                       tz="America/Argentina/Buenos_Aires").date())
+
+    if not filas:
+        print("  Sin cambios de restriccion.")
+        return
+
+    cambios = pd.DataFrame(filas)
+    entraron = int(cambios["restringido"].sum())
+    print(f"  Cambios de restriccion: {entraron} entraron, "
+          f"{len(cambios) - entraron} SALIERON")
+    # APPEND y no replace: es un historial, no una foto.
+    guardar_en_bd(cambios, "ml_restricciones_eventos", modo="append")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--probar", type=int, default=0,
@@ -245,6 +357,9 @@ def main():
         print(df.head(20).to_string())
         print(f"  (--probar: no se guardo nada) {time.time() - arranque:.0f}s")
         return
+
+    # ANTES DE PISAR LA FOTO, que es lo unico que sabe como estaban ayer.
+    registrar_cambios(engine, df)
 
     df["actualizado"] = pd.Timestamp.now(tz="America/Argentina/Buenos_Aires")
     guardar_en_bd(df, "ml_reposicion_full", modo="replace")
