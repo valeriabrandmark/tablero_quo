@@ -9,7 +9,7 @@ ni sugerencia. Que falte la sugerencia tiene que quedar en None, no en 0.
 
 import sys
 
-from ml_reposicion_full import leer_reposicion
+from ml_reposicion_full import cambios_de_restriccion, leer_reposicion
 
 FALLOS = []
 
@@ -107,6 +107,59 @@ revisar("el restringido no tiene tipo", algodon["tipo_cantidad"], None)
 
 vacio = leer_reposicion("MLAU2", {})
 revisar("respuesta vacia no rompe", (vacio["restringido"], vacio["recomendacion"]), (False, None))
+
+# ===========================================================================
+#  LOS CAMBIOS DE RESTRICCION
+#
+#  Es lo unico que la foto no puede decir: se reemplaza entera en cada corrida.
+#  Y el que importa mas es el que SALE -- entrar se nota solo, porque el stock
+#  deja de reponerse; salir no avisa, y ya paso de estar liberados semanas sin
+#  que nadie lo notara.
+# ===========================================================================
+HOY = "2026-10-26"
+
+cambios = cambios_de_restriccion(
+    {"A": True, "B": False, "C": True, "D": False},
+    [
+        {"user_product_id": "A", "restringido": False, "sku": "SA"},   # salio
+        {"user_product_id": "B", "restringido": True, "sku": "SB"},    # entro
+        {"user_product_id": "C", "restringido": True, "sku": "SC"},    # igual
+        {"user_product_id": "D", "restringido": None, "sku": "SD"},    # sin dato
+        {"user_product_id": "E", "restringido": True, "sku": "SE"},    # nuevo
+    ],
+    HOY,
+)
+revisar("solo se anotan los que cambiaron",
+        sorted(c["user_product_id"] for c in cambios), ["A", "B"])
+revisar("el que salio queda en False",
+        [c["restringido"] for c in cambios if c["user_product_id"] == "A"], [False])
+revisar("el que entro queda en True",
+        [c["restringido"] for c in cambios if c["user_product_id"] == "B"], [True])
+revisar("se guarda el sku y la fecha",
+        [(c["sku_ml"], c["fecha"]) for c in cambios if c["user_product_id"] == "A"],
+        [("SA", HOY)])
+
+# SIN DATO NO ES SALIR. Es el error que mandaria a cargar stock de algo que
+# sigue bloqueado: la API no contesto, no es que lo liberaron.
+revisar("sin respuesta no cuenta como salida",
+        any(c["user_product_id"] == "D" for c in cambios), False)
+
+# UN PRODUCTO NUEVO TAMPOCO ES UN CAMBIO: no lo conociamos.
+revisar("un producto nuevo no genera aviso",
+        any(c["user_product_id"] == "E" for c in cambios), False)
+
+# LA PRIMERA CORRIDA NO AVISA NADA. Sin estado anterior, los 552 restringidos
+# pareceria que se restringieron hoy, y el aviso nace desacreditado.
+revisar("sin foto anterior no hay cambios",
+        cambios_de_restriccion({}, [{"user_product_id": "A", "restringido": True}], HOY),
+        [])
+
+# Un NaN de pandas tampoco: llega asi cuando la columna quedo vacia.
+revisar("un NaN tampoco cuenta",
+        cambios_de_restriccion({"A": True},
+                               [{"user_product_id": "A", "restringido": float("nan")}],
+                               HOY),
+        [])
 
 if FALLOS:
     print(f"\n{len(FALLOS)} pruebas fallaron")
