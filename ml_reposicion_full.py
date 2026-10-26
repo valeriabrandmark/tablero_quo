@@ -32,9 +32,20 @@ QUE ESCRIBE (foto actual, se reemplaza entera)
   bronze.ml_reposicion_full  una fila por producto (user_product_id) en Full.
 
 Las respuestas crudas de `tags` y `eligibility_benefits` se guardan como JSON:
-por ahora solo vimos productos restringidos, y los tipos de recomendacion de
-los que SI se pueden mandar se van a conocer en la primera corrida completa.
-Guardarlos tal cual evita tener que volver a pedirlos para enterarse.
+guardarlas tal cual evita tener que volver a pedirlas para enterarse.
+
+LOS TIPOS DE RECOMENDACION, ya conocidos (26/10/2026, sobre 4.037 productos):
+
+    NO_REPLENISHMENT                 2.292  no hace falta reponer
+    REPLENISH                        1.192  conviene reponer, con cantidad
+    NO_REPLENISHMENT_BY_RESTRICTION    551  restringido
+
+Para los REPLENISH la API manda CUANTO mandar, adentro de un objeto:
+
+    "suggested_quantity": {"type": "exact", "value": 140}
+
+Leerlo como si fuera un numero lo convertia en NaN y la columna quedaba vacia
+para todos. Ver `_sugerida`.
 
     python ml_reposicion_full.py              # todo
     python ml_reposicion_full.py --probar 20  # 20 productos, sin guardar
@@ -81,6 +92,43 @@ def productos_en_full(engine):
     return pd.read_sql(sql, engine)
 
 
+def _sugerida(reco):
+    """El tipo y el valor de `suggested_quantity`, que es un OBJETO.
+
+    ========================================================================
+     EL ERROR QUE ESTO ARREGLA
+    ========================================================================
+
+    La API no manda un numero sino:
+
+        "suggested_quantity": {"type": "exact", "value": 140}
+
+    Leerlo como numero y pasarlo por `pd.to_numeric(errors="coerce")` --que es
+    lo que hacia-- convierte el diccionario en NaN sin quejarse, asi que la
+    columna quedaba vacia para los 4.037 productos. La pantalla de Stock Full
+    tenia escrito "Mandar N" y nunca tenia con que llenarlo: Mercado Libre
+    venia diciendo cuanto mandar de 1.192 productos y lo tirabamos.
+
+    No se vio antes porque el sondeo del 22/10 solo encontro productos
+    RESTRINGIDOS, donde la cantidad es null de verdad. El caso con numero del
+    que salio la prueba estaba escrito a mano, con la forma equivocada.
+    Confirmado contra la API el 26/10/2026 (LF02040: 140, LF02006: 98).
+
+    EL TIPO SE GUARDA, no se descarta. Hoy todos vienen "exact", pero que el
+    campo exista quiere decir que hay otros; si aparece uno que no sea exact,
+    tomar `value` como si fuera una cantidad firme seria inventar precision.
+    Guardado, se ve en la base y se decide con el dato a la vista.
+    """
+    cruda = reco.get("suggested_quantity")
+    if isinstance(cruda, dict):
+        return cruda.get("type"), cruda.get("value")
+    # Por si algun dia vuelve a ser un numero suelto: no cuesta nada y evita
+    # que este arreglo se convierta en el error de maniana.
+    if isinstance(cruda, (int, float)):
+        return "exact", cruda
+    return None, None
+
+
 def _primero(lista, clave):
     """El valor de `clave` del primer dict de una lista como [{"full": 0}]."""
     for x in lista or []:
@@ -102,6 +150,7 @@ def leer_reposicion(user_product_id, datos):
     totales = ventas.get("sales_totals") or {}
     historia = ventas.get("sales_history") or []
     reco = datos.get("recommendation") or {}
+    tipo_cantidad, cantidad = _sugerida(reco)
     tags = producto.get("tags") or []
 
     return {
@@ -111,7 +160,9 @@ def leer_reposicion(user_product_id, datos):
         "restringido": RESTRINGIDO in tags,
         "tags": json.dumps(tags, ensure_ascii=False),
         "recomendacion": reco.get("recommendation_type"),
-        "cantidad_sugerida": reco.get("suggested_quantity"),
+        # LA CANTIDAD VIENE ADENTRO DE UN OBJETO, no suelta. Ver `_sugerida`.
+        "cantidad_sugerida": cantidad,
+        "tipo_cantidad": tipo_cantidad,
         "plazo": reco.get("replenishment_deadline"),
         "frecuencia_dias": reco.get("replenishment_frequency"),
         "urgencia": stock.get("shipping_urgency"),
