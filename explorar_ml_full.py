@@ -214,6 +214,35 @@ CANDIDATOS_ENVIO = [
     ("/marketplace/fbm/user-products/{up}/replenishment?country=AR&seller_id={uid}",
      "reposicion con country=AR y seller_id"),
     ("/fbm/user-products/{up}/replenishment", "reposicion, sin /marketplace"),
+    # ── BUSCANDO EL MOTIVO DE LA RESTRICCION (26/10/2026) ──────────────────
+    #
+    # La API dice SI esta restringido pero no POR QUE. En la pantalla de ML el
+    # motivo esta escrito --"solo habilitado para vendedores autorizados",
+    # "hasta que mejores las ventas", "prohibido para vender en Full",
+    # "temporalmente no lo estamos recibiendo", "excede las dimensiones"-- y
+    # son cinco acciones distintas: una se arregla vendiendo mas, otra pidiendo
+    # autorizacion, y otra no se arregla nunca.
+    #
+    # La documentacion de creacion de inbounds nombra errores RESTRICTED e
+    # INVALID_SELLER_RESTRICTED, asi que el motivo existe del lado de ML. Lo
+    # que falta saber es si alguna consulta lo expone. SOLO GET: crear un
+    # inbound de prueba seria mandar mercaderia de verdad.
+    ("/marketplace/fbm/user-products/{up}/restrictions?country=AR",
+     "MOTIVO: restricciones del producto, adivinado"),
+    ("/marketplace/fbm/user-products/{up}?country=AR",
+     "MOTIVO: el user product por la via de fbm"),
+    ("/marketplace/fbm/user-products/{up}/replenishment?country=AR&include_attributes=restrictions",
+     "MOTIVO: la reposicion pidiendo las restricciones"),
+    ("/marketplace/fbm/user-products/{up}/replenishment?country=AR&attributes=all",
+     "MOTIVO: la reposicion pidiendo todo"),
+    ("/marketplace/fbm/restrictions?country=AR&user_product_id={up}",
+     "MOTIVO: restricciones como recurso propio"),
+    ("/marketplace/fbm/inbounds/restrictions?country=AR&user_product_id={up}",
+     "MOTIVO: restricciones del inbound (sin crear nada)"),
+    ("/user-products/{up}/restrictions", "MOTIVO: restricciones sin marketplace"),
+    ("/inventories/{inv}/stock/fulfillment?include_attributes=restrictions",
+     "MOTIVO: el stock pidiendo restricciones"),
+    # ───────────────────────────────────────────────────────────────────────
     ("/user-products/{up}", "el user product (documentado)"),
     ("/user-products/{up}/fulfillment", "adivinado"),
     ("/inventories/{inv}/restrictions", "adivinado"),
