@@ -427,6 +427,21 @@ PASOS = [
      "cada_horas": None, "primera_del_dia": True, "critico": False,
      "escribe": "ml_reposicion_full", "techo": 15 * 60},
 
+    # LA FOTO DEL STOCK AL CIERRE DEL MES COMERCIAL.
+    #
+    # Va DESPUES de digip.py y de sigma.py, que son las dos fuentes que
+    # fotografia. Corre todos los dias y pisa la foto del mes en curso: el
+    # cierre no es un evento sino el ultimo valor que quedo escrito cuando el
+    # mes termino. Atarlo al dia 5 seria perder el mes entero cada vez que la
+    # corrida de ese dia falle, y es una serie que NO se puede reconstruir
+    # hacia atras.
+    #
+    # `cada_horas: 24` porque una foto por dia alcanza y sobra: dentro del
+    # mismo dia la ultima pisa a la anterior igual.
+    {"comando": "stock_cierre_mes.py",         "intentos": 2, "espera": 60,
+     "cada_horas": 24, "critico": False,
+     "escribe": "stock_cierre_mes", "techo": 10 * 60},
+
     # FOXIE ESTA APAGADO A PROPOSITO -- el paso se saco el 07/10/2026.
     #
     # Su API expone publicaciones, costos y estrategias, pero no los datos de
