@@ -55,7 +55,6 @@ import pandas as pd
 
 from calendario import mes_comercial
 from conexion import crear_engine
-from errores_bd import es_tabla_inexistente
 from guardado import sincronizar_columnas
 
 TABLA = "stock_cierre_mes"
@@ -118,22 +117,33 @@ def main():
         return
 
     df["actualizado"] = pd.Timestamp.now(tz="America/Argentina/Buenos_Aires")
+    guardar_foto(engine, df, mes)
+    print(f"  Guardado: {len(df)} articulos en bronze.{TABLA} para {mes}")
 
+
+def guardar_foto(engine, df, mes):
+    """Reemplaza la foto del mes en bronze.stock_cierre_mes.
+
+    SE PREGUNTA SI LA TABLA EXISTE ANTES DE BORRAR, en vez de intentar el
+    DELETE y atrapar el error. Asi estaba, y no creo la tabla nunca: en
+    Postgres una orden que falla deja la transaccion entera ABORTADA, y todo lo
+    que viene despues en ella --el to_sql que la iba a crear-- explota con
+    InFailedSqlTransaction. Fallo en todas las corridas desde que se agrego el
+    paso (44 seguidas al 29/10/2026) y dejo el orquestador en rojo.
+    """
     with engine.begin() as con:
         con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
-        sincronizar_columnas(con, TABLA, df)
-        # BORRAR E INSERTAR EN LA MISMA TRANSACCION, igual que guardar_en_bd:
-        # en el medio la tabla no queda sin el mes en curso para quien consulte.
-        try:
+        existe = con.exec_driver_sql(
+            "SELECT to_regclass(%(t)s) IS NOT NULL", {"t": f'bronze."{TABLA}"'}).scalar()
+        if existe:
+            sincronizar_columnas(con, TABLA, df)
+            # BORRAR E INSERTAR EN LA MISMA TRANSACCION, igual que guardar_en_bd:
+            # en el medio la tabla no queda sin el mes en curso para quien consulte.
             con.exec_driver_sql(
                 f'DELETE FROM bronze."{TABLA}" WHERE mes_comercial = %(m)s', {"m": mes})
-        except Exception as e:
-            if not es_tabla_inexistente(e):
-                raise
+        else:
             print(f"  bronze.{TABLA} no existe todavia -> la crea el to_sql.")
         df.to_sql(TABLA, con, schema="bronze", if_exists="append", index=False)
-
-    print(f"  Guardado: {len(df)} articulos en bronze.{TABLA} para {mes}")
 
 
 if __name__ == "__main__":

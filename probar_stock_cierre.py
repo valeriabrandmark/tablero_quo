@@ -7,6 +7,11 @@ porque esta en una sola, o una suma que se pise en vez de acumularse, borra
 justo lo que la tabla existe para registrar.
 """
 
+import contextlib
+
+import pandas as pd
+
+import stock_cierre_mes
 from stock_cierre_mes import armar_foto
 
 FALLOS = []
@@ -52,6 +57,89 @@ revisar("sin codigo no hay fila", list(limpio["sku"]), ["A"])
 revisar("un stock nulo cuenta como cero", float(limpio.iloc[0]["stock_digip"]), 0.0)
 
 revisar("dos fuentes vacias dan una foto vacia", armar_foto([], [], MES).empty, True)
+
+
+# ---------------------------------------------------------------------------
+# EL GUARDADO, CONTRA UNA BASE DE MENTIRA QUE SE PORTA COMO POSTGRES: una orden
+# que falla deja la transaccion ABORTADA y todo lo que sigue en ella explota.
+# Asi fallo el paso 44 corridas seguidas: el DELETE sobre la tabla que todavia
+# no existia se atrapaba, y el to_sql que la iba a crear corria en la
+# transaccion ya muerta. La tabla no se creo nunca.
+# ---------------------------------------------------------------------------
+
+
+class TransaccionAbortada(Exception):
+    pass
+
+
+class BaseFalsa:
+    def __init__(self, existe):
+        self.existe, self.filas, self.diario = existe, [], []
+
+    def begin(self):
+        base = self
+
+        class Tx:
+            def __enter__(self):
+                self.abortada = False
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def begin(self):
+                # sincronizar_columnas abre "su" transaccion si no recibe una
+                # Connection de SQLAlchemy: aca es la misma, como en la real.
+                return contextlib.nullcontext(self)
+
+            def exec_driver_sql(self, sql, params=None):
+                if self.abortada:
+                    raise TransaccionAbortada("current transaction is aborted")
+                base.diario.append(" ".join(sql.split())[:30])
+                if sql.startswith("DELETE") and not base.existe:
+                    self.abortada = True
+                    raise Exception('relation "bronze.stock_cierre_mes" does not exist')
+
+                class R:
+                    @staticmethod
+                    def scalar():
+                        return base.existe
+
+                    @staticmethod
+                    def fetchall():
+                        return [(c,) for c in ("sku", "mes_comercial", "stock_digip", "stock_sigma", "actualizado")]
+                return R
+
+            def to_sql_desde(self, df):
+                if self.abortada:
+                    raise TransaccionAbortada("current transaction is aborted")
+                base.existe = True
+                base.filas.extend(df.to_dict("records"))
+        return Tx()
+
+
+def guardar(base, foto):
+    original = pd.DataFrame.to_sql
+    pd.DataFrame.to_sql = lambda self, nombre, con, **k: con.to_sql_desde(self)
+    try:
+        stock_cierre_mes.guardar_foto(base, foto, MES)
+        return None
+    except Exception as e:
+        return e
+    finally:
+        pd.DataFrame.to_sql = original
+
+
+nueva = BaseFalsa(existe=False)
+error = guardar(nueva, df)
+revisar("primera corrida (sin tabla): no falla", repr(error), "None")
+revisar("  y crea la tabla con la foto", (nueva.existe, len(nueva.filas)), (True, 4))
+revisar("  sin intentar borrar de una tabla que no existe",
+        any(x.startswith("DELETE") for x in nueva.diario), False)
+
+error = guardar(nueva, df)
+revisar("segunda corrida del mismo dia: reemplaza el mes", repr(error), "None")
+revisar("  borrando antes", any(x.startswith("DELETE") for x in nueva.diario), True)
 
 print(f"\n{len(FALLOS)} pruebas fallaron" if FALLOS else "\nTodo OK")
 raise SystemExit(1 if FALLOS else 0)
