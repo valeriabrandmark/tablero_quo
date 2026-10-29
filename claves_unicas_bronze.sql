@@ -64,3 +64,17 @@ create unique index if not exists ml_ventas_id_uniq
 
 create index if not exists sigma_compras_fecha_idx
     on bronze.sigma_compras ("fechaFactura");
+
+
+-- ============================================================================
+--  UNA FILA POR (PREPARACION, PEDIDO) EN LAS PREPARACIONES DE DIGIP
+--
+--  Esta tabla no tenia ninguna clave, y duplico 477 filas en silencio: el
+--  guardado borraba por pedido y las preparaciones que juntan pedidos de
+--  adentro y de afuera de la ventana sumaban una copia por corrida. Ver
+--  limpiar_duplicados_digip_preparaciones.sql, que hay que correr ANTES que
+--  esto (con los duplicados todavia ahi, el CREATE falla).
+-- ============================================================================
+
+create unique index if not exists digip_preparaciones_prep_pedido_uidx
+    on bronze.digip_preparaciones (preparacion_id, pedido_codigo);

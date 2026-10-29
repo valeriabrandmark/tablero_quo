@@ -103,6 +103,22 @@ def extraer_preparaciones():
         print(df[["preparacion_id", "pedido_codigo", "transporte", "bultos_preparacion",
                   "volumen_preparacion", "kg_preparacion", "tipo_preparacion"]].head(3).to_string())
 
+    guardar_preparaciones(df, codigos, engine)
+
+
+# Las correcciones que se cargan a mano desde la planilla de logistica
+# ("Guardar correcciones KG/Volumen", en FLETE_AUTO.gs). Digip no las conoce,
+# asi que el reemplazo de la ventana tiene que volver a ponerlas.
+COLUMNAS_MANUALES = ["kg_preparacion_manual", "volumen_preparacion_manual"]
+
+
+def guardar_preparaciones(df, codigos, engine):
+    """Reemplaza en bronze.digip_preparaciones lo que se acaba de bajar.
+
+    `codigos` son los pedidos de la ventana que se consultaron a la API; `df`
+    trae una fila por (preparacion, pedido), con TODOS los pedidos de cada
+    preparacion -- tambien los que no estan en `codigos`.
+    """
     # Reemplazo SOLO de las preparaciones de los pedidos que estan dentro de la ventana
     # actual. NOTA: digip_preparaciones no tiene columna de fecha propia -- se identifica
     # que filas pertenecen a la ventana por su pedido_codigo (los mismos que se acaban
@@ -130,14 +146,46 @@ def extraer_preparaciones():
         print("  (sin preparaciones en esta ventana: NO se toca lo que ya estaba)")
         return
 
+    # SE BORRA POR PEDIDO *Y* POR PREPARACION. Por pedido solamente dejaba
+    # filas repetidas que crecian una por corrida.
+    #
+    # Una preparacion puede juntar varios pedidos, y `df` trae una fila por cada
+    # uno. Pero solo se consultan los pedidos de la ventana: si la preparacion
+    # junta uno de adentro con uno de afuera (mas viejo, de Tienda Nube, o que
+    # no esta en digip_pedidos), la fila del de afuera se insertaba en cada
+    # corrida y el DELETE por pedido no la tocaba nunca.
+    #
+    # Paso con 5 preparaciones. La 14092763 junta el 4287 (28/08) y el 4290
+    # (31/08): cuando el 4287 salio de la ventana quedo 64 veces, y como
+    # gold.reporte_logistica suma el neto una vez por fila, SALVATIERRA VIVIANA
+    # aparecia con $14.079.115 en vez de $390.793 en la planilla de logistica.
+    # Ninguna corrida fallo.
+    prep_ids = sorted({int(p) for p in df["preparacion_id"].dropna()})
+    filtro = "pedido_codigo = ANY(%(codigos)s) OR preparacion_id = ANY(%(prep_ids)s::bigint[])"
+    params = {"codigos": codigos, "prep_ids": prep_ids}
+
     # BORRAR E INSERTAR EN UNA SOLA TRANSACCION, igual que en digip.py. En dos
     # transacciones separadas hay un instante en el que la ventana no existe, y
     # el tablero de Logistica lee esta tabla en vivo.
     try:
         with engine.begin() as con:
+            # Las correcciones manuales se leen ANTES de borrar y se vuelven a
+            # poner. `df` no las trae (salen de la planilla, no de Digip), asi
+            # que sin esto una correccion hecha sobre un pedido de la ultima
+            # semana se perdia en la corrida siguiente.
+            manuales = con.exec_driver_sql(
+                "SELECT preparacion_id, max(kg_preparacion_manual), max(volumen_preparacion_manual) "
+                f"FROM bronze.digip_preparaciones WHERE ({filtro}) "
+                "AND (kg_preparacion_manual IS NOT NULL OR volumen_preparacion_manual IS NOT NULL) "
+                "GROUP BY preparacion_id",
+                params,
+            ).fetchall()
+            df = con_manuales(df, manuales)
+            if manuales:
+                print(f"  Correcciones manuales conservadas: {len(manuales)} preparaciones")
+
             resultado = con.exec_driver_sql(
-                "DELETE FROM bronze.digip_preparaciones WHERE pedido_codigo = ANY(%(codigos)s)",
-                {"codigos": codigos},
+                f"DELETE FROM bronze.digip_preparaciones WHERE {filtro}", params
             )
             print(f"  Filas borradas dentro de la ventana (se van a reemplazar): {resultado.rowcount}")
             df.to_sql("digip_preparaciones", con, schema="bronze", if_exists="append", index=False)
@@ -153,6 +201,20 @@ def extraer_preparaciones():
 
     df.to_sql("digip_preparaciones", engine, schema="bronze", if_exists="append", index=False)
     print("\nGuardado (ventana) en bronze.digip_preparaciones")
+
+
+def con_manuales(df, manuales):
+    """`df` con las correcciones manuales puestas por preparacion_id.
+
+    La planilla las guarda por preparacion (PATCH ?preparacion_id=eq.X), asi
+    que van a todas las filas de esa preparacion, sea cual sea el pedido.
+    """
+    df = df.copy()
+    por_prep = {int(fila[0]): fila[1:] for fila in manuales}
+    vacio = (None,) * len(COLUMNAS_MANUALES)
+    for i, col in enumerate(COLUMNAS_MANUALES):
+        df[col] = [por_prep.get(int(p), vacio)[i] for p in df["preparacion_id"]]
+    return df
 
 
 if __name__ == "__main__":
