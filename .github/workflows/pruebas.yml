@@ -140,6 +140,12 @@ jobs:
       - name: Probar el guardado de las preparaciones de Digip
         run: python probar_preparaciones_consolidadas.py
 
+      # El paso nuevo de stock al cierre fallo 44 corridas seguidas sin crear
+      # nunca su tabla: el DELETE sobre la tabla inexistente dejaba la
+      # transaccion abortada y el to_sql que la iba a crear corria en ella.
+      - name: Probar la foto del stock al cierre de mes
+        run: python probar_stock_cierre.py
+
       # La ventana era una constante, y eso falla justo cuando el pipeline no
       # corre: un paso caido ocho dias vuelve pidiendo siete, y el dia 1 no
       # entra nunca mas. Lo que se fija es que SOLO se estire, nunca se achique.
