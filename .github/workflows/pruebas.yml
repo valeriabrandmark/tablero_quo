@@ -132,6 +132,14 @@ jobs:
       - name: Probar el guardado por ventana movil
         run: python probar_guardado_ventana.py
 
+      # Las preparaciones que juntan pedidos de adentro y de afuera de la
+      # ventana sumaban una fila por corrida: 477 filas de mas al 29/10, y el
+      # neto de SALVATIERRA VIVIANA multiplicado por 64 en la planilla de
+      # logistica. Tambien se fija que las correcciones de KG/volumen cargadas
+      # desde la planilla sobrevivan al reemplazo de la ventana.
+      - name: Probar el guardado de las preparaciones de Digip
+        run: python probar_preparaciones_consolidadas.py
+
       # La ventana era una constante, y eso falla justo cuando el pipeline no
       # corre: un paso caido ocho dias vuelve pidiendo siete, y el dia 1 no
       # entra nunca mas. Lo que se fija es que SOLO se estire, nunca se achique.
