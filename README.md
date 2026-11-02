@@ -81,6 +81,15 @@ detrás de un dato que nadie mira en el momento.
 Corre solo, todos los días a las 03:40 ART, en `.github/workflows/antiguedad.yml`.
 Escribe `bronze.ml_stock_antiguedad`.
 
+**Trabaja con presupuesto de tiempo y guarda de a tandas.** Desde fines de
+septiembre de 2026 el endpoint de operaciones contesta 429 casi siempre (~13 s
+por inventario: recorrer todo llevaría 6-7 horas). Como el script guardaba todo
+al final y el workflow corta a los 90 minutos, entre el 23/09 y el 02/11 no se
+guardó ninguna foto. Ahora cada corrida trabaja `ANTIGUEDAD_MINUTOS` (75),
+guarda cada 50 inventarios y empieza por los que tienen la foto más vieja; la
+vuelta entera lleva varios días. Por eso el tablero lee **la última foto de
+cada inventario** (hasta 15 días), no la del último día.
+
 Antes de gastar los 35 minutos corre `probar_fifo_antiguedad.py` — 24 casos que
 no tocan red ni base. Si la cuenta FIFO o las ventanas de fechas están rotas,
 mejor enterarse en el primer segundo que después de media hora de llamadas y con

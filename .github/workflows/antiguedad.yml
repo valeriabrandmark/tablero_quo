@@ -37,14 +37,20 @@ concurrency:
 jobs:
   correr:
     runs-on: ubuntu-latest
-    # Holgado a proposito: 35 min es la medicion de hoy con ~1.845 inventarios,
-    # pero eso crece con el catalogo y los 429 son impredecibles. 90 deja lugar
-    # para que un dia malo termine igual, en vez de cortarse a mitad de camino y
-    # guardar una foto incompleta.
+    # 90 minutos, y el script se frena solo a los ANTIGUEDAD_MINUTOS (75): con
+    # los 429 de hoy recorrer todo lleva 6-7 horas, asi que cada corrida avanza
+    # lo que puede, guardando de a tandas, y la siguiente sigue por los
+    # inventarios mas desactualizados. Ver PRESUPUESTO_MIN en ml_antiguedad.py.
+    #
+    # Antes el script guardaba todo AL FINAL: desde el 23/09/2026 todas las
+    # corridas se cortaban a los 90 minutos y no quedaba nada guardado.
     timeout-minutes: 90
 
     env:
       TZ: America/Argentina/Buenos_Aires
+      # Minutos de trabajo por corrida; los 15 que sobran hasta el timeout son
+      # para guardar la ultima tanda y cerrar.
+      ANTIGUEDAD_MINUTOS: '75'
 
       DB_HOST: ${{ secrets.DB_HOST }}
       DB_PORT: ${{ secrets.DB_PORT }}
