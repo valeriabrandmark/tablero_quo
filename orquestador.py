@@ -41,6 +41,7 @@ Uso:
 """
 
 import argparse
+import atexit
 import datetime
 import json
 import estado
@@ -527,6 +528,59 @@ def guardar_estado(nuevo):
     estado.guardar("pasos", nuevo)
 
 
+# La clave donde queda anotado que una corrida TERMINO. Tiene que decir lo mismo
+# que `CLAVE_CORRIDA` en el tablero (mi-tablero-app, lib/actualizar.ts).
+CLAVE_CORRIDA = "corrida"
+
+
+def anotar_fin_de_corrida(inicio, corrieron, fallados, salteados, sin_tiempo):
+    """Deja constancia de que la corrida termino, pase lo que pase.
+
+    PARA QUE SIRVE
+
+    El boton "Actualizar ahora" del tablero esperaba a que cambiara
+    `ops.estado['pasos']`, que se escribe AL TERMINAR CADA PASO. O sea que
+    decia "Listo: datos nuevos" con el PRIMERO --a los ~30 segundos de una
+    corrida de tres minutos-- y quien lo apreto recargaba creyendo que estaba
+    todo cuando faltaba casi todo. Con esta marca el tablero puede distinguir
+    "llego algo" de "termino".
+
+    POR QUE POR `atexit` Y NO AL FINAL DE main()
+
+    main() tiene CUATRO salidas: dos `sys.exit(1)`, un `return` y el final
+    feliz. La que mas importa es justamente la del paso critico que falla: si
+    la marca no se escribiera ahi, el boton se quedaria girando los 25 minutos
+    de su paciencia cada vez que el pipeline se corta, que es cuando uno mas
+    quiere enterarse. Con `atexit` no hay forma de olvidarse de una salida, y
+    de paso cubre una excepcion que nadie previo.
+
+    Las listas llegan por referencia y se leen al final, asi que la marca
+    cuenta lo que termino pasando y no lo que se sabia al registrarla.
+
+    LO QUE NO CUBRE: que al runner lo maten --el tope de GitHub Actions, un
+    SIGKILL--. Ahi no corre ningun atexit y el boton cae en su propio timeout,
+    que es exactamente lo que hacia antes.
+
+    NO PUEDE VOLTEAR LA CORRIDA. Si la base no contesta se avisa y se sigue:
+    una marca que no se pudo escribir no tiene por que pintar de rojo un
+    pipeline que anduvo bien.
+    """
+    try:
+        estado.guardar(CLAVE_CORRIDA, {
+            "fin": datetime.datetime.now().isoformat(timespec="seconds"),
+            "duracion_min": round((time.time() - inicio) / 60, 1),
+            # `ok` es "no fallo ningun paso". Un salteado por frecuencia no es
+            # un fallo: es el pipeline funcionando como se lo penso.
+            "ok": not fallados,
+            "corrieron": list(corrieron),
+            "fallaron": list(fallados),
+            "salteados": list(salteados),
+            "sin_tiempo": list(sin_tiempo),
+        })
+    except Exception as e:
+        log(f"AVISO: no se pudo anotar el fin de la corrida: {str(e)[:200]}")
+
+
 def toca_correr(paso, estado, corrieron=()):
     """(corre_si_o_no, motivo_para_el_log)
 
@@ -744,6 +798,13 @@ def main():
     # atado a otro corre solo si ese otro corrio -- y corrio bien, porque
     # pedirle los envios de ventas que no se llegaron a traer no tiene sentido.
     corrieron = []
+
+    # SE REGISTRA ACA, no al final: a partir de esta linea la corrida ya
+    # empezo, y salga por donde salga queda la marca. Ver `anotar_fin_de_corrida`.
+    # Las listas van por referencia: lo que se anota es como terminaron, no
+    # como estaban en este momento.
+    atexit.register(anotar_fin_de_corrida, inicio, corrieron, fallados,
+                    salteados, sin_tiempo)
 
     # Con --solo el pedido es explicito y de un paso solo: no se le pone tope a
     # la corrida. Es el modo en que uno se sienta a mirar como termina, no el

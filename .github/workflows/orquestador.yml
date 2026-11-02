@@ -186,6 +186,11 @@ jobs:
       - name: Probar la lectura de la reposicion de Full
         run: python probar_reposicion.py
 
+      # La marca de fin de corrida: que anote lo que termino pasando y no lo
+      # que se sabia al registrarla, y que una base caida no voltee la corrida.
+      - name: Probar la marca de fin de corrida
+        run: python probar_marca_corrida.py
+
       # Cambia el token de GitHub por una credencial de Google de unos minutos,
       # y la deja donde google.auth la encuentra sola. NO CORRE si no estan los
       # secretos: asi el pipeline entero sigue andando igual mientras el camino
