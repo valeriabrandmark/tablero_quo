@@ -1,0 +1,129 @@
+name: Ventas ML rapido (Cyber)
+
+# ============================================================================
+#  SOLO LAS VENTAS DE MERCADO LIBRE, CADA 10 MINUTOS. ES PROVISIONAL.
+#
+#  Existe por el Cyber: con el orquestador corriendo cada hora, un error de
+#  precio o una publicacion mal cargada se ven recien a los sesenta minutos, y
+#  en tres dias de evento eso es mucha plata. Esto trae las ventas de ML y
+#  reconstruye gold, que es lo unico que hace falta para que el tablero las
+#  muestre.
+#
+#  SE APAGA SOLO EL 11/11/2026. Ver el paso "Sigue vigente". Un cron de diez
+#  minutos que nadie se acuerda de sacar sigue pegandole a la API de Mercado
+#  Libre para siempre, y el dia que moleste va a ser el dia que nadie se
+#  acuerde de que esto existe. Si el evento se estira, se cambia esa fecha.
+#
+#  POR QUE NO ALCANZA CON BAJARLE LA FRECUENCIA AL ORQUESTADOR: la corrida
+#  entera son ~8 minutos cuando le tocan los pasos del dia, y pide a SIGMA,
+#  Tienda Nube, Digip y cinco APIs mas que no cambian cada diez minutos.
+#  Correrla seis veces por hora seria pagar todo eso para mirar una sola cosa.
+# ============================================================================
+
+on:
+  # Minimo util: GitHub admite cada 5 minutos pero ATRASA las corridas
+  # programadas, seguido y bastante -- el 01/11 la de las 23:20 salio 23:40.
+  # O sea que estos 10 minutos en la practica son 10 a 20. Poner 5 no mejora
+  # eso: solo agrega corridas que se encolan unas atras de otras.
+  schedule:
+    - cron: '*/10 * * * *'
+
+  # Para pedirla al toque sin esperar al cron.
+  workflow_dispatch:
+
+# ============================================================================
+#  LA PARTE QUE EVITA DUPLICAR: EL MISMO GRUPO QUE EL ORQUESTADOR
+# ============================================================================
+#
+#  Este workflow escribe las MISMAS tablas que la corrida de las :20
+#  --bronze.ml_ventas y gold.fact_ventas-- y le pega a la MISMA API con el
+#  mismo token. Sin compartir grupo, los dos pueden estar escribiendo a la vez.
+#
+#  No es teorico: asi se duplicaron 2.548 ordenes el 21/08/2026, cuando el
+#  relleno insertaba mientras la corrida de las :20 borraba su ventana. Por eso
+#  `rellenar-ventas-ml.yml` tambien esta en este grupo.
+#
+#  `cancel-in-progress: false` para no matar una corrida a la mitad: GitHub
+#  encola. Y la cola no crece -- deja UNA pendiente, y si llega otra descarta a
+#  la que estaba esperando. Con este workflow durando ~1 minuto, lo peor que
+#  pasa es que una corrida del orquestador arranque un minuto mas tarde.
+concurrency:
+  group: orquestador
+  cancel-in-progress: false
+
+jobs:
+  traer:
+    runs-on: ubuntu-latest
+    # Las dos cosas juntas tardan ~50 s (medido el 02/11: ventas 39 s, modelo
+    # 9 s). Los 15 son para cortar un cuelgue, no un dia lento.
+    timeout-minutes: 15
+
+    env:
+      # EL RUNNER CORRE EN UTC y medio codigo arma ventanas con `date.today()`.
+      # Sin esto, entre las 21 y la medianoche de aca el runner ya esta en el
+      # dia siguiente y las ventanas se corren un dia entero. Tambien lo usa el
+      # `date` del paso de abajo, asi que la fecha limite es la de Argentina.
+      TZ: America/Argentina/Buenos_Aires
+
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASS: ${{ secrets.DB_PASS }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+
+      ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+      ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+      ML_REDIRECT_URI: ${{ secrets.ML_REDIRECT_URI }}
+      ML_USER_ID: ${{ secrets.ML_USER_ID }}
+
+    steps:
+      # LA FECHA DE CORTE VA PRIMERO Y SALE EN VERDE.
+      #
+      # Termina bien a proposito: pasado el Cyber esto no es una falla, es un
+      # workflow que cumplio su funcion. Si saliera en rojo, mandaria un mail
+      # cada diez minutos y alguien lo apagaria de apuro -- o peor, se
+      # acostumbraria a ver rojo en Actions.
+      - name: Sigue vigente?
+        id: vigencia
+        run: |
+          HASTA=2026-11-11
+          HOY=$(date +%F)
+          if [[ "$HOY" > "$HASTA" ]]; then
+            echo "Hoy es $HOY y este workflow corria hasta el $HASTA inclusive."
+            echo "Era provisional para el Cyber: no hace nada y termina bien."
+            echo "Para reactivarlo, cambiar HASTA en .github/workflows/ventas-ml-rapido.yml"
+            echo "correr=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "Vigente: hoy $HOY, corre hasta el $HASTA inclusive."
+            echo "correr=si" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.vigencia.outputs.correr == 'si'
+
+      - uses: actions/setup-python@v5
+        if: steps.vigencia.outputs.correr == 'si'
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Instalar dependencias
+        if: steps.vigencia.outputs.correr == 'si'
+        run: pip install -r requirements.txt
+
+      - name: Traer las ventas de Mercado Libre
+        if: steps.vigencia.outputs.correr == 'si'
+        run: python mercadolibre.py --ventas
+
+      # SIN ESTE PASO LAS VENTAS ENTRAN A bronze Y LA PANTALLA SIGUE IGUAL: el
+      # tablero lee gold.fact_ventas, que modelo.py arma.
+      #
+      # DOS DIAS Y NO LOS SIETE DE SIEMPRE. Para mirar el Cyber en vivo alcanza
+      # con hoy y ayer, y es lo que hace que esto tarde segundos en vez de
+      # minutos. No se pierde nada: la corrida de la hora sigue reconstruyendo
+      # los siete, `ventana.cutoff` estira la ventana sola si modelo.py estuvo
+      # sin correr, y un costo corregido hacia atras manda sobre lo que se pida
+      # aca (ver `vigencia_pendiente` en modelo.py).
+      - name: Reconstruir gold de los ultimos dos dias
+        if: steps.vigencia.outputs.correr == 'si'
+        run: python modelo.py --dias 2
