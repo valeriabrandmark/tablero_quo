@@ -78,7 +78,7 @@ import argparse
 import itertools
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
@@ -112,6 +112,25 @@ DIAS_POR_LLAMADA = 60
 # hilos, 21 llamadas (3 inventarios) ya dieron 13 reintentos por 429. Subir los
 # hilos no acelera nada cuando la API frena: sube la espera.
 HILOS = 4
+
+# PRESUPUESTO DE TIEMPO POR CORRIDA, en minutos.
+#
+# Desde fines de septiembre el endpoint de operaciones contesta 429 casi a cada
+# llamada (01/11/2026: 1.569 reintentos y ~13 s por inventario). Recorrer los
+# ~1.760 inventarios llevaria 6-7 horas, el workflow cortaba a los 90 minutos y,
+# como se guardaba todo al final, NO QUEDABA NADA: la ultima foto era del 23/09.
+#
+# Ahora cada corrida trabaja este tiempo, GUARDA DE A TANDAS mientras avanza y
+# empieza por los inventarios con la foto mas vieja (o sin foto). Lo que no
+# llega hoy lo toma la corrida de mañana. El tablero lee la ultima foto de CADA
+# inventario, no la del ultimo dia.
+#
+# Por debajo del timeout del workflow (90) para que la ultima tanda se guarde.
+PRESUPUESTO_MIN = float(os.getenv("ANTIGUEDAD_MINUTOS", "75"))
+
+# Cada cuantos inventarios terminados se guarda. Chico a proposito: un corte
+# a destiempo pierde a lo sumo esto.
+TANDA = 50
 
 # Los cortes del cargo por almacenamiento de Mercado Libre.
 TRAMOS = [(30, "u_0_30"), (60, "u_31_60"), (90, "u_61_90"), (120, "u_91_120")]
@@ -184,8 +203,16 @@ def inventarios_con_stock(limite=None):
         from bronze.ml_stock_full f
         left join mapa m on m.inventory_id = f.inventory_id
         left join bronze.sigma_articulos art on trim(art.id) = m.sku
+        left join (
+          select inventory_id, max(fecha) as ultima
+          from bronze.ml_stock_antiguedad
+          group by inventory_id
+        ) u on u.inventory_id = f.inventory_id
         where f.available_quantity > 0
-        order by f.available_quantity desc
+        -- PRIMERO LOS MAS DESACTUALIZADOS (o sin foto): la corrida no llega a
+        -- todos, y asi cada dia avanza sobre lo que mas hace falta. A igual
+        -- fecha, los de mas stock, que son los que mas pesan.
+        order by u.ultima asc nulls first, f.available_quantity desc
     """
     if limite:
         sql += f" limit {int(limite)}"
@@ -373,19 +400,32 @@ def antiguedad(ops, stock_actual, hoy=None):
 
 
 def guardar(df):
+    """Guarda una TANDA en la foto de hoy.
+
+    Borra antes las filas de HOY de esos mismos inventarios: si el paso corre
+    dos veces en el dia, la segunda pisa a la primera en vez de duplicar, sin
+    tocar los inventarios que esta tanda no trae.
+    """
     engine = _engine()
     with engine.begin() as con:
         con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
         con.exec_driver_sql(DDL)
-        # Una foto por dia: si el paso corre dos veces, la segunda pisa la
-        # primera en vez de duplicar.
         con.exec_driver_sql(
-            'DELETE FROM bronze.ml_stock_antiguedad WHERE fecha = %(f)s',
-            {"f": date.today()},
+            "DELETE FROM bronze.ml_stock_antiguedad "
+            "WHERE fecha = %(f)s AND inventory_id = ANY(%(ids)s)",
+            {"f": date.today(), "ids": list(df["inventory_id"])},
         )
     df.to_sql("ml_stock_antiguedad", engine, schema="bronze",
               if_exists="append", index=False)
-    print(f"  Guardado: bronze.ml_stock_antiguedad ({len(df)} filas)")
+
+
+def _a_tabla(buenas):
+    """Las filas calculadas, listas para guardar."""
+    # `articulo` no se guarda: ya vive en bronze.sigma_articulos y copiarlo aca
+    # seria tener el nombre en dos lados, con uno de los dos siempre viejo.
+    df = pd.DataFrame(buenas).drop(columns=["operaciones", "articulo"], errors="ignore")
+    df["fecha"] = date.today()
+    return df
 
 
 def main():
@@ -402,8 +442,12 @@ def main():
     print(f"  {len(df_inv)} inventarios con stock (de a {HILOS})")
 
     hechos = itertools.count(1)
+    limite = arranque + PRESUPUESTO_MIN * 60
 
     def procesar(fila):
+        # Pasado el presupuesto no se empieza nada nuevo: queda para mañana.
+        if time.monotonic() > limite:
+            return None
         inv_id = fila.inventory_id
         try:
             ops = operaciones(inv_id, token)
@@ -425,20 +469,47 @@ def main():
             print(f"    Procesados: {n} de {len(df_inv)}")
         return r
 
+    buenas, fallados, pendiente = [], [], []
+    guardadas = incompletos = 0
+
+    def vaciar():
+        nonlocal guardadas, incompletos, pendiente
+        if not pendiente or args.probar:
+            return
+        df = _a_tabla(pendiente)
+        guardar(df)
+        guardadas += len(df)
+        incompletos += int(df["incompleto"].sum())
+        pendiente = []
+
+    # GUARDA DE A TANDAS mientras avanza: si el workflow corta por tiempo, lo
+    # calculado hasta ahi ya esta en la base. Las escrituras van en este hilo,
+    # no en los de la API.
     with ThreadPoolExecutor(max_workers=HILOS) as pool:
-        filas = list(pool.map(procesar, df_inv.itertuples(index=False)))
+        futuros = [pool.submit(procesar, f) for f in df_inv.itertuples(index=False)]
+        for fut in as_completed(futuros):
+            r = fut.result()
+            if r is None:
+                continue
+            if "error" in r:
+                fallados.append(r)
+                continue
+            buenas.append(r)
+            pendiente.append(dict(r))
+            if len(pendiente) >= TANDA:
+                vaciar()
+    vaciar()
 
-    # El tiempo por inventario es EL dato para decidir si esto entra en la
-    # corrida diaria: multiplicado por los ~1.800 con stock da el techo que hay
-    # que ponerle al paso. Medirlo con --probar sale mucho mas barato que
-    # descubrirlo cuando corta por tiempo en produccion.
+    # El tiempo por inventario es EL dato para saber cuantos dias tarda en dar
+    # la vuelta entera.
     tardo = time.monotonic() - arranque
-    por_inv = tardo / max(1, len(df_inv))
+    hechos_n = len(buenas) + len(fallados)
+    por_inv = tardo / max(1, hechos_n)
     print(f"  Tardo {tardo/60:.1f} min · {por_inv:.1f} s por inventario")
-    print(f"  Proyeccion para 1.845 inventarios: {por_inv * 1845 / 60:.0f} min")
+    print(f"  Calculados {hechos_n} de {len(df_inv)}"
+          + (f" · {len(df_inv) - hechos_n} quedan para la proxima corrida"
+             if hechos_n < len(df_inv) else ""))
 
-    fallados = [f for f in filas if "error" in f]
-    buenas = [f for f in filas if "error" not in f]
     if fallados:
         print(f"  ATENCION: {len(fallados)} inventarios fallaron")
         for f in fallados[:5]:
@@ -456,17 +527,11 @@ def main():
         print("\n  (modo prueba: no se guardo nada)")
         return
 
-    if not buenas:
+    if not guardadas:
         print("  Sin datos para guardar.")
         return
-
-    # `articulo` no se guarda: ya vive en bronze.sigma_articulos y copiarlo aca
-    # seria tener el nombre en dos lados, con uno de los dos siempre viejo.
-    df = pd.DataFrame(buenas).drop(columns=["operaciones", "articulo"], errors="ignore")
-    df["fecha"] = date.today()
-    incompletos = int(df["incompleto"].sum())
-    print(f"  {len(df)} inventarios calculados · {incompletos} con historia incompleta")
-    guardar(df)
+    print(f"  Guardado: bronze.ml_stock_antiguedad ({guardadas} filas, "
+          f"{incompletos} con historia incompleta)")
 
 
 if __name__ == "__main__":
