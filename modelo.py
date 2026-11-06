@@ -6,7 +6,7 @@ from datetime import date, timedelta
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from conexion import crear_engine
-from calendario import mes_comercial
+from calendario import correr_mes, mes_comercial
 import estado
 import errores_bd
 import relleno
@@ -388,6 +388,64 @@ def costo_vigente(tramos, fecha):
     return costo
 
 
+def costo_del_mes(costo_idx, meses_con_lista, sku, mes, fecha):
+    """El costo de ese SKU ese dia, heredando el cierre del mes anterior.
+
+    Devuelve `(costo, heredado_de)`. `heredado_de` es None cuando el costo salio
+    del mes que le tocaba, y el mes de donde se heredo cuando no.
+
+    ---------------------------------------------------------------------------
+    HAY DOS FORMAS DE NO ENCONTRAR UN COSTO Y NO SE PARECEN EN NADA
+
+    1. EL MES TIENE LISTA Y ESTE SKU NO ESTA. Cada Excel mensual es el catalogo
+       COMPLETO, asi que eso quiere decir que ese mes el articulo no se compraba.
+       Sin costo, margen en null: es lo que protegia el comentario original de
+       `costo_de` y sigue igual. Heredar aca seria resucitar el precio de un
+       articulo que dejo de estar, sin que nadie se entere.
+
+    2. EL MES NO TIENE NINGUNA LISTA TODAVIA. Eso no dice nada del articulo:
+       dice que la lista del mes nuevo no se cargo. Pasaba cada dia 6 --el
+       primero del mes comercial-- y dejaba el dia entero sin costo. Y sin
+       costo el tablero no muestra un hueco: `COSTO` es
+       `coalesce(costo_unitario, 0)`, asi que la rentabilidad salia ~60% en vez
+       de ~13%. El 06/11/2026 fue exactamente eso: 135 lineas sin costo y un
+       margen que parecia una fiesta.
+
+       El dia despues del cierre tiene que seguir valuado al cierre. Es lo
+       correcto de todas formas: el costo no cambia porque dimos vuelta la hoja
+       del calendario, cambia cuando el proveedor manda lista nueva.
+
+    ---------------------------------------------------------------------------
+    LA HERENCIA ES DE UN MES Y NO MAS
+
+    Si el mes anterior TAMPOCO tiene lista, se corta y vuelve a devolver None.
+    Un mes de gracia cubre el caso real --la lista que todavia no se subio-- y
+    pone un techo al de arriba: si nadie carga una lista por dos meses, los
+    costos se caen y eso grita. Heredar sin limite seria valuar diciembre con
+    los costos de septiembre y no enterarse nunca.
+    """
+    tramos = costo_idx.get((str(sku), mes))
+    if tramos is not None:
+        return costo_vigente(tramos, fecha), None
+
+    # Caso 1: la lista del mes existe, el articulo no esta en ella.
+    if mes in meses_con_lista:
+        return None, None
+
+    # Caso 2: el mes no tiene lista. Se hereda el cierre del mes anterior.
+    anterior = correr_mes(mes, -1)
+    if anterior not in meses_con_lista:
+        return None, None
+
+    tramos_viejos = costo_idx.get((str(sku), anterior))
+    if not tramos_viejos:
+        return None, None
+
+    # El ULTIMO tramo del mes anterior, que es el que regia al cerrar. La lista
+    # viene ordenada por vigencia desde el SQL.
+    return tramos_viejos[-1][1], anterior
+
+
 def construir_fact_ventas():
     print(f"=== Construyendo fact_ventas (ventana movil: {CUTOFF} en adelante) ===")
 
@@ -509,16 +567,30 @@ def construir_fact_ventas():
         for s, l in zip(env["shipping_id"], env["logistica"])
     }
 
+    # Los meses que SI tienen lista cargada. Es lo que deja distinguir "este
+    # articulo no estaba en la lista del mes" de "la lista del mes no se cargo",
+    # que son dos cosas distintas y se resuelven distinto. Ver costo_del_mes.
+    meses_con_lista = set(cost["mes_comercial"].dropna().unique())
+
+    # (mes sin lista, mes del que heredo) -> cuantas lineas. Se imprime al final:
+    # heredar es correcto pero no es gratis, y tiene que verse en el log de la
+    # corrida que el numero que se publico sale de una lista vieja.
+    heredadas = {}
+
     def costo_de(sku, fecha):
         """El costo que regia ESE DIA, dentro del mes comercial de esa fecha.
 
-        NO SE SALE DEL MES a proposito. Un articulo que dejo de estar en el
-        catalogo sigue sin costo --y su margen en null, como siempre-- en vez de
-        heredar el precio de hace tres meses sin que nadie se entere. Cada Excel
-        mensual es el catalogo COMPLETO, asi que "no esta en el mes" quiere
-        decir que ese mes no se compraba.
+        Si el mes todavia no tiene lista cargada, hereda el cierre del mes
+        anterior; si la lista existe y el articulo no esta, sigue sin costo. Los
+        dos casos --y por que no son el mismo-- estan en `costo_del_mes`.
         """
-        return costo_vigente(costo_idx.get((str(sku), mes_comercial(fecha))), fecha)
+        mes = mes_comercial(fecha)
+        costo, heredado_de = costo_del_mes(
+            costo_idx, meses_con_lista, sku, mes, fecha)
+        if heredado_de is not None:
+            clave = (mes, heredado_de)
+            heredadas[clave] = heredadas.get(clave, 0) + 1
+        return costo
 
     def iva_de(sku):
         v = iva_por_sku.get(str(sku))
@@ -1145,6 +1217,14 @@ def construir_fact_ventas():
                 fila["margen_total"] -= parte
             repartidos += 1
     print(f"  Envio de ML repartido en {repartidos} lineas de {len(lineas_por_envio)} paquetes")
+
+    # SI SE HEREDO UN COSTO, QUE SE VEA. El numero publicado es correcto --mejor
+    # el del cierre que ninguno-- pero sale de una lista que no es la del mes, y
+    # eso es una cuenta pendiente, no un estado normal.
+    for (mes, desde), cuantas in sorted(heredadas.items()):
+        print(f"  OJO: el mes comercial {mes} todavia no tiene lista de costos.")
+        print(f"       {cuantas} lineas quedaron valuadas al cierre de {desde}.")
+        print(f"       Cargar la lista de {mes} y volver a correr este paso.")
 
 
     # El texto sale de CUTOFF y no de WINDOW_DAYS, que es una constante y no
