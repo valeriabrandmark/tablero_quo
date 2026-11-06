@@ -448,9 +448,31 @@ def construir_fact_ventas():
     # entre TODAS las lineas de TODAS las ordenes del envio. Con que criterio se
     # reparte lo decide repartir_envio(): ya no es siempre proporcional al monto.
     # Para un envio de una sola linea da lo mismo que antes -- se lo lleva entero.
-    env = pd.read_sql("""
+    #
+    # LA LOGISTICA SE PREGUNTA SOLO SI LA COLUMNA EXISTE, y no es paranoia: la
+    # agrega ml_envios.py, que corre ANTES en el orquestador pero NO en el
+    # workflow rapido del Cyber --ese hace mercadolibre.py y modelo.py y nada
+    # mas--. Si ese workflow es el primero en correr despues de un deploy, la
+    # columna todavia no esta y un `SELECT e.logistica` tumbaria la corrida
+    # entera por un dato de color. Asi, hasta que ml_envios.py pase una vez, la
+    # logistica queda en null y el resto del modelo no se entera.
+    #
+    # Deliberadamente NO se crea la columna desde aca: bronze.ml_envios la
+    # escribe ml_envios.py y el dueno del DDL de una tabla tiene que ser uno.
+    with engine.connect() as con:
+        hay_logistica = con.exec_driver_sql("""
+            SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                            WHERE table_schema = 'bronze'
+                              AND table_name = 'ml_envios'
+                              AND column_name = 'logistica')
+        """).scalar()
+
+    col_logistica = "e.logistica" if hay_logistica else "NULL::text AS logistica"
+
+    env = pd.read_sql(f"""
         SELECT e.shipping_id,
                e.costo_envio,
+               {col_logistica},
                v.id::bigint::text AS order_id
         FROM bronze.ml_envios e
         JOIN bronze.ml_ventas v
@@ -471,6 +493,21 @@ def construir_fact_ventas():
     # reparte (ver el bloque de Mercado Libre mas abajo).
     envio_de_orden = dict(zip(env["order_id"], env["shipping_id"]))
     costo_de_envio = dict(zip(env["shipping_id"], env["costo_envio"]))
+
+    # Como salio el paquete: Full, Flex, Colecta o un punto de despacho.
+    #
+    # VA POR ENVIO Y NO POR ORDEN porque es una propiedad del paquete: las
+    # varias ordenes de un carrito salieron todas juntas, del mismo lugar y de
+    # la misma manera. Es el mismo motivo por el que el costo tambien se resuelve
+    # por envio.
+    #
+    # El valor es el CRUDO de ML (`fulfillment`, `self_service`, ...). Traducirlo
+    # a "Full" o "Flex" es cosa del tablero; ver logistica_de_envio en
+    # ml_envios.py.
+    logistica_de = {
+        s: (None if l is None or pd.isna(l) else str(l))
+        for s, l in zip(env["shipping_id"], env["logistica"])
+    }
 
     def costo_de(sku, fecha):
         """El costo que regia ESE DIA, dentro del mes comercial de esa fecha.
@@ -1073,6 +1110,9 @@ def construir_fact_ventas():
                     "proveedor": proveedor_de(sku),
                     "marca": marca_de(sku),
                     "cliente": r["buyer.nickname"],
+                    # Null si el envio todavia no tiene el dato bajado, o si la
+                    # orden no tiene envio (retiro en persona, por ejemplo).
+                    "logistica": logistica_de.get(ship) if ship is not None else None,
                 })
 
         offset += LOTE
@@ -1149,7 +1189,8 @@ def construir_fact_ventas():
                 '  ADD COLUMN IF NOT EXISTS cupon text, '
                 '  ADD COLUMN IF NOT EXISTS pasarela text, '
                 '  ADD COLUMN IF NOT EXISTS metodo_pago text, '
-                '  ADD COLUMN IF NOT EXISTS costo_transaccion double precision'
+                '  ADD COLUMN IF NOT EXISTS costo_transaccion double precision, '
+                '  ADD COLUMN IF NOT EXISTS logistica text'
             )
 
     # EL BORRADO Y LA INSERCION VAN EN LA MISMA TRANSACCION.

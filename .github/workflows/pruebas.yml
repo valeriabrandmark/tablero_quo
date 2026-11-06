@@ -152,6 +152,13 @@ jobs:
       - name: Probar la ventana que se estira sola
         run: python probar_ventana.py
 
+      # ML manda `logistic_type` en dos lugares distintos segun el envio --en la
+      # raiz y adentro de `logistic`-- y leer uno solo deja la mitad de las
+      # ventas sin logistica. El fallo es silencioso: el grafico no se rompe,
+      # cuenta esas ventas como "sin dato" y da una foto equivocada.
+      - name: Probar el lector de logistica de los envios
+        run: python probar_logistica_envio.py
+
       # Que todos los scripts al menos compilen. No prueba que anden, pero un
       # error de sintaxis en un archivo que nadie importa en las pruebas
       # tambien tumba la corrida, y eso se ve gratis.

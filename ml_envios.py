@@ -6,7 +6,7 @@ import requests
 import pandas as pd
 from datetime import date, timedelta
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from mercadolibre import token_ml
 from conexion import crear_engine
 import relleno
@@ -28,9 +28,117 @@ MI_USER_ID = int(os.getenv("ML_USER_ID"))
 FECHA_CORTE = date(2026, 5, 6)
 
 
+# ---------------------------------------------------------------------------
+#  COMO SE DESPACHO CADA VENTA
+# ---------------------------------------------------------------------------
+#
+# Full, Flex, Colecta o un punto de despacho. El dato NO VIENE EN LA ORDEN:
+# `/orders/search` trae `shipping.id` y nada mas. Vive en el envio, y hay que
+# pedirlo aparte.
+#
+# POR QUE NO ALCANZA CON LA PUBLICACION. `bronze.ml_publicaciones` ya guarda
+# `shipping.logistic_type` y es tentador usar eso, que sale gratis. Pero es el
+# modo que la publicacion tiene HOY, no como salio cada orden -- y el caso que
+# importa es justo el que ahi no se ve: una publicacion de Full que se queda sin
+# stock y se despacha desde el deposito sigue figurando `fulfillment`. Medido el
+# 06/11/2026 sobre dos semanas, la publicacion decia Full en 5.182 de 5.198
+# ordenes, asi que un grafico armado con eso dice "99,7% Full" siempre.
+#
+# POR QUE SON DOS LLAMADAS POR ENVIO. `/shipments/{id}/costs` --la que ya se
+# hacia-- trae la plata y nada de logistica; `/shipments/{id}` trae la logistica
+# y no el costo del vendedor. No hay un endpoint con las dos cosas. Para los
+# envios nuevos son dos llamadas en vez de una, y son los del dia: el historico
+# se rellena una sola vez con --solo-logistica.
+URL_COSTOS = "https://api.mercadolibre.com/shipments/{}/costs"
+URL_ENVIO = "https://api.mercadolibre.com/shipments/{}"
+
+# Columnas que se agregaron despues de que la tabla ya existia.
+#
+# `to_sql(if_exists="append")` NO agrega columnas: inserta contra las que hay.
+# Sin este ALTER, la primera corrida tras el deploy muere con
+# `column "logistica" of relation "ml_envios" does not exist`, que es lo mismo
+# que paso con `envio_costo_tienda` en bronze.
+ALTER_LOGISTICA = (
+    "ALTER TABLE bronze.ml_envios "
+    "  ADD COLUMN IF NOT EXISTS logistica text, "
+    "  ADD COLUMN IF NOT EXISTS modo_envio text"
+)
+
+
 def to_date(valor):
     ts = pd.to_datetime(valor, errors="coerce", utc=True)
     return None if pd.isna(ts) else ts.date()
+
+
+def texto_o_nada(valor):
+    """El valor como texto, o None si vino vacio."""
+    if valor is None:
+        return None
+    s = str(valor).strip()
+    return s or None
+
+
+def logistica_de_envio(data):
+    """(logistic_type, mode) del JSON de `/shipments/{id}`.
+
+    DEVUELVE LOS VALORES CRUDOS DE ML --`fulfillment`, `self_service`,
+    `cross_docking`, `drop_off`, `xd_drop_off`, `default`-- y no una etiqueta
+    para mostrar. Traducirlos es cosa del tablero: el dia que ML agregue un modo
+    nuevo, entra solo y se ve como texto desconocido, en vez de caer en un
+    "Otros" que tapa que hay algo que no conociamos.
+
+    SE MIRAN DOS LUGARES. `logistic_type` y `mode` viajan sueltos en la raiz, y
+    en el formato nuevo de la API van adentro de `logistic`. ML fue moviendo el
+    campo y las dos formas conviven segun el envio, asi que se prueba la raiz
+    primero y se cae al objeto nuevo.
+    """
+    if not isinstance(data, dict):
+        return None, None
+    anidado = data.get("logistic")
+    if not isinstance(anidado, dict):
+        anidado = {}
+    tipo = data.get("logistic_type") or anidado.get("type")
+    modo = data.get("mode") or anidado.get("mode")
+    return texto_o_nada(tipo), texto_o_nada(modo)
+
+
+def asegurar_columnas():
+    """Agrega logistica/modo_envio si la tabla ya existia sin ellas.
+
+    Si `bronze.ml_envios` todavia no existe no hace nada: la crea el primer
+    `to_sql` con las columnas que traiga el DataFrame, que ya son las nuevas.
+    """
+    with engine.begin() as con:
+        if con.exec_driver_sql(
+                "select to_regclass('bronze.ml_envios') is not null").scalar():
+            con.exec_driver_sql(ALTER_LOGISTICA)
+
+
+def pedidor():
+    """Un GET a la API de ML que renueva el token cuando contesta 401.
+
+    Existe como funcion y no inline porque ahora hay TRES lugares que piden a la
+    API --costos, logistica del envio nuevo y relleno de logistica-- y el manejo
+    del 401 tiene una sutileza que no conviene copiar tres veces: NO SE FUERZA
+    la renovacion de entrada. Puede que otro proceso ya haya renovado y el que
+    tenemos en mano sea solo viejo; recien si el que vuelve es el mismo se fuerza.
+    Ver token_ml en mercadolibre.py.
+    """
+    estado = {"token": token_ml()}
+
+    def pedir(url):
+        cabeceras = {"Authorization": f"Bearer {estado['token']}"}
+        resp = requests.get(url, headers=cabeceras, timeout=15)
+        if resp.status_code == 401:
+            nuevo = token_ml()
+            if nuevo == estado["token"]:
+                nuevo = token_ml(forzar=True)
+            estado["token"] = nuevo
+            resp = requests.get(
+                url, headers={"Authorization": f"Bearer {nuevo}"}, timeout=15)
+        return resp
+
+    return pedir
 
 
 def skus_de_la_marca(marca):
@@ -111,6 +219,10 @@ def extraer_envios(desde=None, hasta=None, marca=None):
         hay_envios = con.exec_driver_sql(
             "select to_regclass('bronze.ml_envios') is not null").scalar()
 
+    # Antes de escribir, no despues: el to_sql de esta misma corrida ya trae las
+    # columnas nuevas.
+    asegurar_columnas()
+
     filtro_ya_bajados = f"""
           AND NOT EXISTS (SELECT 1 FROM bronze.ml_envios e
                            WHERE e.shipping_id = {ship})""" if hay_envios else ""
@@ -151,8 +263,7 @@ def extraer_envios(desde=None, hasta=None, marca=None):
         print("Ya estan todos! Nada que hacer.")
         return
 
-    token = token_ml()
-    headers = {"Authorization": f"Bearer {token}"}
+    pedir = pedidor()
     errores = 0
 
     # Se guarda AGREGANDO al final de la tabla, no reescribiendola.
@@ -180,17 +291,7 @@ def extraer_envios(desde=None, hasta=None, marca=None):
     for i, (_, r) in enumerate(faltan.iterrows(), 1):
         ship_id = r["shipping_id_str"]
         try:
-            url = f"https://api.mercadolibre.com/shipments/{ship_id}/costs"
-            resp = requests.get(url, headers=headers, timeout=15)
-            if resp.status_code == 401:
-                # Sin forzar primero: puede que otro proceso ya haya renovado y
-                # el que tenemos sea solo viejo. Ver token_ml en mercadolibre.py.
-                nuevo_token = token_ml()
-                if nuevo_token == token:
-                    nuevo_token = token_ml(forzar=True)
-                token = nuevo_token
-                headers = {"Authorization": f"Bearer {token}"}
-                resp = requests.get(url, headers=headers, timeout=15)
+            resp = pedir(URL_COSTOS.format(ship_id))
             if resp.status_code == 200:
                 data = resp.json()
                 costo_envio = 0
@@ -198,10 +299,27 @@ def extraer_envios(desde=None, hasta=None, marca=None):
                     if s.get("user_id") == MI_USER_ID:
                         costo_envio = s.get("cost", 0) or 0
                         break
+
+                # LA LOGISTICA VA EN LA MISMA PASADA, no en un relleno aparte.
+                #
+                # Si fallara solo esta segunda llamada, la fila se guarda igual
+                # con la logistica en null: el costo de envio --que es lo que
+                # entra al margen-- no se pierde por un dato de color. Lo que
+                # quedo en null lo levanta despues --solo-logistica.
+                tipo, modo = None, None
+                try:
+                    resp_envio = pedir(URL_ENVIO.format(ship_id))
+                    if resp_envio.status_code == 200:
+                        tipo, modo = logistica_de_envio(resp_envio.json())
+                except Exception:
+                    pass
+
                 nuevos.append({
                     "shipping_id": ship_id,
                     "order_id": str(r["id"]),
                     "costo_envio": costo_envio,
+                    "logistica": tipo,
+                    "modo_envio": modo,
                 })
             else:
                 errores += 1
@@ -224,6 +342,103 @@ def extraer_envios(desde=None, hasta=None, marca=None):
     print(f"Costo total de envios: ${final['costo_envio'].sum():,.2f}")
 
 
+def completar_logistica(desde=None, hasta=None):
+    """Rellena `logistica`/`modo_envio` en los envios que ya estan bajados.
+
+    POR QUE ES UN PASO APARTE Y NO PARTE DE LA CORRIDA. Cuando se agrego la
+    columna ya habia 62.616 envios bajados, y el filtro de extraer_envios()
+    saltea todo lo que YA ESTA en la tabla --como corresponde, para no volver a
+    pedir 62.000 costos-- asi que esas filas nunca se vuelven a mirar. Esto las
+    recorre una vez. A 0,1 s por envio, el historico completo son unas tres
+    horas: por eso tiene ventana de fechas y no se cuelga del orquestador, que
+    mata cada paso a los 45 minutos.
+
+    Es retomable: solo mira las filas con la logistica en null, asi que cortarlo
+    y volver a correrlo sigue desde donde quedo. Y se puede repetir sin miedo --
+    actualiza por shipping_id, no inserta.
+    """
+    print("=== Completando la logistica de los envios ya bajados ===")
+    asegurar_columnas()
+
+    piso = (desde or FECHA_CORTE).isoformat()
+    print(f"    Desde {piso}" + (f" hasta {hasta}" if hasta else " hasta hoy"))
+
+    # El techo va en SQL --no en pandas como en extraer_envios()-- porque aca no
+    # hay que resolver el huso con precision de un dia: es un relleno de datos
+    # viejos y un dia de mas o de menos en el borde se arregla corriendolo otra
+    # vez. Lo que importa es no traer 62.000 filas cuando se pidieron 10.000.
+    tope = f" AND v.date_created < '{(hasta + timedelta(days=1)).isoformat()}'" if hasta else ""
+
+    faltan = pd.read_sql(f"""
+        SELECT DISTINCT e.shipping_id
+        FROM bronze.ml_envios e
+        JOIN bronze.ml_ventas v
+          ON v."shipping.id"::bigint::text = e.shipping_id
+        WHERE e.logistica IS NULL
+          AND v.date_created >= %(piso)s{tope}
+    """, engine, params={"piso": piso})
+
+    print(f"Faltan {len(faltan)} envios sin logistica.")
+    if len(faltan) == 0:
+        print("Ya estan todos! Nada que hacer.")
+        return
+
+    pedir = pedidor()
+    errores = 0
+    pendientes = []
+
+    def guardar_pendientes():
+        if not pendientes:
+            return
+        with engine.begin() as con:
+            con.execute(
+                text("UPDATE bronze.ml_envios "
+                     "   SET logistica = :logistica, modo_envio = :modo "
+                     " WHERE shipping_id = :shipping_id"),
+                pendientes,
+            )
+        pendientes.clear()
+
+    for i, ship_id in enumerate(faltan["shipping_id"], 1):
+        try:
+            resp = pedir(URL_ENVIO.format(ship_id))
+            if resp.status_code == 200:
+                tipo, modo = logistica_de_envio(resp.json())
+                # Un envio que contesta 200 pero sin logistic_type NO se guarda:
+                # dejarlo en null es lo correcto --no sabemos como salio-- pero
+                # entonces la proxima corrida lo vuelve a pedir. Es el precio de
+                # no inventar un dato, y son poquitos.
+                if tipo is None:
+                    errores += 1
+                else:
+                    pendientes.append({
+                        "shipping_id": ship_id,
+                        "logistica": tipo,
+                        "modo": modo,
+                    })
+            else:
+                errores += 1
+        except Exception:
+            errores += 1
+
+        if i % 100 == 0:
+            print(f"  {i}/{len(faltan)} pedidos a la API ({errores} con error)...")
+            guardar_pendientes()
+        time.sleep(0.1)
+
+    guardar_pendientes()
+
+    resumen = pd.read_sql("""
+        SELECT coalesce(logistica, '(sin dato)') AS logistica, count(*) AS envios
+        FROM bronze.ml_envios
+        GROUP BY 1 ORDER BY 2 DESC
+    """, engine)
+    print("\nComo salieron los envios que ya tienen el dato:")
+    for _, fila in resumen.iterrows():
+        print(f"  {fila['logistica']:<16} {fila['envios']}")
+    print(f"Errores en esta corrida: {errores} (se reintentan en la proxima)")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Baja a bronze.ml_envios los costos de envio que falten.",
@@ -235,10 +450,21 @@ def main():
     parser.add_argument("--marca",
                         help="Solo los envios de las ordenes que llevan algun "
                              "articulo de esa marca. Para un relleno viejo.")
+    parser.add_argument("--solo-logistica", action="store_true",
+                        help="No baja costos: completa la logistica (Full, "
+                             "Flex, Colecta) de los envios ya bajados que la "
+                             "tengan en null. Para el relleno historico.")
     args = parser.parse_args()
 
     if args.desde and args.hasta and args.hasta < args.desde:
         parser.error("--hasta no puede ser anterior a --desde")
+
+    if args.solo_logistica:
+        if args.marca:
+            parser.error("--marca no se aplica a --solo-logistica: el relleno "
+                         "mira los envios ya bajados, no las ordenes")
+        completar_logistica(args.desde, args.hasta)
+        return
 
     extraer_envios(args.desde, args.hasta, args.marca)
 
