@@ -1,0 +1,103 @@
+name: Backfill logistica de envios ML
+
+# ============================================================================
+#  COMO SALIO CADA VENTA, HACIA ATRAS Y UNA SOLA VEZ.
+#
+#  `ml_envios.py` guarda la logistica --Full, Flex, Colecta, punto de despacho--
+#  de cada envio NUEVO que baja. Los que ya estaban bajados antes de que
+#  existiera la columna no se vuelven a mirar nunca: el filtro de la corrida
+#  normal saltea todo lo que ya esta en la tabla, y esta bien que lo haga, para
+#  no volver a pedir 62.000 costos de envio.
+#
+#  Este workflow corre el relleno: recorre los envios con la logistica en null y
+#  se la pregunta a ML de a uno.
+#
+#  POR QUE NO VA EN EL ORQUESTADOR. Es una llamada por envio con 0,1 s de pausa:
+#  desde octubre son ~10.000 envios y una media hora; todo el historico son
+#  62.616 y unas tres horas. El orquestador mata cada paso a los 45 minutos, asi
+#  que el historico completo no entra ahi ni tiene por que: se corre a mano una
+#  vez y despues el dato se mantiene solo.
+#
+#  Se puede correr las veces que haga falta, y cortarlo sin miedo. Solo mira las
+#  filas que tienen la logistica en null y actualiza por shipping_id, asi que
+#  repetirlo no duplica nada y retomarlo sigue donde quedo.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      desde:
+        description: 'Desde qué fecha de orden (YYYY-MM-DD)'
+        required: true
+        default: '2026-10-01'
+      hasta:
+        description: 'Hasta qué fecha, incluida (vacío = hasta hoy)'
+        required: false
+        default: ''
+
+# Comparte tabla y API con el orquestador. Sin esto, un backfill lanzado a mano
+# mientras corre el paso de las :20 puede pelearse con el por el token de ML --y
+# ML anula el refresh_token anterior en cada renovacion, asi que dos procesos
+# renovando juntos dejan guardado uno que ya no vale y hay que reautorizar a
+# mano. Paso el 20/08/2026 entre dos maquinas.
+concurrency:
+  group: orquestador
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    # Mas que el orquestador a proposito: el historico completo son unas tres
+    # horas. Si se corta por tiempo no se pierde nada --lo bajado queda
+    # guardado-- pero mejor que entre de una.
+    timeout-minutes: 350
+
+    env:
+      TZ: America/Argentina/Buenos_Aires
+
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASS: ${{ secrets.DB_PASS }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+
+      ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+      ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+      ML_REDIRECT_URI: ${{ secrets.ML_REDIRECT_URI }}
+      ML_USER_ID: ${{ secrets.ML_USER_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Completar la logistica de los envios
+        run: |
+          if [ -n "${{ inputs.hasta }}" ]; then
+            python ml_envios.py --solo-logistica \
+              --desde "${{ inputs.desde }}" --hasta "${{ inputs.hasta }}"
+          else
+            python ml_envios.py --solo-logistica --desde "${{ inputs.desde }}"
+          fi
+
+      # Las ventas de gold guardan la logistica estampada, igual que el costo:
+      # sin esto el dato queda en bronze y el tablero sigue mostrando la columna
+      # vacia hasta que el orquestador reconstruya esos dias --y con la ventana
+      # de 7 dias, los de octubre no los vuelve a mirar nunca.
+      #
+      # VA POR --dias Y NO POR --relleno. `--relleno` escribe en una tabla
+      # aparte a proposito (ver relleno.tabla_destino), asi que no sirve para
+      # actualizar lo que el tablero lee: lo que hace falta es correr la ventana
+      # normal, pero mas larga. Los dias se cuentan desde la fecha pedida.
+      - name: Reestampar las ventas con la logistica nueva
+        run: |
+          DIAS=$(( ( $(date -d "$(date +%F)" +%s) \
+                   - $(date -d "${{ inputs.desde }}" +%s) ) / 86400 + 1 ))
+          echo "Reconstruyendo los ultimos $DIAS dias de gold.fact_ventas"
+          python modelo.py --dias "$DIAS"
