@@ -74,6 +74,15 @@ jobs:
       - name: Probar las vigencias de costos
         run: python probar_costos_vigencia.py
 
+      # El 06/11/2026, primer dia del mes comercial nuevo, las 135 ventas del
+      # dia quedaron sin costo porque la lista del mes no estaba cargada -- y un
+      # costo que falta se lee como coalesce(.., 0), asi que la rentabilidad del
+      # dia dio ~60% en vez de ~13%. La herencia del cierre arregla eso, pero
+      # heredar de mas es peor: lo que se fija es que NO resucite articulos que
+      # salieron del catalogo, y que se corte al mes.
+      - name: Probar la herencia de costos al cerrar el mes
+        run: python probar_herencia_costos.py
+
       - name: Probar la huella de los Excel
         run: python probar_huella_costos.py
 
