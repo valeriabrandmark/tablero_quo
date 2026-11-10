@@ -1,0 +1,129 @@
+name: Reconstruir gold
+
+# ============================================================================
+#  REHACE gold.fact_ventas DESDE EL PRINCIPIO, CON LA CUENTA DE HOY.
+#
+#  La corrida de todos los dias reconstruye una ventana movil de 7 dias
+#  (WINDOW_DAYS en modelo.py). Eso es lo correcto para el dia a dia --
+#  reprocesar cuatro meses cada hora seria tirar tiempo -- pero deja afuera
+#  justo el caso que motiva este archivo: cuando cambia la CUENTA, no el dato.
+#
+#  El 10/11/2026 se corrigio como se costea una venta: la comision va neta --el
+#  IVA del arancel es credito fiscal--, se empezaron a costear las cuotas sin
+#  interes, y el impuesto al cheque paso a cobrarse sobre lo cobrado. Con la
+#  ventana movil, los 7 dias ultimos quedaban con la cuenta nueva y los cinco
+#  meses anteriores con la vieja: la misma pantalla sumando numeros calculados
+#  de dos formas distintas, que es peor que tenerlos todos mal.
+#
+#  NO TRAE DATOS NUEVOS. No le pega a ninguna API: solo relee bronze --que ya
+#  esta -- y reescribe gold. Por eso se puede correr sin miedo a gastar cupo de
+#  Mercado Libre ni de Tienda Nube.
+#
+#  TARDA. Son ~190 dias contra los 7 de siempre. Se corre a mano cuando cambia
+#  la cuenta, no por horario.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+
+# EL MISMO GRUPO QUE EL ORQUESTADOR, y es lo mas importante del archivo.
+#
+# Los dos escriben gold.fact_ventas. Si corren juntos, uno borra la ventana
+# mientras el otro la inserta -- que es como el 21/08/2026 quedaron 2.548
+# ordenes duplicadas. Compartiendo grupo, este espera a que el orquestador
+# termine (y al reves), en vez de pelearle la tabla.
+concurrency:
+  group: orquestador
+  cancel-in-progress: false
+
+jobs:
+  reconstruir:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    # Reconstruir cinco meses lleva bastante mas que los ~8 minutos de una
+    # corrida normal.
+    timeout-minutes: 60
+
+    env:
+      # EL RUNNER CORRE EN UTC Y HAY 16 LUGARES EN EL CODIGO QUE USAN
+      # `date.today()` PARA ARMAR LA VENTANA MOVIL.
+      #
+      # Sin esto, entre las 21 y la medianoche de Argentina el runner ya esta en
+      # el dia siguiente y las ventanas se corren un dia entero. Python respeta
+      # esta variable en Linux -- verificado: sin TZ da 15:13, con TZ da 12:13.
+      TZ: America/Argentina/Buenos_Aires
+
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASS: ${{ secrets.DB_PASS }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+
+      SIGMA_TOKEN: ${{ secrets.SIGMA_TOKEN }}
+      SIGMA_URL_CLIENTE: ${{ secrets.SIGMA_URL_CLIENTE }}
+      SIGMA_ID_CLIENTE: ${{ secrets.SIGMA_ID_CLIENTE }}
+      SIGMA_BASEALIAS: ${{ secrets.SIGMA_BASEALIAS }}
+
+      ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+      ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+      ML_REDIRECT_URI: ${{ secrets.ML_REDIRECT_URI }}
+      ML_USER_ID: ${{ secrets.ML_USER_ID }}
+
+      TN_STORE_ID: ${{ secrets.TN_STORE_ID }}
+      TN_TOKEN: ${{ secrets.TN_TOKEN }}
+      TN_USER_AGENT: ${{ secrets.TN_USER_AGENT }}
+
+      # La planilla de sell in. GOOGLE_SA_JSON es el archivo entero de la
+      # cuenta de servicio; SELL_IN_SHEET_ID, el id que esta en la URL del
+      # Google Sheet. Sin las dos, sell_in.py falla con un mensaje que dice
+      # cual falta -- y como no es critico, el resto del pipeline sigue.
+      SELL_IN_SHEET_ID: ${{ secrets.SELL_IN_SHEET_ID }}
+
+      # PARA PEDIRLE A LA PLANILLA QUE MANDE LA FOTO AHORA, en vez de esperar
+      # al disparador diario de las 06:00. Los dos son OPCIONALES: sin ellos el
+      # paso usa la ultima foto que haya, que es como funcionaba antes.
+      #
+      # SELL_IN_WEBAPP_URL sale de implementar el Apps Script como aplicacion
+      # web (termina en /exec). SELL_IN_TOKEN es EL MISMO que ya tienen el
+      # script y la Edge Function: es lo unico que separa a un curioso de
+      # disparar envios contra esa URL, que es publica por necesidad.
+      SELL_IN_WEBAPP_URL: ${{ secrets.SELL_IN_WEBAPP_URL }}
+      SELL_IN_TOKEN: ${{ secrets.SELL_IN_TOKEN }}
+
+      # DOS CAMINOS PARA LA MISMA CREDENCIAL, y basta con uno.
+      #
+      # El recomendado no usa clave: GCP_WIF_PROVIDER y GCP_SA_EMAIL arman
+      # Workload Identity Federation en el paso de mas abajo. El otro,
+      # GOOGLE_SA_JSON, es la clave descargada -- simple, pero muchas empresas
+      # la tienen prohibida por politica de organizacion, y con razon.
+      GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+      GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
+      GOOGLE_SA_JSON: ${{ secrets.GOOGLE_SA_JSON }}
+
+      DIGIP_API_KEY: ${{ secrets.DIGIP_API_KEY }}
+      DIGIP_URL_BASE: ${{ secrets.DIGIP_URL_BASE }}
+
+      # El access token del usuario de integracion de Foxie. Sin el, foxie.py
+      # falla diciendo que falta y el resto del pipeline sigue (no es critico).
+      FOXIE_TOKEN: ${{ secrets.FOXIE_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      # `--todo` reconstruye desde FECHA_CORTE (06/05/2026). Es el propio
+      # modelo.py el que decide hasta donde: aca no se pasa una cantidad de
+      # dias para no tener que acordarse de moverla cada mes.
+      - name: Reconstruir gold.fact_ventas entero
+        run: python modelo.py --todo
