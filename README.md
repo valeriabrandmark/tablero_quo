@@ -383,6 +383,26 @@ quedar corriendo la versión vieja mientras arrancaba la nueva después de un
 afectada porque `modelo.py` descarta duplicados, pero para limpiar la tabla está
 `limpiar_duplicados_ml_envios.sql`.
 
+### A dónde fue cada venta de Mercado Libre
+
+`bronze.ml_envios` guarda también el destino de cada envío: `destino_provincia_id`
+(`AR-C` es CABA, `AR-B` es Provincia de Buenos Aires), `destino_provincia`,
+`destino_ciudad`, `destino_barrio` y `destino_cp`. Sale de `/shipments/{id}`, la
+misma llamada que ya se hacía para la logística, así que no suma pedidos a la
+API. Es lo que alimenta el mapa de concentración de ventas por zona.
+
+**Solo la zona, nunca la dirección.** La respuesta de ML trae calle, número,
+nombre y teléfono de quien recibe; se descartan a propósito.
+
+Los envíos nuevos lo traen solos. Para el historial anterior al 10/11/2026 hay
+que correr una vez el workflow **Backfill logistica y destino de envios ML** con
+`desde = 2026-05-06` y `reestampar` apagado (el destino vive solo en bronze).
+Son ~60.000 envíos y unas dos o tres horas; se puede cortar y retomar. A mano:
+
+```bash
+python ml_envios.py --solo-logistica --desde 2026-05-06
+```
+
 ---
 
 ## El sell in del proveedor, desde Google Sheets
