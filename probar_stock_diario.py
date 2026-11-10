@@ -88,5 +88,31 @@ revisar("Tucuman: con stock los 30 dias", int(fila("tuc", 30).dias_con_stock), 3
 revisar("Full: solo los 2 dias que tuvo (hace 3 entra y vende, hace 2 vende)",
         int(fila("full", 30).dias_con_stock), 2)
 
+# --- El caso que rompio la primera version: AL01081 ------------------------
+# Primera venta el 22/10 (6 u. por mayorista), la compra NO esta en Sigma con
+# detalle, y hoy no hay nada. Sin tope, el stock reconstruido (6) se arrastraba
+# hacia atras toda la ventana: 101 "dias con stock" y el ritmo daba menos que
+# antes. Con la primera venta como primera prueba, solo cuenta el 22/10.
+hoy = dt.date(2026, 11, 10)
+df = calcular(
+    hoy,
+    foto_tuc={"AL01081": {hoy: 0}},
+    foto_full={},
+    mov={"AL01081": {"ventas_tuc": {dt.date(2026, 10, 22): 6}}},
+    primeras={"AL01081": {"tuc": dt.date(2026, 10, 22)}},
+)
+fila = lambda dep, v: df[(df.deposito == dep) & (df.ventana == v)].iloc[0]  # noqa: E731
+revisar("AL01081: sin compra registrada, solo el dia de la venta tiene stock",
+        int(fila("tuc", 120).dias_con_stock), 1)
+
+# Sin ninguna prueba en Full: no se inventan dias.
+revisar("  y en Full, sin ninguna prueba, cero dias", int(fila("full", 120).dias_con_stock), 0)
+
+# Una foto real vale aunque sea anterior a la primera prueba que conocemos.
+dias = dias_con_stock(HOY, 5, fotos={HOY: 0, d(27): 3}, entradas={}, salidas={},
+                      ventas={}, primera_evidencia=d(29))
+revisar("una foto con stock cuenta aunque sea anterior a la primera prueba",
+        [x[1] for x in dias], [False, False, False, True, False])
+
 print(f"\n{len(FALLOS)} pruebas fallaron" if FALLOS else "\nTodo OK")
 raise SystemExit(1 if FALLOS else 0)
