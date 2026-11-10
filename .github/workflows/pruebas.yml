@@ -93,6 +93,12 @@ jobs:
       - name: Probar la planilla de objetivos
         run: python probar_objetivos.py
 
+      # La propuesta automatica no puede proponer lo que no se puede cumplir:
+      # sin stock, dos vendedores pidiendo entre los dos mas de lo que hay, o
+      # el 480 de espirales de 2026-10, que con 1.945 en stock vendio cero.
+      - name: Probar la propuesta de objetivos
+        run: python probar_propuesta_objetivos.py
+
       # Un precio para ganar que falta tiene que quedar en null, no en cero.
       - name: Probar la lectura de la competencia
         run: python probar_competencia.py

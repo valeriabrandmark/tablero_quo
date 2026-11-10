@@ -834,6 +834,35 @@ con `on delete cascade`.
 `python objetivos.py --exportar 2026-09`, para que la primera carga diera «sin
 cambios».
 
+### La propuesta automática
+
+`proponer_objetivos.py 2026-11` (o, sin instalar nada, el workflow
+**Proponer objetivos** en la pestaña Actions) arma
+`2026-11 objetivos (propuesta).xlsx`: la misma planilla, con una hoja más,
+«Por que», que explica cada número y qué candidatos se miraron y por qué no
+entraron. **La carga la ignora** por el «(propuesta)» del nombre: se revisa, se
+guarda como `2026-11 objetivos.xlsx` y recién ahí entra.
+
+Las reglas están en `propuesta_objetivos.py`, y se probaron contra lo que pasó
+en 2026-09 y 2026-10:
+
+- **Producto, núcleo** (lo que vende todos los meses): el peor de los últimos
+  3 meses + 10 %. Se cumple 4 o 5 de cada 10 veces. Con la mediana se
+  cumplía 2 o 3 de cada 10: la venta mayorista por SKU es a los saltos.
+- **Producto, temporada** (repelentes, espirales, solares): lo vendido por mes en
+  feb-abr 2026, que es el único verano medido, por la parte de la temporada
+  que corresponde al mes (`RITMO_TEMPORADA`: 25 % en noviembre). En octubre las
+  espirales tenían objetivo de 480 con 1.945 en stock y no se vendió ninguna.
+- **Stock**: entre todos los vendedores, como máximo el 80 % de lo disponible en
+  Digip. Una sola marca por vendedor en el núcleo. Cinco objetivos de producto
+  por vendedor, hasta dos de temporada.
+- **Empresa** (ventas netas y clientes): los mismos del mes anterior. Se decidió
+  así el 10/11/2026.
+- Solo SILVIO y GERMAN (`VENDEDORES_PROPUESTA`).
+
+`RITMO_TEMPORADA` de diciembre y enero son supuestos: no hay ningún diciembre ni
+enero cargado. En marzo de 2027, con este verano medido, hay que revisarlos.
+
 ## Qué se está actualizando y qué no
 
 ```bash
