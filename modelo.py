@@ -609,9 +609,21 @@ def construir_fact_ventas():
     # historia. Ver comisiones_pasarela.sql.
     try:
         com = pd.read_sql("""
+            -- LA COMISION VA NETA, SIN EL IVA DEL ARANCEL.
+            --
+            -- Decia `tasa_pct * (1 + iva_pct/100)`. La pasarela factura su
+            -- comision con el IVA discriminado, asi que ese IVA es credito
+            -- fiscal: se descuenta del IVA que se le cobro al cliente y no es
+            -- un costo. Con el IVA adentro, el margen de cada venta salia
+            -- ~0,76 puntos mas bajo del que de verdad quedo.
+            --
+            -- El motor de precios ya se corrigio igual. Mientras los dos no
+            -- usen el mismo criterio, el margen con el que se decide un precio
+            -- y el margen con el que se mide esa misma venta despues no pueden
+            -- coincidir nunca.
             SELECT gateway, metodo, vigente_desde,
-                   tasa_pct * (1 + iva_pct/100) AS pasarela_pct,
-                   cpt_pct                      AS plataforma_pct
+                   tasa_pct AS pasarela_pct,
+                   cpt_pct  AS plataforma_pct
             FROM bronze.comisiones_pasarela
             ORDER BY gateway, metodo, vigente_desde
         """, engine)
@@ -636,6 +648,51 @@ def construir_fact_ventas():
     # puede ver de donde sale, que es la unica forma de contestar "cuanto me
     # cuesta cobrar por Nave contra cobrar por Pago Nube".
     #
+    # EL COSTO DE LAS CUOTAS SIN INTERES, que lo paga la tienda.
+    #
+    # Faltaba entero: una venta en 6 cuotas se costeaba igual que una en un
+    # pago, y son 14 puntos de diferencia sobre lo cobrado. Vive en
+    # bronze.costo_cuotas, cruzado por (gateway, metodo, cuotas).
+    #
+    # SE USAN LAS CUOTAS REALES DE CADA PEDIDO, no el peor caso. El motor de
+    # precios usa el peor caso a proposito --poner un precio es apostar sobre
+    # lo que todavia no paso-- pero medir lo que YA se vendio con el peor caso
+    # seria inventar un costo que no se pago. Desde mayo el 90% de lo
+    # facturado se cobro en un pago.
+    try:
+        cuo = pd.read_sql('''
+            SELECT gateway, metodo, cuotas, vigente_desde, costo_pct
+            FROM bronze.costo_cuotas
+            ORDER BY gateway, metodo, cuotas, vigente_desde
+        ''', engine)
+    except Exception as e:
+        if not errores_bd.es_tabla_inexistente(e):
+            raise
+        print("  (bronze.costo_cuotas no existe: las cuotas van sin costear)")
+        cuo = pd.DataFrame(columns=["gateway", "metodo", "cuotas",
+                                    "vigente_desde", "costo_pct"])
+
+    # (gateway, metodo, cuotas) -> [(vigente_desde, costo_pct), ...]
+    costos_cuotas = {}
+    for r in cuo.itertuples():
+        costos_cuotas.setdefault(
+            (r.gateway, r.metodo, int(r.cuotas)), []
+        ).append((to_date(r.vigente_desde), float(r.costo_pct)))
+
+    def cuotas_de(gateway, metodo, cuotas, fecha):
+        """% que costo ofrecer esas cuotas, o 0 si no hay fila.
+
+        Devuelve 0 y no None, al reves que `arancel_de`: un medio sin fila en
+        costo_cuotas es casi siempre un pago unico, que no cuesta nada. No
+        saber el arancel de una pasarela es un agujero; no tener fila para
+        "1 cuota" es lo normal.
+        """
+        filas = costos_cuotas.get((gateway, metodo, int(cuotas or 1)))
+        if not filas:
+            return 0.0
+        vigentes = [c for d, c in filas if d is None or d <= fecha]
+        return vigentes[-1] if vigentes else 0.0
+
     # (gateway, metodo) -> [(vigente_desde, pasarela, plataforma), ...]
     aranceles = {}
     for r in com.itertuples():
@@ -859,7 +916,7 @@ def construir_fact_ventas():
         print("  (bronze.tn_pedidos_items todavia no trae envio: corre tiendanube.py)")
 
     cols_envio = (
-        "envio_costo_tienda, envio_cobrado" if hay_envio
+        "i.envio_costo_tienda, i.envio_cobrado" if hay_envio
         else "NULL AS envio_costo_tienda, NULL AS envio_cobrado"
     )
 
@@ -875,7 +932,7 @@ def construir_fact_ventas():
                   AND column_name = 'cupon'
             )
         """).scalar()
-    col_cupon = "cupon" if hay_cupon else "NULL AS cupon"
+    col_cupon = "i.cupon" if hay_cupon else "NULL AS cupon"
 
     # Mismo guard, para el medio de pago crudo con el que se cruza el arancel.
     with engine.begin() as con:
@@ -887,17 +944,23 @@ def construir_fact_ventas():
     if not hay_pago:
         print("  (bronze.tn_pedidos_items todavia no trae el medio de pago: corre tiendanube.py)")
     cols_pago = (
-        "gateway, metodo_pago" if hay_pago
+        "i.gateway, i.metodo_pago" if hay_pago
         else "NULL AS gateway, NULL AS metodo_pago"
     )
 
     tn = pd.read_sql(f"""
-        SELECT pedido_id, pedido_numero, fecha, sku, nombre, cantidad, precio,
-               cliente_nombre, subtotal_pedido, descuento, total_pedido,
+        SELECT i.pedido_id, i.pedido_numero, i.fecha, i.sku, i.nombre,
+               i.cantidad, i.precio, i.cliente_nombre, i.subtotal_pedido,
+               i.descuento, i.total_pedido,
+               -- EN CUANTAS CUOTAS SE PAGO. Vive en el pedido y no en el item,
+               -- asi que se trae con un join por id. Verificado contra los
+               -- datos: los 96 items matchean y todos traen el dato.
+               COALESCE(p."payment_details.installments", 1) AS cuotas,
                {col_cupon}, {cols_pago}, {cols_envio}
-        FROM bronze.tn_pedidos_items
-        WHERE estado_pago = 'paid' AND estado <> 'cancelled'
-          AND fecha >= '{piso_sql()}'
+        FROM bronze.tn_pedidos_items i
+        LEFT JOIN bronze.tn_pedidos p ON p.id = i.pedido_id
+        WHERE i.estado_pago = 'paid' AND i.estado <> 'cancelled'
+          AND i.fecha >= '{piso_sql()}'
     """, engine)
 
     # EL FLETE DE TIENDA NUBE ES LA DIFERENCIA, NO EL BRUTO.
@@ -1044,12 +1107,23 @@ def construir_fact_ventas():
             # NO ES UN COSTO EXTRA: es la otra mitad de la misma tarifa. Lo que
             # se descuenta en total es lo mismo que antes de separarlas.
             cpt_item = cobrado_pedido * plataforma_pct / 100 * parte
+
+        # LO QUE COSTO OFRECER LAS CUOTAS DE ESTE PEDIDO. Mismo prorrateo y
+        # misma base que la comision: se cobra sobre la plata movida.
+        cuotas_pct = cuotas_de(r["gateway"], r["metodo_pago"], r["cuotas"], f)
+        cuotas_item = (
+            importe(r["total_pedido"]) * cuotas_pct / 100
+            * ((valor_item / total) if total > 0 else 0.0)
+        )
+
         comision_unidad = comision_item / cant if cant else 0.0
         cpt_unidad = cpt_item / cant if cant else 0.0
+        cuotas_unidad = cuotas_item / cant if cant else 0.0
 
         margen = (
             None if costo is None
-            else (precio_neto_real - costo - comision_unidad - cpt_unidad) * cant - envio_item
+            else (precio_neto_real - costo - comision_unidad - cpt_unidad
+                  - cuotas_unidad) * cant - envio_item
         )
         filas.append({
             "canal": "Tienda Nube", "unidad": "Quo", "tipo": "Fiscal",
@@ -1062,6 +1136,10 @@ def construir_fact_ventas():
             "cantidad": cant, "precio_unitario": precio_real, "precio_neto": precio_neto_real,
             "iva_pct": iva, "costo_unitario": costo, "comision": comision_unidad,
             "costo_transaccion": cpt_unidad,
+            # Por unidad, como `comision` y `costo_transaccion`: el tablero
+            # multiplica por la cantidad.
+            "costo_cuotas": cuotas_unidad,
+            "cuotas": int(r["cuotas"] or 1),
             "envio": round(envio_item, 2),
             "descuento": round(desc_item, 2),
             "cupon": r["cupon"] if isinstance(r["cupon"], str) else None,
@@ -1270,6 +1348,8 @@ def construir_fact_ventas():
                 '  ADD COLUMN IF NOT EXISTS pasarela text, '
                 '  ADD COLUMN IF NOT EXISTS metodo_pago text, '
                 '  ADD COLUMN IF NOT EXISTS costo_transaccion double precision, '
+                '  ADD COLUMN IF NOT EXISTS costo_cuotas double precision, '
+                '  ADD COLUMN IF NOT EXISTS cuotas integer, '
                 '  ADD COLUMN IF NOT EXISTS logistica text'
             )
 
