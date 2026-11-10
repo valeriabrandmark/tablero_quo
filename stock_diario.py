@@ -127,7 +127,8 @@ def hoy_argentina():
 #  LA CUENTA (sin base, para poder probarla)
 # ============================================================
 
-def dias_con_stock(hoy, dias, fotos, entradas, salidas, ventas):
+def dias_con_stock(hoy, dias, fotos, entradas, salidas, ventas,
+                   primera_evidencia=None):
     """Para cada dia de (hoy - dias, hoy], si tuvo stock y si salio de foto.
 
     fotos     {fecha: unidades al abrir ese dia}. La de `hoy` es el ancla; si
@@ -138,8 +139,22 @@ def dias_con_stock(hoy, dias, fotos, entradas, salidas, ventas):
               porque una venta prueba que habia stock; un traspaso, tambien,
               pero se cuenta igual por las salidas.
 
+    primera_evidencia
+              el primer dia en que HAY PRUEBA de que el articulo estuvo en el
+              deposito (ver `primeras_evidencias`). Antes de esa fecha un dia
+              reconstruido no cuenta como con stock, por mas que la cuenta diga
+              que si. `None` = sin tope.
+
     Devuelve una lista de (fecha, con_stock: bool, de_foto: bool), de la mas
     nueva a la mas vieja.
+
+    POR QUE HACE FALTA EL TOPE. La reconstruccion es un TECHO: deshace las
+    entradas que conocemos, y si falta una el stock "se arrastra" hacia atras
+    hasta antes de que la mercaderia llegara. Y faltan casi todas: el
+    10/11/2026, 583 de las 692 facturas de compra de los ultimos 120 dias
+    llegaron de Sigma sin el detalle de articulos. El caso que lo mostro:
+    AL01081 (panales Algabo XG), primera venta el 22/10, figuraba con 101 dias
+    con stock en Tucuman -- desde julio -- y el ritmo daba MENOS que antes.
     """
     out = []
     apertura = float(fotos.get(hoy, 0) or 0)
@@ -160,6 +175,10 @@ def dias_con_stock(hoy, dias, fotos, entradas, salidas, ventas):
                or float(entradas.get(d, 0) or 0) > 0
                or float(ventas.get(d, 0) or 0) > 0
                or float(salidas.get(d, 0) or 0) > 0)
+        # Una FOTO siempre vale; una reconstruccion anterior a la primera
+        # prueba de que el articulo existia en el deposito, no.
+        if con and not de_foto and primera_evidencia is not None and d < primera_evidencia:
+            con = False
         out.append((d, con, de_foto))
         d -= datetime.timedelta(days=1)
     return out
@@ -175,13 +194,20 @@ def resumir(dias, hoy):
     return res
 
 
-def calcular(hoy, foto_tuc, foto_full, mov):
+def calcular(hoy, foto_tuc, foto_full, mov, primeras=None):
     """Arma las filas de gold.dias_con_stock.
 
     foto_tuc / foto_full  {sku: {fecha: unidades}}
     mov                   {sku: {"compras", "envios", "ventas_tuc",
                                  "ventas_full": {fecha: unidades}}}
+    primeras              {sku: {"tuc": fecha, "full": fecha}}: la primera
+                          prueba, en TODA la historia, de que el articulo
+                          estuvo en cada deposito. Ver `dias_con_stock`.
     """
+    # Sin `primeras` (pruebas, o una llamada que no las tiene) no hay tope.
+    # Con `primeras`, un articulo sin ninguna prueba toma hoy como tope.
+    sin_tope = primeras is None
+    primeras = primeras or {}
     skus = set(foto_tuc) | set(foto_full) | set(mov)
     filas = []
     vacio = {}
@@ -197,10 +223,13 @@ def calcular(hoy, foto_tuc, foto_full, mov):
             for f, u in src.items():
                 sal_tuc[f] += float(u or 0)
 
+        p = primeras.get(sku, {})
+        tope_tuc = None if sin_tope else p.get("tuc", hoy)
+        tope_full = None if sin_tope else p.get("full", hoy)
         tuc = dias_con_stock(hoy, DIAS_HISTORIA, foto_tuc.get(sku, vacio),
-                             compras, sal_tuc, v_tuc)
+                             compras, sal_tuc, v_tuc, tope_tuc)
         full = dias_con_stock(hoy, DIAS_HISTORIA, foto_full.get(sku, vacio),
-                              envios, v_full, v_full)
+                              envios, v_full, v_full, tope_full)
 
         for deposito, dias in (("tuc", tuc), ("full", full)):
             for v, (con, foto) in resumir(dias, hoy).items():
@@ -310,7 +339,61 @@ def leer(con, hoy):
     ):
         for sku, serie in _serie(con, sql, p).items():
             mov[sku][clave] = serie
-    return foto_tuc, foto_full, mov
+    return foto_tuc, foto_full, mov, leer_primeras(con, p)
+
+
+def leer_primeras(con, p):
+    """La primera prueba de que cada articulo estuvo en cada deposito.
+
+    En TODA la historia y no en la ventana: un articulo que se vende desde
+    mayo no puede quedar recortado a la ventana por no haber vendido en ella.
+
+        Tucuman  primera venta de Tucuman, primera compra con detalle,
+                 primer envio a Full (salio de Tucuman), primera foto > 0.
+        Full     primera venta de Full, primer envio a Full, primera foto > 0.
+
+    Un articulo sin ninguna prueba no figura: `calcular` toma hoy como tope,
+    o sea que solo cuenta la foto de hoy.
+    """
+    out = defaultdict(dict)
+    for deposito, sql in (
+        ("tuc", f"""
+            select sku, min(f) from (
+              select sku, min(fecha) f from gold.fact_ventas
+               where not (canal = 'Mercado Libre'
+                          and coalesce(logistica, 'fulfillment') <> all(%(no_full)s))
+               group by sku
+              union all
+              select i->>'articuloId',
+                     min(coalesce(nullif(c."fechaIngreso", ''), c."fechaFactura")::date)
+                from bronze.sigma_compras c, jsonb_array_elements(c.items::jsonb) i
+               group by 1
+              union all
+              select sku, min(left(fecha_estado, 10)::date) from bronze.digip_envios_full
+               where sku is not null and fecha_estado is not null group by sku
+              union all
+              select sku, min(fecha) from bronze.{TABLA_FOTO}
+               where disponible > 0 group by sku
+            ) t where sku is not null group by sku"""),
+        ("full", """
+            select sku, min(f) from (
+              select sku, min(fecha) f from gold.fact_ventas
+               where canal = 'Mercado Libre'
+                 and coalesce(logistica, 'fulfillment') <> all(%(no_full)s)
+               group by sku
+              union all
+              select sku, min(left(fecha_estado, 10)::date) from bronze.digip_envios_full
+               where sku is not null and fecha_estado is not null group by sku
+              union all
+              select m.sku, min(h.fecha) from bronze.ml_stock_full_historico h
+                join bronze.ml_inventario_sku m on m.inventory_id = h.inventory_id
+               where coalesce(h.available_quantity, 0) > 0 group by m.sku
+            ) t where sku is not null group by sku"""),
+    ):
+        for sku, fecha in con.exec_driver_sql(sql, p).fetchall():
+            if sku and fecha is not None:
+                out[str(sku).strip()][deposito] = fecha
+    return out
 
 
 def main():
@@ -324,11 +407,11 @@ def main():
         guardar_foto_digip(con, hoy)
 
     with engine.begin() as con:
-        foto_tuc, foto_full, mov = leer(con, hoy)
+        foto_tuc, foto_full, mov, primeras = leer(con, hoy)
     print(f"  {len(foto_tuc)} SKU con foto de Tucuman, {len(foto_full)} con foto "
           f"de Full, {len(mov)} con movimientos")
 
-    df = calcular(hoy, foto_tuc, foto_full, mov)
+    df = calcular(hoy, foto_tuc, foto_full, mov, primeras)
     if df.empty:
         print("  Nada que escribir: no se toca lo que ya estaba.")
         return
