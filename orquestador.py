@@ -443,6 +443,19 @@ PASOS = [
      "cada_horas": 24, "critico": False,
      "escribe": "stock_cierre_mes", "techo": 10 * 60},
 
+    # LOS DIAS CON STOCK DE CADA ARTICULO, por deposito.
+    #
+    # Es lo que deja que el ritmo de venta de Compras divida por los dias que
+    # HUBO stock y no por la ventana entera (ver stock_diario.py). De paso
+    # guarda la foto diaria de Tucuman, que hasta ahora no existia.
+    #
+    # Va DESPUES de digip.py, del catalogo de Meli (foto de Full) y de
+    # modelo.py (ventas): lee los tres. No es critico: si falla, el tablero
+    # sigue con la cuenta anterior de la tabla, o con la regla vieja.
+    {"comando": "stock_diario.py",             "intentos": 2, "espera": 60,
+     "cada_horas": 6, "critico": False,
+     "escribe": "digip_stock_historico, gold.dias_con_stock", "techo": 10 * 60},
+
     # FOXIE ESTA APAGADO A PROPOSITO -- el paso se saco el 07/10/2026.
     #
     # Su API expone publicaciones, costos y estrategias, pero no los datos de

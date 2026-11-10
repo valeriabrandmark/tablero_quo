@@ -161,6 +161,11 @@ jobs:
       - name: Probar la foto del stock al cierre de mes
         run: python probar_stock_cierre.py
 
+      # El ritmo de Compras divide por los dias que hubo stock. Si la
+      # reconstruccion cuenta de mas, el ritmo baja y se vuelve a comprar poco.
+      - name: Probar los dias con stock por deposito
+        run: python probar_stock_diario.py
+
       # La ventana era una constante, y eso falla justo cuando el pipeline no
       # corre: un paso caido ocho dias vuelve pidiendo siete, y el dia 1 no
       # entra nunca mas. Lo que se fija es que SOLO se estire, nunca se achique.
