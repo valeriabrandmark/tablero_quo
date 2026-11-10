@@ -38,7 +38,7 @@ sys.modules.setdefault(
     ),
 )
 
-from ml_envios import logistica_de_envio, texto_o_nada  # noqa: E402
+from ml_envios import destino_de_envio, logistica_de_envio, texto_o_nada  # noqa: E402
 
 FALLOS = []
 
@@ -179,6 +179,76 @@ revisar("texto_o_nada recorta", texto_o_nada("  me2  "), "me2")
 revisar("texto_o_nada con None", texto_o_nada(None), None)
 revisar("texto_o_nada con vacio", texto_o_nada(""), None)
 revisar("texto_o_nada con un numero", texto_o_nada(3), "3")
+
+
+# ---------------------------------------------------------------------------
+#  destino_de_envio: a donde fue la venta
+# ---------------------------------------------------------------------------
+#
+# De aca sale el mapa de concentracion de ventas por zona. Lo que cubre:
+# las dos formas del JSON, que no se cuele la direccion exacta, y que un envio
+# sin direccion quede en None y no explote.
+
+VACIO = {
+    "destino_provincia_id": None, "destino_provincia": None,
+    "destino_ciudad": None, "destino_barrio": None, "destino_cp": None,
+}
+
+DIRECCION = {
+    "address_line": "Av. Siempreviva 742",
+    "street_name": "Av. Siempreviva",
+    "street_number": "742",
+    "receiver_name": "Fulano",
+    "receiver_phone": "1100000000",
+    "zip_code": " 1642 ",
+    "city": {"id": "TUxBQ1NBTjk4M2M", "name": "San Isidro"},
+    "state": {"id": "AR-B", "name": "Buenos Aires"},
+    "neighborhood": {"id": None, "name": "Beccar"},
+    "country": {"id": "AR", "name": "Argentina"},
+}
+
+ESPERADO = {
+    "destino_provincia_id": "AR-B",
+    "destino_provincia": "Buenos Aires",
+    "destino_ciudad": "San Isidro",
+    "destino_barrio": "Beccar",
+    "destino_cp": "1642",
+}
+
+revisar("destino: formato viejo, receiver_address",
+        destino_de_envio({"receiver_address": DIRECCION}), ESPERADO)
+
+revisar("destino: formato nuevo, destination.shipping_address",
+        destino_de_envio({"destination": {"shipping_address": DIRECCION}}),
+        ESPERADO)
+
+revisar("destino: receiver_address vacio cae al formato nuevo",
+        destino_de_envio({"receiver_address": {},
+                          "destination": {"shipping_address": DIRECCION}}),
+        ESPERADO)
+
+# La calle, el nombre y el telefono vienen en la respuesta y NO se guardan. Si
+# alguien agrega una columna con la direccion, esta prueba lo frena.
+revisar("destino: solo devuelve la zona, nunca la direccion ni el nombre",
+        sorted(destino_de_envio({"receiver_address": DIRECCION})),
+        sorted(VACIO))
+
+revisar("destino: CABA se distingue por el id",
+        destino_de_envio({"receiver_address": {
+            "state": {"id": "AR-C", "name": "Capital Federal"},
+            "city": {"name": "Palermo"}, "zip_code": "1425"}})["destino_provincia_id"],
+        "AR-C")
+
+revisar("destino: envio sin direccion", destino_de_envio({"id": 1}), VACIO)
+revisar("destino: None", destino_de_envio(None), VACIO)
+revisar("destino: respuesta que no es objeto", destino_de_envio([1]), VACIO)
+revisar("destino: campos que no son objetos no explotan",
+        destino_de_envio({"receiver_address": {"state": "AR-B", "city": None,
+                                               "zip_code": ""}}),
+        VACIO)
+revisar("destino: CP numerico pasa a texto",
+        destino_de_envio({"receiver_address": {"zip_code": 1900}})["destino_cp"],
+        "1900")
 
 
 print()

@@ -61,8 +61,30 @@ URL_ENVIO = "https://api.mercadolibre.com/shipments/{}"
 ALTER_LOGISTICA = (
     "ALTER TABLE bronze.ml_envios "
     "  ADD COLUMN IF NOT EXISTS logistica text, "
-    "  ADD COLUMN IF NOT EXISTS modo_envio text"
+    "  ADD COLUMN IF NOT EXISTS modo_envio text, "
+    "  ADD COLUMN IF NOT EXISTS destino_provincia_id text, "
+    "  ADD COLUMN IF NOT EXISTS destino_provincia text, "
+    "  ADD COLUMN IF NOT EXISTS destino_ciudad text, "
+    "  ADD COLUMN IF NOT EXISTS destino_barrio text, "
+    "  ADD COLUMN IF NOT EXISTS destino_cp text"
 )
+
+# ---------------------------------------------------------------------------
+#  A DONDE FUE CADA VENTA
+# ---------------------------------------------------------------------------
+#
+# Para el mapa de concentracion de ventas por zona (CABA, primer cordon, Pilar,
+# La Plata...). Igual que la logistica, NO VIENE EN LA ORDEN: vive en
+# `/shipments/{id}`, la misma respuesta que ya se pide para la logistica, asi
+# que guardarlo no suma ninguna llamada a la API.
+#
+# SOLO LA ZONA, NUNCA LA DIRECCION. Se guarda provincia, ciudad, barrio y codigo
+# postal. La calle, el numero, el nombre de quien recibe y el telefono tambien
+# vienen en la respuesta y se descartan a proposito: para un mapa por partido no
+# hacen falta y son datos personales del comprador que no tienen por que estar
+# en la base.
+COLUMNAS_DESTINO = ("destino_provincia_id", "destino_provincia",
+                    "destino_ciudad", "destino_barrio", "destino_cp")
 
 
 def to_date(valor):
@@ -102,8 +124,49 @@ def logistica_de_envio(data):
     return texto_o_nada(tipo), texto_o_nada(modo)
 
 
+def _nombre(obj):
+    """El `name` de un objeto {id, name} de ML, o None."""
+    return texto_o_nada(obj.get("name")) if isinstance(obj, dict) else None
+
+
+def destino_de_envio(data):
+    """La zona a la que fue el envio, del JSON de `/shipments/{id}`.
+
+    Devuelve un dict con las COLUMNAS_DESTINO; las que no vienen quedan en None.
+
+    SE MIRAN DOS LUGARES, como con la logistica: el formato viejo lo trae en
+    `receiver_address` y el nuevo en `destination.shipping_address`. Se prueba
+    el viejo primero y se cae al nuevo.
+
+    LA PROVINCIA VA CON SU ID (`AR-C`, `AR-B`...) ademas del nombre, porque el
+    nombre ML lo escribe de varias formas ("Capital Federal", "CABA", "Ciudad
+    Autonoma de Buenos Aires") y el id es lo que separa sin dudas la Ciudad de
+    la Provincia de Buenos Aires, que es el corte que mas importa en el mapa.
+    """
+    vacio = dict.fromkeys(COLUMNAS_DESTINO)
+    if not isinstance(data, dict):
+        return vacio
+
+    dire = data.get("receiver_address")
+    if not isinstance(dire, dict) or not dire:
+        destino = data.get("destination")
+        dire = destino.get("shipping_address") if isinstance(destino, dict) else None
+    if not isinstance(dire, dict):
+        return vacio
+
+    provincia = dire.get("state")
+    return {
+        "destino_provincia_id": texto_o_nada(
+            provincia.get("id") if isinstance(provincia, dict) else None),
+        "destino_provincia": _nombre(provincia),
+        "destino_ciudad": _nombre(dire.get("city")),
+        "destino_barrio": _nombre(dire.get("neighborhood")),
+        "destino_cp": texto_o_nada(dire.get("zip_code")),
+    }
+
+
 def asegurar_columnas():
-    """Agrega logistica/modo_envio si la tabla ya existia sin ellas.
+    """Agrega logistica/modo_envio/destino_* si la tabla ya existia sin ellas.
 
     Si `bronze.ml_envios` todavia no existe no hace nada: la crea el primer
     `to_sql` con las columnas que traiga el DataFrame, que ya son las nuevas.
@@ -306,11 +369,15 @@ def extraer_envios(desde=None, hasta=None, marca=None):
                 # con la logistica en null: el costo de envio --que es lo que
                 # entra al margen-- no se pierde por un dato de color. Lo que
                 # quedo en null lo levanta despues --solo-logistica.
+                # El destino sale de la misma respuesta que la logistica.
                 tipo, modo = None, None
+                destino = destino_de_envio(None)
                 try:
                     resp_envio = pedir(URL_ENVIO.format(ship_id))
                     if resp_envio.status_code == 200:
-                        tipo, modo = logistica_de_envio(resp_envio.json())
+                        data_envio = resp_envio.json()
+                        tipo, modo = logistica_de_envio(data_envio)
+                        destino = destino_de_envio(data_envio)
                 except Exception:
                     pass
 
@@ -320,6 +387,7 @@ def extraer_envios(desde=None, hasta=None, marca=None):
                     "costo_envio": costo_envio,
                     "logistica": tipo,
                     "modo_envio": modo,
+                    **destino,
                 })
             else:
                 errores += 1
@@ -343,7 +411,19 @@ def extraer_envios(desde=None, hasta=None, marca=None):
 
 
 def completar_logistica(desde=None, hasta=None):
-    """Rellena `logistica`/`modo_envio` en los envios que ya estan bajados.
+    """Rellena logistica y destino en los envios que ya estan bajados.
+
+    LAS DOS COSAS VAN JUNTAS porque salen de la misma respuesta de
+    `/shipments/{id}`: un envio al que le falta cualquiera de las dos se pide
+    una sola vez y se completan ambas. Lo que ya estaba guardado no se pisa con
+    un null (el UPDATE usa coalesce).
+
+    El destino se agrego el 10/11/2026, cuando ya estaban bajados todos los
+    envios desde mayo: la primera pasada despues de eso recorre el historico
+    entero. Las siguientes solo miran lo que quedo sin dato. Un envio que ML
+    devuelve sin direccion (retiro en persona, envio acordado por fuera) se
+    vuelve a pedir en cada relleno -- son pocos y es el mismo precio que se paga
+    con la logistica por no inventar un dato.
 
     POR QUE ES UN PASO APARTE Y NO PARTE DE LA CORRIDA. Cuando se agrego la
     columna ya habia 62.616 envios bajados, y el filtro de extraer_envios()
@@ -357,7 +437,7 @@ def completar_logistica(desde=None, hasta=None):
     y volver a correrlo sigue desde donde quedo. Y se puede repetir sin miedo --
     actualiza por shipping_id, no inserta.
     """
-    print("=== Completando la logistica de los envios ya bajados ===")
+    print("=== Completando logistica y destino de los envios ya bajados ===")
     asegurar_columnas()
 
     piso = (desde or FECHA_CORTE).isoformat()
@@ -374,11 +454,11 @@ def completar_logistica(desde=None, hasta=None):
         FROM bronze.ml_envios e
         JOIN bronze.ml_ventas v
           ON v."shipping.id"::bigint::text = e.shipping_id
-        WHERE e.logistica IS NULL
+        WHERE (e.logistica IS NULL OR e.destino_provincia_id IS NULL)
           AND v.date_created >= %(piso)s{tope}
     """, engine, params={"piso": piso})
 
-    print(f"Faltan {len(faltan)} envios sin logistica.")
+    print(f"Faltan {len(faltan)} envios sin logistica o sin destino.")
     if len(faltan) == 0:
         print("Ya estan todos! Nada que hacer.")
         return
@@ -392,8 +472,14 @@ def completar_logistica(desde=None, hasta=None):
             return
         with engine.begin() as con:
             con.execute(
-                text("UPDATE bronze.ml_envios "
-                     "   SET logistica = :logistica, modo_envio = :modo "
+                text("UPDATE bronze.ml_envios SET "
+                     "  logistica = coalesce(:logistica, logistica), "
+                     "  modo_envio = coalesce(:modo, modo_envio), "
+                     "  destino_provincia_id = coalesce(:destino_provincia_id, destino_provincia_id), "
+                     "  destino_provincia = coalesce(:destino_provincia, destino_provincia), "
+                     "  destino_ciudad = coalesce(:destino_ciudad, destino_ciudad), "
+                     "  destino_barrio = coalesce(:destino_barrio, destino_barrio), "
+                     "  destino_cp = coalesce(:destino_cp, destino_cp) "
                      " WHERE shipping_id = :shipping_id"),
                 pendientes,
             )
@@ -403,18 +489,21 @@ def completar_logistica(desde=None, hasta=None):
         try:
             resp = pedir(URL_ENVIO.format(ship_id))
             if resp.status_code == 200:
-                tipo, modo = logistica_de_envio(resp.json())
-                # Un envio que contesta 200 pero sin logistic_type NO se guarda:
-                # dejarlo en null es lo correcto --no sabemos como salio-- pero
+                data = resp.json()
+                tipo, modo = logistica_de_envio(data)
+                destino = destino_de_envio(data)
+                # Un envio que contesta 200 pero sin logistica NI destino no se
+                # guarda: dejarlo en null es lo correcto --no sabemos-- pero
                 # entonces la proxima corrida lo vuelve a pedir. Es el precio de
                 # no inventar un dato, y son poquitos.
-                if tipo is None:
+                if tipo is None and destino["destino_provincia_id"] is None:
                     errores += 1
                 else:
                     pendientes.append({
                         "shipping_id": ship_id,
                         "logistica": tipo,
                         "modo": modo,
+                        **destino,
                     })
             else:
                 errores += 1
@@ -436,6 +525,16 @@ def completar_logistica(desde=None, hasta=None):
     print("\nComo salieron los envios que ya tienen el dato:")
     for _, fila in resumen.iterrows():
         print(f"  {fila['logistica']:<16} {fila['envios']}")
+
+    destinos = pd.read_sql("""
+        SELECT coalesce(destino_provincia, '(sin dato)') AS provincia,
+               count(*) AS envios
+        FROM bronze.ml_envios
+        GROUP BY 1 ORDER BY 2 DESC LIMIT 8
+    """, engine)
+    print("\nA donde fueron (las 8 provincias con mas envios):")
+    for _, fila in destinos.iterrows():
+        print(f"  {fila['provincia']:<32} {fila['envios']}")
     print(f"Errores en esta corrida: {errores} (se reintentan en la proxima)")
 
 
@@ -452,8 +551,9 @@ def main():
                              "articulo de esa marca. Para un relleno viejo.")
     parser.add_argument("--solo-logistica", action="store_true",
                         help="No baja costos: completa la logistica (Full, "
-                             "Flex, Colecta) de los envios ya bajados que la "
-                             "tengan en null. Para el relleno historico.")
+                             "Flex, Colecta) y el destino (provincia, ciudad, "
+                             "CP) de los envios ya bajados que tengan alguno "
+                             "en null. Para el relleno historico.")
     args = parser.parse_args()
 
     if args.desde and args.hasta and args.hasta < args.desde:
