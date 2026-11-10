@@ -1,0 +1,65 @@
+name: Proponer objetivos
+
+# ============================================================================
+#  ARMA LA PROPUESTA DE OBJETIVOS DE UN MES, Y NO LA CARGA.
+#
+#  Corre `proponer_objetivos.py` y deja el Excel para bajar al final de la
+#  corrida ("Artifacts"). Se dispara a mano --pestaña Actions, "Run
+#  workflow"-- porque es un borrador para revisar, no un dato del tablero.
+#
+#  Para cargarla: se revisa, se guarda como "AAAA-MM objetivos.xlsx" y se
+#  sube a objetivos_mensuales/. El "(propuesta)" del nombre hace que la carga
+#  la ignore mientras nadie la miro.
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      mes:
+        description: 'Mes comercial AAAA-MM (vacio = el de hoy)'
+        required: false
+        default: ''
+
+# Solo lee la base: no hace falta escribir nada en el repo.
+permissions:
+  contents: read
+
+jobs:
+  proponer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      # El mes comercial de hoy sale de date.today(): con el runner en UTC, a
+      # las 22 de un dia 5 ya seria el mes siguiente.
+      TZ: America/Argentina/Buenos_Aires
+
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASS: ${{ secrets.DB_PASS }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Armar la propuesta
+        env:
+          MES: ${{ inputs.mes }}
+        run: python proponer_objetivos.py $MES --carpeta propuesta
+
+      - name: Dejar el Excel para bajar
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: propuesta-objetivos
+          path: propuesta/*.xlsx
+          if-no-files-found: warn
