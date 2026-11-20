@@ -1,0 +1,56 @@
+name: Sondeo Mercado Ads
+
+# Muestra lo que contesta la API de publicidad de Mercado Libre (Product Ads)
+# SIN escribir nada: el anunciante, la ruta que funciona y tres anuncios de
+# ayer con sus metricas. Para verificar ml_ads.py antes de confiar en los
+# numeros del Tablero de Marca, o para ver por que falla (por ejemplo, si a la
+# aplicacion le falta el permiso de Publicidad).
+#
+# Con "cargar" en si, ademas corre la carga de verdad (la misma del
+# orquestador) para no esperar a la proxima corrida.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cargar:
+        description: 'Despues de mostrar, cargar bronze.ml_ads_diario (si/no)'
+        required: false
+        default: 'no'
+      dias:
+        description: 'Dias hacia atras a cargar (maximo 90)'
+        required: false
+        default: '30'
+
+# Comparte el grupo con el orquestador: los dos renuevan el token de ML.
+concurrency:
+  group: orquestador
+  cancel-in-progress: false
+
+jobs:
+  sondear:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TZ: America/Argentina/Buenos_Aires
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASS: ${{ secrets.DB_PASS }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+      ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+      ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+      ML_REDIRECT_URI: ${{ secrets.ML_REDIRECT_URI }}
+      ML_USER_ID: ${{ secrets.ML_USER_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+      - name: Mostrar lo que contesta la API
+        run: python ml_ads.py --explorar
+      - name: Cargar
+        if: ${{ inputs.cargar == 'si' }}
+        run: python ml_ads.py --dias "${{ inputs.dias }}"

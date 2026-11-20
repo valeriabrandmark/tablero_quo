@@ -245,6 +245,14 @@ PASOS = [
      "cada_horas": None, "critico": False,
      "escribe": "ml_estado_item, ml_precio_item", "techo": 10 * 60},
 
+    # MERCADO ADS para el Tablero de Marca (inversion en Product Ads por marca).
+    # Cada 6 h alcanza: el costo del dia se mueve poco, y la venta atribuida
+    # llega dias despues igual -- cada corrida reescribe los ultimos 30 dias.
+    # No critico: si falla (por ejemplo, sin permiso de Publicidad en la app de
+    # ML) el tablero muestra lo ultimo que haya y nada mas se entera.
+    {"comando": "ml_ads.py",                   "intentos": 2, "espera": 30,
+     "cada_horas": 6, "critico": False, "escribe": "ml_ads_diario", "techo": 10 * 60},
+
     # ACA ESTABAN `ml_pulso.py --solo-buybox` Y `experimento.py --consolidar`.
     # Se sacaron el 21/08/2026 porque el tablero de elasticidad dejo de leer lo
     # que escribian.
