@@ -18,12 +18,22 @@ La API devuelve el total del rango que se le pide. Pidiendo de a un dia, el
 tablero puede cortar por cualquier periodo (mes calendario, mes comercial, 7
 dias) y comparar con el anterior sin volver a llamar a la API.
 
-POR QUE SE REESCRIBE UNA VENTANA Y NO SOLO HOY
+CUANTO SE PIDE EN CADA CORRIDA
 
-Mercado Libre atribuye ventas al anuncio DESPUES del clic (la venta indirecta
-puede llegar dias mas tarde), y el costo del dia en curso todavia se mueve.
-Cada corrida vuelve a pedir los ultimos DIAS_VENTANA dias y los reemplaza
-enteros: una corrida repetida deja lo mismo.
+La cuenta (QUOSALES) tiene mas de 7.000 anuncios de TODAS las marcas, casi
+todos pausados, y la API los devuelve todos, con o sin gasto, de a 50. Un dia
+son ~145 llamadas; los 30 dias de la ventana, ~4.300. El primer sondeo
+(20/11/2026) los pidio en fila y no termino en 15 minutos.
+
+Por eso:
+  - Se piden solo los dias que FALTAN (los cargados quedan anotados en
+    bronze.ml_ads_dias) mas los ultimos DIAS_RELEER, que se piden siempre:
+    Mercado Libre atribuye ventas al anuncio DESPUES del clic y el costo del
+    dia en curso todavia se mueve. Una corrida normal son 3 dias.
+  - Las paginas van en paralelo (HILOS), como el catalogo de publicaciones.
+  - `--todo` vuelve a pedir la ventana entera.
+
+Cada dia pedido se reemplaza entero: una corrida repetida deja lo mismo.
 
 LA API
 
@@ -47,14 +57,16 @@ que tildarlo en la app (developers.mercadolibre.com.ar -> Mis aplicaciones ->
 Permisos) y volver a autorizar con ml_token.py.
 
 Uso:
-  python ml_ads.py                 ventana de DIAS_VENTANA dias
-  python ml_ads.py --dias 90       mas atras (la API no da mas de 90)
+  python ml_ads.py                 los dias que faltan de la ventana + los ultimos
+  python ml_ads.py --dias 90       ventana mas larga (la API no da mas de 90)
+  python ml_ads.py --todo          vuelve a pedir toda la ventana
   python ml_ads.py --explorar      solo muestra lo que contesta la API
 """
 
 import argparse
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
@@ -66,6 +78,8 @@ from mercadolibre import llamar_ml, token_ml
 
 SITIO = "MLA"
 DIAS_VENTANA = 30
+DIAS_RELEER = 3
+HILOS = 12
 LIMITE_API_DIAS = 90
 POR_PAGINA = 50
 
@@ -116,6 +130,12 @@ create table if not exists bronze.ml_ads_diario (
   primary key (fecha, item_id)
 );
 alter table bronze.ml_ads_diario enable row level security;
+create table if not exists bronze.ml_ads_dias (
+  fecha       date        primary key,
+  anuncios    integer,
+  cargado_en  timestamptz not null default now()
+);
+alter table bronze.ml_ads_dias enable row level security;
 comment on table bronze.ml_ads_diario is
   'Mercado Ads (Product Ads): inversion y venta atribuida por dia y publicacion. La escribe ml_ads.py.';
 """
@@ -136,7 +156,7 @@ def anunciantes(tok):
     return [a for a in lista if (a.get("site_id") or SITIO) == SITIO]
 
 
-def _pagina(tok, ruta, dia, offset):
+def _pagina(tok, ruta, dia, offset, pausa=True):
     return llamar_ml(
         ruta, tok,
         params={
@@ -147,6 +167,7 @@ def _pagina(tok, ruta, dia, offset):
             "offset": offset,
         },
         headers_extra={"api-version": "2"},
+        pausa=pausa,
     )
 
 
@@ -167,17 +188,29 @@ def elegir_ruta(tok, adv, dia):
     raise RuntimeError(f"Ninguna ruta de Product Ads contesto: {ultimo}")
 
 
-def anuncios_del_dia(tok, ruta, dia):
-    """Todos los anuncios con su metrica de ESE dia (paginado)."""
-    filas, offset = [], 0
-    while True:
-        r = _pagina(tok, ruta, dia, offset)
-        resultados = r.get("results", []) if isinstance(r, dict) else []
-        filas.extend(resultados)
-        total = (r.get("paging") or {}).get("total") if isinstance(r, dict) else None
-        offset += POR_PAGINA
-        if not resultados or len(resultados) < POR_PAGINA or (total is not None and offset >= total):
-            return filas
+def anuncios_de_los_dias(tok, ruta, dias):
+    """{dia: [anuncios]} de todos los dias pedidos, con las paginas en paralelo.
+
+    Primero la pagina 0 de cada dia (trae el total), despues el resto de las
+    paginas de todos los dias juntas. `pausa=False`: el freno lo pone HILOS.
+    """
+    def pedir(par):
+        dia, offset = par
+        r = _pagina(tok, ruta, dia, offset, pausa=False)
+        return dia, offset, r if isinstance(r, dict) else {}
+
+    out = {d: [] for d in dias}
+    with ThreadPoolExecutor(max_workers=HILOS) as ex:
+        primeras = list(ex.map(pedir, [(d, 0) for d in dias]))
+        resto = []
+        for dia, _, r in primeras:
+            out[dia].extend(r.get("results", []))
+            total = (r.get("paging") or {}).get("total") or 0
+            resto.extend((dia, o) for o in range(POR_PAGINA, total, POR_PAGINA))
+        print(f"  {len(dias)} dia(s) · {len(primeras) + len(resto)} llamadas")
+        for dia, _, r in ex.map(pedir, resto):
+            out[dia].extend(r.get("results", []))
+    return out
 
 
 def _metrica(anuncio, clave):
@@ -248,6 +281,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--dias", type=int, default=DIAS_VENTANA)
     ap.add_argument("--explorar", action="store_true")
+    ap.add_argument("--todo", action="store_true", help="volver a pedir toda la ventana")
     args = ap.parse_args()
     dias = max(1, min(args.dias, LIMITE_API_DIAS))
 
@@ -270,15 +304,24 @@ def main():
     hasta = date.today()
     desde = hasta - timedelta(days=dias - 1)
     engine = crear_engine()
+    with engine.begin() as con:
+        con.exec_driver_sql(DDL)
+        cargados = {r[0] for r in con.execute(
+            text("select fecha from bronze.ml_ads_dias where fecha between :d and :h"), {"d": desde, "h": hasta})}
+    releer_desde = hasta - timedelta(days=DIAS_RELEER - 1)
+    pedir = [desde + timedelta(days=i) for i in range(dias)]
+    if not args.todo:
+        pedir = [d for d in pedir if d not in cargados or d >= releer_desde]
     marcas = marcas_por_item(engine)
     filas = []
+    por_dia_total = {d: 0 for d in pedir}
     for a in advs:
         adv = a["advertiser_id"]
         ruta = elegir_ruta(tok, adv, hasta - timedelta(days=1))
         print(f"  Anunciante {adv} ({a.get('advertiser_name') or a.get('account_name') or '-'}) · {ruta}")
-        dia = desde
-        while dia <= hasta:
-            for an in anuncios_del_dia(tok, ruta, dia):
+        for dia, anuncios in anuncios_de_los_dias(tok, ruta, pedir).items():
+            por_dia_total[dia] += len(anuncios)
+            for an in anuncios:
                 item = str(an.get("item_id") or an.get("id") or "")
                 if not item:
                     continue
@@ -287,6 +330,9 @@ def main():
                 if not costo and not impresiones:
                     continue
                 sku, marca = marcas.get(item, (None, None))
+                # La marca de SIGMA manda; si la publicacion no tiene SKU de
+                # SIGMA, la que informa el propio anuncio.
+                marca = marca or (str(an.get("brand_value_name")).strip().upper() if an.get("brand_value_name") else None)
                 filas.append({
                     "fecha": dia,
                     "item_id": item,
@@ -306,7 +352,6 @@ def main():
                     "unidades": int(_metrica(an, "units_quantity")
                                     or _metrica(an, "direct_units_quantity") + _metrica(an, "indirect_units_quantity")),
                 })
-            dia += timedelta(days=1)
 
     df = pd.DataFrame(filas)
     if not df.empty:
@@ -316,15 +361,21 @@ def main():
         df = df.groupby(["fecha", "item_id"], as_index=False).agg({**{c: "sum" for c in num}, **primero})
         df["actualizado_en"] = datetime.now(timezone.utc)
 
-    # LA VENTANA SE REEMPLAZA ENTERA Y DE UNA: borrar e insertar en la misma
-    # transaccion, asi el tablero nunca ve la ventana a medio cargar.
+    # LOS DIAS PEDIDOS SE REEMPLAZAN ENTEROS Y DE UNA: borrar e insertar en la
+    # misma transaccion, asi el tablero nunca ve un dia a medio cargar.
     with engine.begin() as con:
-        con.exec_driver_sql(DDL)
-        con.execute(text("delete from bronze.ml_ads_diario where fecha between :d and :h"), {"d": desde, "h": hasta})
+        if pedir:
+            con.execute(text("delete from bronze.ml_ads_diario where fecha = any(:dias)"), {"dias": pedir})
         if not df.empty:
             df.to_sql("ml_ads_diario", con, schema="bronze", if_exists="append", index=False)
+        for d in pedir:
+            con.execute(
+                text("""insert into bronze.ml_ads_dias (fecha, anuncios, cargado_en) values (:f, :n, now())
+                        on conflict (fecha) do update set anuncios = excluded.anuncios, cargado_en = now()"""),
+                {"f": d, "n": por_dia_total[d]},
+            )
     sin_marca = int(df["marca"].isna().sum()) if not df.empty else 0
-    print(f"  Guardado: bronze.ml_ads_diario {desde} a {hasta} · {len(df)} filas"
+    print(f"  Guardado: bronze.ml_ads_diario · {len(pedir)} dia(s) pedidos de {desde} a {hasta} · {len(df)} filas"
           f" · inversion ${df['costo'].sum() if not df.empty else 0:,.0f}"
           + (f" · {sin_marca} sin marca" if sin_marca else ""))
 
