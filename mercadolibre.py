@@ -265,7 +265,7 @@ def token_ml(forzar=False):
 
 
 def llamar_ml(endpoint, access_token, params=None, max_reintentos=6, pausa=True,
-              reintentos_5xx=3):
+              reintentos_5xx=3, headers_extra=None):
     """Llama a la API de ML con el access_token. Reintenta 429 y 5xx.
 
     Los dos reintentos se cuentan POR SEPARADO porque son dos cosas distintas:
@@ -279,7 +279,9 @@ def llamar_ml(endpoint, access_token, params=None, max_reintentos=6, pausa=True,
     de cada uno seria frenar dos veces.
     """
     url = "https://api.mercadolibre.com" + endpoint
-    headers = {"Authorization": f"Bearer {access_token}"}
+    # `headers_extra`: la API de publicidad (ml_ads.py) pide la version en un
+    # header (`Api-Version`), y sin el contesta otra cosa o un 400.
+    headers = {"Authorization": f"Bearer {access_token}", **(headers_extra or {})}
 
     intento = 0
     intento_5xx = 0
@@ -297,7 +299,7 @@ def llamar_ml(endpoint, access_token, params=None, max_reintentos=6, pausa=True,
                 if nuevo == access_token:
                     nuevo = token_ml(forzar=True)
                 access_token = nuevo
-            headers = {"Authorization": f"Bearer {access_token}"}
+            headers = {"Authorization": f"Bearer {access_token}", **(headers_extra or {})}
             r = requests.get(url, headers=headers, params=params, timeout=TIMEOUT_HTTP)
 
         if r.status_code == 429:
