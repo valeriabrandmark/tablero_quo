@@ -1410,7 +1410,18 @@ SIGMA_TOKEN  SIGMA_URL_CLIENTE  SIGMA_BASEALIAS  SIGMA_ID_CLIENTE
 DIGIP_URL_BASE  DIGIP_API_KEY
 ML_USER_ID  ML_CLIENT_ID  ML_CLIENT_SECRET  ML_REDIRECT_URI
 TN_STORE_ID  TN_TOKEN  TN_USER_AGENT
+FIXY_API_TOKEN                                               # opcional, ver abajo
+FIXY_DESPACHOS_DIGIP  FIXY_URL_BASE                          # opcionales
 ```
+
+**FIXY** (depósito de Buenos Aires para Tienda Nube y Flex). `fixy.py` saca la
+foto diaria de stock por SKU en `bronze.fixy_stock` y
+`bronze.fixy_stock_historico`. Sin `FIXY_API_TOKEN` el paso se saltea sin
+fallar. Para probar el token: `python fixy.py --probar`; para ver qué contesta
+FIXY por un SKU: `python fixy.py --sku SS03006`. `digip_envios_full.py` también
+guarda lo que sale de Tucumán hacia FIXY en `bronze.digip_envios_fixy`: toma los
+despachos de Digip que diga `FIXY_DESPACHOS_DIGIP` (separados por coma, por
+defecto `FIXY`).
 
 Los tokens de Mercado Libre viven aparte en `ml_tokens.json` (tampoco se sube).
 **Mercado Libre devuelve un `refresh_token` nuevo en cada renovación y el script

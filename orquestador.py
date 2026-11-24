@@ -331,7 +331,18 @@ PASOS = [
     # anterior. Un dia de atraso en un reclamo no es lo mismo que un tablero
     # sin ventas.
     {"comando": "digip_envios_full.py",        "intentos": 2, "espera": 60,
-     "cada_horas": 6, "critico": False, "escribe": "digip_envios_full", "techo": 10 * 60},
+     "cada_horas": 6, "critico": False, "escribe": "digip_envios_full, digip_envios_fixy", "techo": 10 * 60},
+
+    # EL STOCK DE FIXY, el deposito de Buenos Aires que despacha Tienda Nube y
+    # Flex. Va DESPUES de digip_envios_full porque una de las listas de SKU a
+    # consultar es lo que mandamos alla (consultarStock no tiene "listar
+    # todo"). Cada hora: es la foto contra la que se controla que lo que
+    # mandamos entre y que lo que se vende se descuente.
+    #
+    # Sin FIXY_API_TOKEN termina en 0 sin hacer nada. No critico: un dia sin
+    # foto es un hueco en el control, no un tablero roto.
+    {"comando": "fixy.py",                     "intentos": 2, "espera": 60,
+     "cada_horas": None, "critico": False, "escribe": "fixy_stock, fixy_stock_historico", "techo": 10 * 60},
 
     # Los fletes se miran por semana: dos veces por dia alcanza y sobra.
     {"comando": "prorratear_flete.py",         "intentos": 2, "espera": 30,
