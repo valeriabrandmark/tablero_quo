@@ -14,23 +14,28 @@ suma de las ventas de todos los canales, no canal por canal.
 QUE TRAE, Y QUE NO
 
 La API (https://argentina.fixylogistica.com/docs/index.html, v2) tiene
-`consultarStock`, que contesta POR LISTA DE SKU: no hay un "listame todo".
-Por eso los SKU a consultar se arman de lo que puede estar alla:
+`consultarStock`. Verificado contra la cuenta real el 24/11/2026:
 
-  - lo que mandamos desde Tucuman      bronze.digip_envios_fixy
-  - lo que avisamos que va a entrar    app.fixy_recepciones_items
-    (incluye las importaciones, que llegan directo a FIXY)
-  - lo que se vendio por Flex o Tienda Nube en los ultimos 120 dias
+  - con `skus` como LISTA devuelve solo esos SKU (los que no tiene, no los
+    nombra; con la lista vacia contesta {"status": "error"});
+  - con `skus` como TEXTO (por ejemplo "[]") no filtra y devuelve TODO el
+    stock de la cuenta.
 
-Si un SKU esta en FIXY y no aparece en ninguna de las tres, no se consulta. Es
-el caso de algo que entro sin aviso, que es justamente lo que hay que evitar:
-la recepcion se avisa desde el tablero (Stock > FIXY).
+Lo segundo no esta documentado, y es lo que hace falta: sin eso, algo que
+entro a FIXY sin aviso no se veria nunca. Por las dudas de que lo cambien, se
+pide las dos cosas: TODO, y ademas la lista de SKU que pueden estar alla (lo
+mandado desde Tucuman, lo avisado y lo vendido por Flex o Tienda Nube). Si el
+"todo" deja de funcionar, la foto sigue saliendo con la lista.
 
-LA RESPUESTA DE consultarStock NO ESTA DOCUMENTADA. La doc muestra el pedido
-pero no un ejemplo de respuesta. `normalizar` acepta las formas razonables
-(lista, dict por SKU, envuelta en "data"/"message"/"stock") y se guarda SIEMPRE
-el json crudo de cada SKU en `crudo`: si la primera corrida real interpreta mal
-un campo, se corrige aca y no se perdio nada.
+LA RESPUESTA:
+
+  {"status": "ok", "data": [{"articulo_sku": "AC01004",
+     "articulo": "Diaper Genie Repuesto ...", "cliente_nombre": "QUO MARKETING SRL",
+     "stock_actual": 192, "stock_armado": 0, "stock_pendiente": 0,
+     "stock_total": 192}]}
+
+`disponible` es `stock_actual`. Se guarda siempre el json crudo de cada SKU en
+`crudo` (ahi estan armado, pendiente y total).
 
 QUE ESCRIBE
 
@@ -46,6 +51,7 @@ que no es un error.
     python fixy.py              la corrida normal
     python fixy.py --probar     solo el dummy-test: valida token y servidor
     python fixy.py --sku A1 B2  consulta esos SKU e imprime la respuesta cruda
+    python fixy.py --sku todo   lo mismo, con todo el stock de la cuenta
 """
 
 import argparse
@@ -78,10 +84,13 @@ DIAS_VENTAS = 120
 # Nombres posibles del SKU y de la cantidad en la respuesta. El primero que
 # aparezca gana. "disponible" antes que "stock": si vienen los dos, el que se
 # puede vender es el que importa.
-CLAVES_SKU = ("sku", "codigo", "codigo_articulo", "articulo", "producto")
+#
+# "articulo" NO esta en las claves de SKU: en FIXY es la DESCRIPCION, y
+# tomarla como codigo daria un SKU por cada nombre de producto.
+CLAVES_SKU = ("articulo_sku", "sku", "codigo_articulo", "codigo")
 CLAVES_CANTIDAD = (
-    "disponible", "stock_disponible", "cantidad_disponible",
-    "stock", "cantidad", "unidades", "total", "saldo",
+    "stock_actual", "disponible", "stock_disponible", "cantidad_disponible",
+    "stock", "cantidad", "unidades", "stock_total", "total", "saldo",
 )
 
 
@@ -146,8 +155,9 @@ def normalizar(respuesta):
                 sku = _sku(item)
                 if sku:
                     salida[sku] = (_cantidad(item), item)
-    elif isinstance(r, dict):
-        # {"SKU-1": 10, "SKU-2": {...}}
+    elif isinstance(r, dict) and "status" not in r:
+        # {"SKU-1": 10, "SKU-2": {...}}. Si trae "status" es una respuesta de
+        # FIXY sin datos (un rechazo), no un dict de SKU.
         for sku, v in r.items():
             if isinstance(v, dict):
                 salida[str(sku).strip()] = (_cantidad(v), v)
@@ -251,7 +261,9 @@ def main():
         return
 
     if args.sku:
-        crudo = llamar("consultarStock", {"skus": args.sku})
+        # "todo" consulta el stock entero (ver arriba por que es un texto).
+        pedido = "[]" if args.sku == ["todo"] else args.sku
+        crudo = llamar("consultarStock", {"skus": pedido})
         print(json.dumps(crudo, indent=2, ensure_ascii=False))
         print("\nInterpretado:")
         for sku, (cant, _) in normalizar(crudo).items():
@@ -263,19 +275,19 @@ def main():
 
     print("=== Stock FIXY ===")
     skus = skus_a_consultar(engine)
-    if not skus:
-        print("  No hay SKU para consultar todavia: nada que hacer.")
-        return
 
     ahora = datetime.now().astimezone()
-    foto = {}
+    # Primero TODO (skus como texto), despues la lista, que completa lo que el
+    # "todo" no haya traido.
+    foto = normalizar(llamar("consultarStock", {"skus": "[]"}))
+    print(f"  stock completo de la cuenta: {len(foto)} SKU")
     for i in range(0, len(skus), LOTE):
         lote = skus[i:i + LOTE]
         parte = normalizar(llamar("consultarStock", {"skus": lote}))
         foto.update(parte)
     sin_cantidad = sum(1 for c, _ in foto.values() if c is None)
 
-    print(f"  {len(skus)} SKU consultados, {len(foto)} con respuesta")
+    print(f"  {len(skus)} SKU de la lista, {len(foto)} con stock en FIXY")
     if sin_cantidad:
         print(f"  ATENCION: {sin_cantidad} SKU vinieron sin un campo de cantidad "
               f"reconocible. Ver `crudo` y ajustar CLAVES_CANTIDAD.")

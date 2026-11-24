@@ -22,6 +22,23 @@ def cantidades(r):
     return {k: v[0] for k, v in normalizar(r).items()}
 
 
+# La respuesta REAL de FIXY (24/11/2026). Es la que importa: las de abajo son
+# por si algun dia cambia de forma.
+REAL = {"status": "ok", "data": [
+    {"articulo_sku": "AC01004", "articulo": "Diaper Genie Repuesto Cuadrado",
+     "cliente_nombre": "QUO MARKETING SRL", "stock_actual": 192,
+     "stock_armado": 0, "stock_pendiente": 0, "stock_total": 192},
+    {"articulo_sku": "AC01005", "articulo": "Diaper Genie Repuesto Signature",
+     "cliente_nombre": "QUO MARKETING SRL", "stock_actual": 48,
+     "stock_armado": 2, "stock_pendiente": 1, "stock_total": 51},
+]}
+revisar("respuesta real: SKU de articulo_sku y cantidad de stock_actual",
+        cantidades(REAL), {"AC01004": 192.0, "AC01005": 48.0})
+revisar("la descripcion (`articulo`) nunca se toma como SKU",
+        cantidades([{"articulo": "Diaper Genie", "stock_actual": 3}]), {})
+revisar("rechazo de FIXY no da filas",
+        cantidades({"status": "error", "message": "skus requerido"}), {})
+
 revisar("lista con sku y stock",
         cantidades([{"sku": "A1", "stock": 10}, {"sku": "B2", "stock": "3"}]),
         {"A1": 10.0, "B2": 3.0})
