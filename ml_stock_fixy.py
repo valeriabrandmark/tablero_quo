@@ -14,11 +14,13 @@ QUE TOCA, Y SOBRE TODO QUE NO
     stock lo maneja Mercado Libre en su deposito) y NUNCA `cross_docking`
     (colecta desde Tucuman: ponerle stock de FIXY haria que ML mande a buscar
     a Tucuman mercaderia que esta en Buenos Aires).
-  - Solo SKU que estan, o alguna vez estuvieron, en FIXY. Al 24/11/2026 hay 126
-    SKU en Flex que salen de TUCUMAN y no estan en FIXY: si el criterio fuera
-    "todo Flex copia FIXY", esta corrida los pondria en cero. Un SKU entra al
-    sincronizador el dia que aparece en FIXY; si despues se agota alla, se
-    sincroniza en cero, que es lo correcto.
+  - TODAS las publicaciones Flex, porque desde 11/2026 todo Flex sale de FIXY
+    (Tucuman ya no despacha Flex). Un SKU que FIXY no tiene va a CERO en Flex:
+    publicarlo seria vender algo que nadie puede despachar.
+
+    El 24/11/2026 habia 126 SKU en Flex con 5.333 u. publicadas y ninguno en
+    FIXY (era stock de Tucuman de antes del cambio). La primera corrida los
+    pone en cero, y por eso frena: ver FRENOS.
 
 COMO ESCRIBE
 
@@ -87,22 +89,23 @@ def cantidad_objetivo(disponible_fixy, reserva=0):
     return max(0, int(disponible_fixy) - max(0, int(reserva)))
 
 
-def armar_plan(publicaciones, stock_fixy, skus_gestionados, reserva=0):
+def armar_plan(publicaciones, stock_fixy, reserva=0):
     """Que user product poner en que cantidad.
 
-    publicaciones     [{"item_id", "user_product_id", "sku", "logistica", "status"}]
-    stock_fixy        {sku: disponible} de la foto de AHORA
-    skus_gestionados  SKU que estan o estuvieron en FIXY
+    publicaciones  [{"item_id", "user_product_id", "sku", "logistica", "status"}]
+    stock_fixy     {sku: disponible} de la foto de AHORA. Un SKU que no esta
+                   es un SKU que FIXY no tiene: va a cero.
 
     Devuelve una lista de {"user_product_id", "sku", "items", "objetivo"}, uno
-    por user product. Lo que no es Flex o no es de FIXY no aparece.
+    por user product. Lo que no es Flex no aparece. Una publicacion Flex sin
+    SKU tampoco: no hay con que buscarla en FIXY, y se avisa aparte.
     """
     por_up = {}
     for p in publicaciones:
         sku = (p.get("sku") or "").strip()
         if p.get("logistica") != "self_service":
             continue
-        if not sku or sku not in skus_gestionados:
+        if not sku:
             continue
         up = p.get("user_product_id") or f"item:{p['item_id']}"
         fila = por_up.setdefault(up, {
@@ -211,18 +214,6 @@ def publicaciones_flex(engine):
         return [dict(r._mapping) for r in con.exec_driver_sql(sql)]
 
 
-def skus_historicos_fixy(engine):
-    from errores_bd import es_tabla_inexistente
-    try:
-        with engine.connect() as con:
-            return {r[0] for r in con.exec_driver_sql(
-                "select distinct trim(sku) from bronze.fixy_stock_historico")}
-    except Exception as e:
-        if es_tabla_inexistente(e):
-            return set()
-        raise
-
-
 DDL_LOG = """
 create table if not exists bronze.ml_stock_fixy_log (
     corrido_en       timestamptz not null,
@@ -270,26 +261,39 @@ def main():
 
     print(f"=== Mercado Libre Flex <- FIXY ({'APLICA' if aplicar else 'solo plan, no escribe'}) ===")
 
+    from conexion import crear_engine
+    engine = crear_engine(connect_args={"client_encoding": "utf8"})
+    pubs = publicaciones_flex(engine)
+    skus_flex = sorted({(p["sku"] or "").strip() for p in pubs if p["sku"]})
+    sin_sku = [p["item_id"] for p in pubs if not (p["sku"] or "").strip()]
+
     # La foto de AHORA, no la de la ultima corrida: lo que se publica tiene que
     # ser lo mas fresco posible, porque el mismo stock lo vende Tienda Nube.
+    #
+    # DOS PEDIDOS Y NO UNO, porque aca un SKU que falta va a CERO. El "todo"
+    # (skus como texto) no esta documentado; si un dia FIXY lo cambia y trae
+    # menos, se pondrian en cero publicaciones con stock. Por eso se pregunta
+    # ademas, explicitamente, por cada SKU que esta en Flex.
     foto = fixy.normalizar(fixy.llamar("consultarStock", {"skus": "[]"}))
+    for i in range(0, len(skus_flex), fixy.LOTE):
+        foto.update(fixy.normalizar(
+            fixy.llamar("consultarStock", {"skus": skus_flex[i:i + fixy.LOTE]})))
     if not foto:
         print("  FIXY no devolvio stock: NO se toca Mercado Libre.")
         sys.exit(1)
     stock_fixy = {sku: cant for sku, (cant, _) in foto.items()}
 
-    from conexion import crear_engine
-    engine = crear_engine(connect_args={"client_encoding": "utf8"})
-    gestionados = set(stock_fixy) | skus_historicos_fixy(engine)
-    plan = armar_plan(publicaciones_flex(engine), stock_fixy, gestionados, reserva)
-
-    print(f"  FIXY: {len(stock_fixy)} SKU con stock, {len(gestionados)} SKU gestionados")
-    print(f"  Flex de esos SKU: {len(plan)} user products "
-          f"({sum(len(f['items']) for f in plan)} publicaciones)")
+    plan = armar_plan(pubs, stock_fixy, reserva)
+    print(f"  FIXY: {len(stock_fixy)} SKU con stock")
+    print(f"  Flex: {len(plan)} user products ({sum(len(f['items']) for f in plan)} publicaciones), "
+          f"{sum(1 for f in plan if f['sku'] in stock_fixy)} con stock en FIXY")
+    if sin_sku:
+        print(f"  ATENCION: {len(sin_sku)} publicaciones Flex sin SKU, no se pueden "
+              f"sincronizar: {', '.join(sin_sku[:10])}")
     if reserva:
         print(f"  Reserva: {reserva} u. por SKU no se publican")
     if not plan:
-        print("  Ningun SKU de FIXY tiene publicacion Flex: nada que sincronizar.")
+        print("  No hay publicaciones Flex: nada que sincronizar.")
         return
 
     from mercadolibre import token_ml

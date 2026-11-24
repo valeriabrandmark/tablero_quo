@@ -1424,9 +1424,9 @@ despachos de Digip que diga `FIXY_DESPACHOS_DIGIP` (separados por coma, por
 defecto `FIXY`).
 
 **Mercado Libre Flex copia el stock de FIXY** (`ml_stock_fixy.py`, en cada
-corrida). Solo toca publicaciones Flex (`self_service`) de SKU que están o
-estuvieron en FIXY; nunca Full, nunca colecta desde Tucumán, nunca los SKU Flex
-que salen de Tucumán. **No escribe** hasta que el `.env` tenga
+corrida). Todo Flex sale de FIXY, así que toca **todas** las publicaciones Flex
+(`self_service`), y lo que FIXY no tiene va a cero. Nunca Full ni colecta desde
+Tucumán. **No escribe** hasta que el `.env` tenga
 `FIXY_SINCRONIZAR_ML=aplicar`: mientras tanto deja el plan en
 `bronze.ml_stock_fixy_log`. `FIXY_ML_RESERVA` (por defecto 0) guarda unidades
 sin publicar. Frena si FIXY no contesta o si el plan apaga más de 10 productos

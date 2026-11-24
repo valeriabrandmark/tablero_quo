@@ -347,8 +347,9 @@ PASOS = [
     # MERCADO LIBRE FLEX COPIA EL STOCK DE FIXY. Va justo despues de fixy.py,
     # pero vuelve a pedirle el stock a FIXY en el momento: lo que se publica
     # tiene que ser lo mas fresco posible, porque Tienda Nube vende del mismo
-    # pozo. Solo toca Flex de SKU que estan o estuvieron en FIXY (nunca Full,
-    # nunca colecta de Tucuman). Ver el docstring de ml_stock_fixy.py.
+    # pozo. Toca TODAS las publicaciones Flex --todo Flex sale de FIXY desde
+    # 11/2026-- y lo que FIXY no tiene va a cero. Nunca Full ni colecta de
+    # Tucuman. Ver el docstring de ml_stock_fixy.py.
     #
     # NO ESCRIBE salvo FIXY_SINCRONIZAR_ML=aplicar en el .env: sin eso deja el
     # plan en bronze.ml_stock_fixy_log y nada mas. Habilitarlo es una decision
