@@ -344,6 +344,18 @@ PASOS = [
     {"comando": "fixy.py",                     "intentos": 2, "espera": 60,
      "cada_horas": None, "critico": False, "escribe": "fixy_stock, fixy_stock_historico", "techo": 10 * 60},
 
+    # MERCADO LIBRE FLEX COPIA EL STOCK DE FIXY. Va justo despues de fixy.py,
+    # pero vuelve a pedirle el stock a FIXY en el momento: lo que se publica
+    # tiene que ser lo mas fresco posible, porque Tienda Nube vende del mismo
+    # pozo. Solo toca Flex de SKU que estan o estuvieron en FIXY (nunca Full,
+    # nunca colecta de Tucuman). Ver el docstring de ml_stock_fixy.py.
+    #
+    # NO ESCRIBE salvo FIXY_SINCRONIZAR_ML=aplicar en el .env: sin eso deja el
+    # plan en bronze.ml_stock_fixy_log y nada mas. Habilitarlo es una decision
+    # del negocio, no un deploy.
+    {"comando": "ml_stock_fixy.py",            "intentos": 1, "espera": 0,
+     "cada_horas": None, "critico": False, "escribe": "ml_stock_fixy_log", "techo": 10 * 60},
+
     # Los fletes se miran por semana: dos veces por dia alcanza y sobra.
     {"comando": "prorratear_flete.py",         "intentos": 2, "espera": 30,
      "cada_horas": 12, "critico": False, "escribe": "gold.fact_ventas_flete", "techo": 10 * 60},

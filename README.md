@@ -1423,6 +1423,16 @@ guarda lo que sale de Tucumán hacia FIXY en `bronze.digip_envios_fixy`: toma lo
 despachos de Digip que diga `FIXY_DESPACHOS_DIGIP` (separados por coma, por
 defecto `FIXY`).
 
+**Mercado Libre Flex copia el stock de FIXY** (`ml_stock_fixy.py`, en cada
+corrida). Solo toca publicaciones Flex (`self_service`) de SKU que están o
+estuvieron en FIXY; nunca Full, nunca colecta desde Tucumán, nunca los SKU Flex
+que salen de Tucumán. **No escribe** hasta que el `.env` tenga
+`FIXY_SINCRONIZAR_ML=aplicar`: mientras tanto deja el plan en
+`bronze.ml_stock_fixy_log`. `FIXY_ML_RESERVA` (por defecto 0) guarda unidades
+sin publicar. Frena si FIXY no contesta o si el plan apaga más de 10 productos
+de una vez (`--forzar` para pasar igual). Para ver el plan a mano:
+`python ml_stock_fixy.py`.
+
 Los tokens de Mercado Libre viven aparte en `ml_tokens.json` (tampoco se sube).
 **Mercado Libre devuelve un `refresh_token` nuevo en cada renovación y el script
 lo pisa**, así que si se corren dos procesos a la vez contra la misma API, uno
