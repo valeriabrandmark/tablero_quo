@@ -46,6 +46,8 @@ jobs:
 
       DIGIP_API_KEY: ${{ secrets.DIGIP_API_KEY }}
       DIGIP_URL_BASE: ${{ secrets.DIGIP_URL_BASE }}
+      # Que despachos de Digip van a FIXY: ver orquestador.yml.
+      FIXY_DESPACHOS_DIGIP: ${{ vars.FIXY_DESPACHOS_DIGIP }}
 
     steps:
       - uses: actions/checkout@v4

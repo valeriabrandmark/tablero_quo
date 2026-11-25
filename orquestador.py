@@ -351,7 +351,8 @@ PASOS = [
     # 11/2026-- y lo que FIXY no tiene va a cero. Nunca Full ni colecta de
     # Tucuman. Ver el docstring de ml_stock_fixy.py.
     #
-    # NO ESCRIBE salvo FIXY_SINCRONIZAR_ML=aplicar en el .env: sin eso deja el
+    # NO ESCRIBE salvo FIXY_SINCRONIZAR_ML=aplicar (variable del repo en
+    # GitHub Actions, ver orquestador.yml): sin eso deja el
     # plan en bronze.ml_stock_fixy_log y nada mas. Habilitarlo es una decision
     # del negocio, no un deploy.
     {"comando": "ml_stock_fixy.py",            "intentos": 1, "espera": 0,

@@ -253,7 +253,7 @@ def main():
     args = ap.parse_args()
 
     if not TOKEN:
-        print("FIXY_API_TOKEN no esta en el .env: se saltea el stock de FIXY.")
+        print("Falta FIXY_API_TOKEN (secret del repo, o .env a mano): se saltea el stock de FIXY.")
         return
 
     if args.probar:

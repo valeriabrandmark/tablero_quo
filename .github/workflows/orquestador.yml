@@ -147,6 +147,21 @@ jobs:
       # falla diciendo que falta y el resto del pipeline sigue (no es critico).
       FOXIE_TOKEN: ${{ secrets.FOXIE_TOKEN }}
 
+      # FIXY, el deposito de Buenos Aires. El token es un SECRET; sin el,
+      # fixy.py y ml_stock_fixy.py se saltean sin fallar.
+      FIXY_API_TOKEN: ${{ secrets.FIXY_API_TOKEN }}
+      # Los interruptores van como VARIABLES del repo (Settings > Secrets and
+      # variables > Actions > Variables), no como secrets: no son secretos y se
+      # tienen que poder leer y cambiar sin tocar codigo.
+      #
+      #   FIXY_SINCRONIZAR_ML   "aplicar" para que Mercado Libre Flex copie el
+      #                         stock de FIXY. Vacio: solo deja el plan.
+      #   FIXY_ML_RESERVA       unidades por SKU que no se publican en ML.
+      #   FIXY_DESPACHOS_DIGIP  como se llama en Digip el despacho a FIXY.
+      FIXY_SINCRONIZAR_ML: ${{ vars.FIXY_SINCRONIZAR_ML }}
+      FIXY_ML_RESERVA: ${{ vars.FIXY_ML_RESERVA }}
+      FIXY_DESPACHOS_DIGIP: ${{ vars.FIXY_DESPACHOS_DIGIP }}
+
     steps:
       - uses: actions/checkout@v4
 
