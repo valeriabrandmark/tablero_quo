@@ -6,16 +6,21 @@ name: Sondeo Mercado Ads
 # numeros del Tablero de Marca, o para ver por que falla (por ejemplo, si a la
 # aplicacion le falta el permiso de Publicidad).
 #
-# Con "cargar" en si, ademas corre la carga de verdad (la misma del
-# orquestador) para no esperar a la proxima corrida.
+# Con la casilla "cargar" tildada, ademas corre la carga de verdad (la misma
+# del orquestador) para no esperar a la proxima corrida.
+#
+# ES UNA CASILLA Y NO UN TEXTO A PROPOSITO: con texto, el 24/11/2026 se
+# escribio "si" con tilde, la comparacion con 'si' dio falso y la carga se
+# salteo sin avisar.
 
 on:
   workflow_dispatch:
     inputs:
       cargar:
-        description: 'Despues de mostrar, cargar bronze.ml_ads_diario (si/no)'
+        description: 'Despues de mostrar, cargar bronze.ml_ads_diario'
+        type: boolean
         required: false
-        default: 'no'
+        default: false
       dias:
         description: 'Dias hacia atras (maximo 90). La primera vez trae todos; despues, solo los que faltan y los ultimos 3'
         required: false
@@ -52,5 +57,5 @@ jobs:
       - name: Mostrar lo que contesta la API
         run: python ml_ads.py --explorar
       - name: Cargar
-        if: ${{ inputs.cargar == 'si' }}
+        if: ${{ inputs.cargar }}
         run: python ml_ads.py --dias "${{ inputs.dias }}"
