@@ -1,0 +1,45 @@
+name: Cargar Mercado Ads
+
+# Carga bronze.ml_ads_diario (la publicidad de Mercado Libre por dia y
+# publicacion) sin esperar al orquestador, que lo hace solo cada 6 horas.
+# Trae los dias que faltan de la ventana y relee los ultimos 3; para ir mas
+# atras, subir "dias" (la API no da mas de 90).
+
+on:
+  workflow_dispatch:
+    inputs:
+      dias:
+        description: 'Dias hacia atras (maximo 90). Trae solo los que faltan y relee los ultimos 3'
+        required: false
+        default: '30'
+
+# Comparte el grupo con el orquestador: los dos renuevan el token de ML.
+concurrency:
+  group: orquestador
+  cancel-in-progress: false
+
+jobs:
+  cargar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TZ: America/Argentina/Buenos_Aires
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASS: ${{ secrets.DB_PASS }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+      ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+      ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+      ML_REDIRECT_URI: ${{ secrets.ML_REDIRECT_URI }}
+      ML_USER_ID: ${{ secrets.ML_USER_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+      - name: Cargar
+        run: python ml_ads.py --dias "${{ inputs.dias }}"

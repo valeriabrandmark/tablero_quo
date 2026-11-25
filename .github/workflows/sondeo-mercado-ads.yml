@@ -6,25 +6,14 @@ name: Sondeo Mercado Ads
 # numeros del Tablero de Marca, o para ver por que falla (por ejemplo, si a la
 # aplicacion le falta el permiso de Publicidad).
 #
-# Con la casilla "cargar" tildada, ademas corre la carga de verdad (la misma
-# del orquestador) para no esperar a la proxima corrida.
-#
-# ES UNA CASILLA Y NO UN TEXTO A PROPOSITO: con texto, el 24/11/2026 se
-# escribio "si" con tilde, la comparacion con 'si' dio falso y la carga se
-# salteo sin avisar.
+# SOLO MIRA. Para cargar esta el workflow "Cargar Mercado Ads"
+# (cargar-mercado-ads.yml). Estaban juntos con un input "cargar": como texto,
+# el 24/11/2026 se escribio "si" con tilde y la carga se salteo sin avisar;
+# como casilla, GitHub contestaba 500 al lanzarlo. Separados no hay opcion que
+# elegir mal.
 
 on:
   workflow_dispatch:
-    inputs:
-      cargar:
-        description: 'Despues de mostrar, cargar bronze.ml_ads_diario'
-        type: boolean
-        required: false
-        default: false
-      dias:
-        description: 'Dias hacia atras (maximo 90). La primera vez trae todos; despues, solo los que faltan y los ultimos 3'
-        required: false
-        default: '30'
 
 # Comparte el grupo con el orquestador: los dos renuevan el token de ML.
 concurrency:
@@ -34,7 +23,7 @@ concurrency:
 jobs:
   sondear:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     env:
       TZ: America/Argentina/Buenos_Aires
       DB_HOST: ${{ secrets.DB_HOST }}
@@ -56,6 +45,3 @@ jobs:
         run: pip install -r requirements.txt
       - name: Mostrar lo que contesta la API
         run: python ml_ads.py --explorar
-      - name: Cargar
-        if: ${{ inputs.cargar }}
-        run: python ml_ads.py --dias "${{ inputs.dias }}"
