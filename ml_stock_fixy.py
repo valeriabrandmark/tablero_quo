@@ -40,7 +40,8 @@ Solo se escribe lo que CAMBIA: lo que ya coincide no se toca.
 FRENOS
 
   - Por defecto NO ESCRIBE: muestra el plan. Escribe solo con --aplicar, o
-    con FIXY_SINCRONIZAR_ML=aplicar en el .env (asi lo corre el orquestador).
+    con FIXY_SINCRONIZAR_ML=aplicar (en GitHub Actions es una VARIABLE del
+    repo, ver orquestador.yml; corriendo a mano, en el .env).
   - Si FIXY no contesta o contesta vacio, no se toca nada: "FIXY no respondio"
     no es lo mismo que "FIXY no tiene nada".
   - Si el plan pone en cero mas de TOPE_CEROS user products de una vez, frena
@@ -256,7 +257,7 @@ def main():
 
     import fixy
     if not fixy.TOKEN:
-        print("FIXY_API_TOKEN no esta en el .env: no hay de donde copiar. Se saltea.")
+        print("Falta FIXY_API_TOKEN (secret del repo, o .env a mano): no hay de donde copiar. Se saltea.")
         return
 
     print(f"=== Mercado Libre Flex <- FIXY ({'APLICA' if aplicar else 'solo plan, no escribe'}) ===")
