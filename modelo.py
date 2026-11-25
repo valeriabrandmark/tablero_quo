@@ -1403,7 +1403,79 @@ def construir_fact_ventas():
 
         df.to_sql(TABLA, con, schema="gold", if_exists="append", index=False)
 
+        # EN LA MISMA TRANSACCION: nadie llega a ver un canje como venta.
+        if TABLA == relleno.TABLA_NORMAL:
+            sacar_lo_que_no_es_venta(con)
+
     print(f"Guardado: gold.{TABLA}")
+
+
+# ---------------------------------------------------------------------------
+# Lo que Sigma factura pero NO es venta
+# ---------------------------------------------------------------------------
+#
+# CANJES: las "ventas" a los clientes CANJE DIAPER GENIE, CANJES HOLA TOYS,
+# CANJES UNIBRANCO... son mercaderia que se le da a influencers. Es costo de
+# marketing, no venta (Ana, 25/11/2026: "todo lo que sea canje no puede contar
+# como venta"). Pero NO se tiran: el Tablero de Marca los asigna a cada
+# colaboracion y los cuenta a costo. Por eso se MUEVEN a gold.fact_canjes, con
+# las mismas columnas, y salen de gold.fact_ventas.
+#
+# ENVIOS AL DEPOSITO ("<MARCA> - DEP <LUGAR>"): la consulta de Sigma ya no los
+# trae (ver arriba), y aca se borran los que hayan quedado de antes, fuera de
+# la ventana. Asi no hace falta reconstruir gold para limpiarlos.
+#
+# No depende de la ventana: mira la tabla entera, asi que la primera corrida
+# limpia todo el historico y si alguna vez vuelve a entrar un canje (por
+# ejemplo, por un relleno) la corrida siguiente lo saca solo. Es barato: en
+# fact_ventas no deberia haber ninguno.
+#
+# Los signos de porcentaje van DUPLICADOS: exec_driver_sql con parametros.
+ES_CANJE = "upper(coalesce(cliente, '')) LIKE 'CANJE%%'"
+ES_DEPOSITO = ("(upper(coalesce(cliente, '')) LIKE '%%- DEP %%' "
+               "OR upper(coalesce(cliente, '')) LIKE '%%- DEPOSITO%%')")
+
+
+def sacar_lo_que_no_es_venta(con):
+    con.exec_driver_sql(
+        "CREATE TABLE IF NOT EXISTS gold.fact_canjes "
+        "(LIKE gold.fact_ventas INCLUDING DEFAULTS)"
+    )
+    # Si fact_ventas suma una columna, fact_canjes tambien.
+    faltan = con.exec_driver_sql("""
+        SELECT v.column_name, v.data_type
+          FROM information_schema.columns v
+         WHERE v.table_schema = 'gold' AND v.table_name = 'fact_ventas'
+           AND NOT EXISTS (SELECT 1 FROM information_schema.columns c
+                            WHERE c.table_schema = 'gold' AND c.table_name = 'fact_canjes'
+                              AND c.column_name = v.column_name)
+    """).fetchall()
+    for nombre, tipo in faltan:
+        con.exec_driver_sql(f'ALTER TABLE gold.fact_canjes ADD COLUMN "{nombre}" {tipo}')
+    columnas = [r[0] for r in con.exec_driver_sql("""
+        SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'gold' AND table_name = 'fact_ventas'
+         ORDER BY ordinal_position
+    """).fetchall()]
+    lista = ", ".join(f'"{c}"' for c in columnas)
+
+    # Lo que esta corrida rearmo dentro de la ventana se reemplaza entero (un
+    # canje anulado en Sigma tiene que desaparecer tambien de aca), y un
+    # comprobante que vuelve a llegar reemplaza al que estaba: sin duplicados.
+    donde, valores = relleno.condicion_borrado(CUTOFF, HASTA, MARCA)
+    con.exec_driver_sql("DELETE FROM gold.fact_canjes WHERE " + donde, valores)
+    con.exec_driver_sql(f"""
+        DELETE FROM gold.fact_canjes c
+         WHERE c.comprobante IN (SELECT comprobante FROM gold.fact_ventas WHERE {ES_CANJE})
+    """)
+    movidos = con.exec_driver_sql(f"""
+        INSERT INTO gold.fact_canjes ({lista})
+        SELECT {lista} FROM gold.fact_ventas WHERE {ES_CANJE}
+    """).rowcount
+    con.exec_driver_sql(f"DELETE FROM gold.fact_ventas WHERE {ES_CANJE}")
+    depositos = con.exec_driver_sql(f"DELETE FROM gold.fact_ventas WHERE {ES_DEPOSITO}").rowcount
+    print(f"  Canjes pasados a gold.fact_canjes: {movidos} lineas"
+          + (f" · envios al deposito borrados: {depositos}" if depositos else ""))
 
 
 def main():
