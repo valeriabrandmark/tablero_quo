@@ -1,0 +1,81 @@
+name: Mercado Libre Flex <- FIXY
+
+# ============================================================================
+#  EL STOCK DE MERCADO LIBRE FLEX COPIA EL DE FIXY, CADA 10 MINUTOS.
+#
+#  Todo Flex sale de FIXY, y el mismo stock lo venden las Tiendas Nube. Si ML
+#  muestra unidades que ya se vendieron por otro lado, se vende algo que no
+#  hay. Con el orquestador (una vez por hora) esa ventana era de hasta una
+#  hora; el negocio pidio que sea de 20 minutos como mucho.
+#
+#  CADA 10 Y NO CADA 20: GitHub atrasa las corridas programadas, seguido y
+#  bastante (ver ventas-ml-rapido.yml: el 01/11 la de las 23:20 salio 23:40).
+#  Con 10, en la practica queda entre 10 y 20.
+#
+#  Que toca y que no, y los frenos: ver el docstring de ml_stock_fixy.py.
+# ============================================================================
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  # A mano: con FIXY_SINCRONIZAR_ML sin habilitar, muestra el plan en el log
+  # sin escribir nada. Es la forma de revisarlo antes de prenderlo.
+  workflow_dispatch:
+
+# SU PROPIO GRUPO, NO EL DEL ORQUESTADOR. No escribe ninguna tabla del
+# orquestador (solo bronze.ml_stock_fixy_log), y la renovacion del token de ML
+# ya esta protegida por el candado de Postgres (ver token_ml en
+# mercadolibre.py). En el grupo `orquestador` quedaria esperando detras de una
+# corrida de 8 minutos, y GitHub descarta las que esperan cuando llega otra.
+#
+# Lo que si importa es que no haya DOS sincronizaciones a la vez escribiendo el
+# mismo stock: eso lo evita este grupo.
+concurrency:
+  group: ml-stock-fixy
+  cancel-in-progress: false
+
+jobs:
+  sincronizar:
+    # MIENTRAS NO ESTE HABILITADO, LAS PROGRAMADAS NI ARRANCAN: seis corridas
+    # por hora que no hacen nada son minutos de Actions tirados. A mano corre
+    # siempre (y sin `aplicar` solo muestra el plan).
+    if: vars.FIXY_SINCRONIZAR_ML == 'aplicar' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    env:
+      TZ: America/Argentina/Buenos_Aires
+
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASS: ${{ secrets.DB_PASS }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+
+      ML_CLIENT_ID: ${{ secrets.ML_CLIENT_ID }}
+      ML_CLIENT_SECRET: ${{ secrets.ML_CLIENT_SECRET }}
+      ML_REDIRECT_URI: ${{ secrets.ML_REDIRECT_URI }}
+      ML_USER_ID: ${{ secrets.ML_USER_ID }}
+
+      FIXY_API_TOKEN: ${{ secrets.FIXY_API_TOKEN }}
+      FIXY_SINCRONIZAR_ML: ${{ vars.FIXY_SINCRONIZAR_ML }}
+      FIXY_ML_RESERVA: ${{ vars.FIXY_ML_RESERVA }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      # ANTES DE ESCRIBIR EN PUBLICACIONES REALES: que el plan siga tocando lo
+      # que tiene que tocar (Flex) y nada mas (Full, colecta). Son segundos.
+      - name: Probar el plan
+        run: python probar_ml_stock_fixy.py
+
+      - name: Sincronizar
+        run: python ml_stock_fixy.py

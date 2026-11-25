@@ -52,8 +52,15 @@ FRENOS
 
 QUE GUARDA
 
-  bronze.ml_stock_fixy_log  cada cambio (o intento), con antes, despues y la
-                            respuesta. Es la constancia de que se publico.
+  bronze.ml_stock_fixy_log  cada cambio escrito (o intentado), con antes,
+                            despues y la respuesta. Es la constancia de que se
+                            publico. El plan sin aplicar se guarda solo con
+                            --registrar-plan.
+
+CUANDO CORRE
+
+Cada 10 minutos, en su propio workflow (.github/workflows/ml-stock-fixy.yml),
+y no en el orquestador: las ventas van mas rapido que una corrida por hora.
 
     python ml_stock_fixy.py              muestra el plan, no escribe
     python ml_stock_fixy.py --aplicar    escribe en Mercado Libre
@@ -248,6 +255,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--aplicar", action="store_true", help="Escribir en Mercado Libre.")
+    ap.add_argument("--registrar-plan", action="store_true",
+                    help="Guardar en la base tambien el plan que no se aplica.")
     ap.add_argument("--forzar", action="store_true",
                     help=f"Escribir aunque se apaguen mas de {TOPE_CEROS} user products.")
     args = ap.parse_args()
@@ -336,7 +345,10 @@ def main():
         if aplicar and not ok:
             print(f"    ERROR {f['sku']}: {detalle[:200]}")
 
-    guardar_log(engine, log)
+    # Sin aplicar, el plan se muestra pero no se guarda (salvo que se pida):
+    # cada 10 minutos serian miles de filas por dia que no dicen nada nuevo.
+    if aplicar or args.registrar_plan:
+        guardar_log(engine, log)
     if aplicar:
         bien = sum(1 for x in log if x["aplicado"])
         print(f"\n  Escritos en Mercado Libre: {bien} de {len(cambios)}")

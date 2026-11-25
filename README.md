@@ -1423,12 +1423,14 @@ guarda lo que sale de Tucumán hacia FIXY en `bronze.digip_envios_fixy`: toma lo
 despachos de Digip que diga `FIXY_DESPACHOS_DIGIP` (separados por coma, por
 defecto `FIXY`).
 
-**Mercado Libre Flex copia el stock de FIXY** (`ml_stock_fixy.py`, en cada
-corrida). Todo Flex sale de FIXY, así que toca **todas** las publicaciones Flex
+**Mercado Libre Flex copia el stock de FIXY** (`ml_stock_fixy.py`, cada 10
+minutos en su propio workflow, `ml-stock-fixy.yml`: las ventas van más rápido
+que el orquestador). Todo Flex sale de FIXY, así que toca **todas** las publicaciones Flex
 (`self_service`), y lo que FIXY no tiene va a cero. Nunca Full ni colecta desde
 Tucumán. **No escribe** hasta que `FIXY_SINCRONIZAR_ML` valga `aplicar`:
-mientras tanto deja el plan en
-`bronze.ml_stock_fixy_log`. `FIXY_ML_RESERVA` (por defecto 0) guarda unidades
+mientras tanto las corridas programadas ni arrancan, y a mano
+(Actions → "Mercado Libre Flex <- FIXY" → Run workflow) muestra el plan en el
+log sin escribir. Lo que escribe queda en `bronze.ml_stock_fixy_log`. `FIXY_ML_RESERVA` (por defecto 0) guarda unidades
 sin publicar. Frena si FIXY no contesta o si el plan apaga más de 10 productos
 de una vez (`--forzar` para pasar igual). Para ver el plan a mano:
 `python ml_stock_fixy.py`.
