@@ -250,6 +250,11 @@ PASOS = [
     # llega dias despues igual -- cada corrida reescribe los ultimos 30 dias.
     # No critico: si falla (por ejemplo, sin permiso de Publicidad en la app de
     # ML) el tablero muestra lo ultimo que haya y nada mas se entera.
+    # Catalogo de clientes de SIGMA: la provincia de cada cliente mayorista,
+    # para la venta por provincia del Tablero de Marca. Cambia poco: 1 vez/dia.
+    {"comando": "sigma.py --clientes",         "intentos": 2, "espera": 60,
+     "cada_horas": 24, "critico": False, "escribe": "sigma_clientes", "techo": 10 * 60},
+
     {"comando": "ml_ads.py",                   "intentos": 2, "espera": 30,
      "cada_horas": 6, "critico": False, "escribe": "ml_ads_diario", "techo": 10 * 60},
 

@@ -245,12 +245,35 @@ def marcas_por_item(engine):
     marca_sigma = {str(k).strip(): v for k, v in zip(sigma["id"], sigma["marca"]) if v}
     out = {}
     for _, p in pubs.iterrows():
-        sku = p["seller_custom_field"] or _atributo(p["attributes"], "SELLER_SKU")
+        # OJO: pandas trae los vacios como NaN, que es "verdadero" para `or`.
+        # Asi se guardaron SKU "nan" hasta el 25/11/2026 (los arregla
+        # `completar_skus` en cada corrida).
+        scf = p["seller_custom_field"]
+        sku = scf if isinstance(scf, str) and scf.strip() else _atributo(p["attributes"], "SELLER_SKU")
         sku = str(sku).strip() if sku else None
         marca = marca_sigma.get(sku) if sku else None
         marca = marca or _atributo(p["attributes"], "BRAND")
         out[p["id"]] = (sku, str(marca).strip().upper() if marca else None)
     return out
+
+
+def completar_skus(engine, marcas):
+    """Filas ya guardadas sin SKU (o con "nan"): se completan con el catalogo,
+       sin volver a pedirle nada a la API. El SKU es lo que cruza el anuncio
+       con la venta en el detalle de ventas del tablero."""
+    pares = [{"i": i, "s": s, "m": m} for i, (s, m) in marcas.items() if s]
+    if not pares:
+        return
+    with engine.begin() as con:
+        r = con.execute(
+            text("""update bronze.ml_ads_diario a set sku = v.s, marca = coalesce(v.m, a.marca)
+                      from (select unnest(cast(:ids as text[])) i, unnest(cast(:skus as text[])) s,
+                                   unnest(cast(:marcas as text[])) m) v
+                     where a.item_id = v.i and (a.sku is null or a.sku = 'nan')"""),
+            {"ids": [p["i"] for p in pares], "skus": [p["s"] for p in pares], "marcas": [p["m"] for p in pares]},
+        )
+        if r.rowcount:
+            print(f"  SKU completado en {r.rowcount} filas viejas")
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +397,7 @@ def main():
                         on conflict (fecha) do update set anuncios = excluded.anuncios, cargado_en = now()"""),
                 {"f": d, "n": por_dia_total[d]},
             )
+    completar_skus(engine, marcas)
     sin_marca = int(df["marca"].isna().sum()) if not df.empty else 0
     print(f"  Guardado: bronze.ml_ads_diario · {len(pedir)} dia(s) pedidos de {desde} a {hasta} · {len(df)} filas"
           f" · inversion ${df['costo'].sum() if not df.empty else 0:,.0f}"
