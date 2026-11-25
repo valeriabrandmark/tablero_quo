@@ -312,10 +312,12 @@ def main():
                         help="Solo el catalogo de articulos")
     parser.add_argument("--compras", action="store_true",
                         help="Solo las facturas de compra (ventana movil)")
+    parser.add_argument("--clientes", action="store_true",
+                        help="Solo el catalogo de clientes (provincia, localidad...)")
     args = parser.parse_args()
 
     # Sin flags = todo, para no romper a quien ya lo corre a mano asi.
-    todo = not (args.ventas or args.catalogo or args.compras)
+    todo = not (args.ventas or args.catalogo or args.compras or args.clientes)
 
     print("URL base:", URL_BASE)
     print("Token cargado:", "SI" if TOKEN else "NO")
@@ -326,9 +328,13 @@ def main():
         extraer_articulos()
     if todo or args.compras:
         extraer_compras()
+    # Los clientes estaban apagados y la foto quedo de junio de 2026: los
+    # clientes nuevos no tenian provincia, y el Tablero de Marca no podia
+    # repartir la venta mayorista por provincia. Ahora corre una vez por dia.
+    if todo or args.clientes:
+        extraer_clientes()
 
     # Estos siguen apagados; se activan cuando haga falta, no cada corrida.
-    #extraer_clientes()
     #extraer_cuentas_corrientes()
     #extraer_ofertas()
     # extraer_stock()  -> el stock ahora viene de DIGIP, no de Sigma
