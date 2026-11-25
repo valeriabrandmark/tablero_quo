@@ -48,6 +48,24 @@ Ampliarle el filtro de estado a ese script le agregaria filas a
 `bronze.digip_pedidos`, de la que cuelgan el tablero de Logistica y el de
 Antiguedad. Serian numeros movidos de rebote en pantallas que nadie pidio
 tocar. Este script no escribe en ninguna tabla existente.
+
+TAMBIEN LO QUE MANDAMOS A FIXY (desde 11/2026)
+----------------------------------------------
+FIXY es el deposito de Buenos Aires que despacha Tienda Nube y Flex. Lo que
+sale de Tucuman hacia alla es el MISMO tipo de movimiento que un envio a Full
+--mercaderia que va a un deposito, no a un cliente-- y aparece en las MISMAS
+preparaciones de Digip. Se aprovecha la misma pasada (cero llamadas de mas) y
+se guarda en su propia tabla, `bronze.digip_envios_fixy`, con las mismas
+columnas.
+
+VA EN OTRA TABLA Y NO EN ESTA CON UNA COLUMNA "destino", porque la
+trazabilidad de Full suma `digip_envios_full` entera sin filtrar por despacho:
+meter ahi los envios a FIXY los contaria como ingresos a Full y taparia
+faltantes de Mercado Libre.
+
+Que despachos van a FIXY se configura con FIXY_DESPACHOS_DIGIP en el `.env`
+(separados por coma). Por defecto "FIXY". Si el despacho en Digip se llama
+distinto, la lista de "Despachos vistos" que imprime cada corrida lo muestra.
 """
 
 import argparse
@@ -75,6 +93,29 @@ engine = crear_engine(connect_args={"client_encoding": "utf8"})
 # con espacio al final, asi que el dato viene como viene.
 DESPACHOS_A_FULL = {"ETIQUETADO MELI QUO", "ANDREANI BRANDMARK"}
 
+# Los que van al deposito de FIXY en Buenos Aires. Configurable porque el
+# nombre del despacho lo define quien lo da de alta en Digip, no nosotros.
+DESPACHOS_A_FIXY = {
+    d.strip().upper()
+    for d in os.getenv("FIXY_DESPACHOS_DIGIP", "FIXY").split(",")
+    if d.strip()
+}
+
+# Cada destino, con la tabla donde se guarda.
+DESTINOS = {
+    "full": (DESPACHOS_A_FULL, "digip_envios_full"),
+    "fixy": (DESPACHOS_A_FIXY, "digip_envios_fixy"),
+}
+
+
+def destino_de(despacho):
+    """'full', 'fixy' o None, segun a donde va el despacho."""
+    d = str(despacho or "").strip().upper()
+    for clave, (despachos, _) in DESTINOS.items():
+        if d in despachos:
+            return clave
+    return None
+
 # Desde cuando hay datos utiles. La misma que usan los otros scripts de Digip.
 FECHA_CORTE = date(2026, 5, 6)
 
@@ -85,7 +126,7 @@ FECHA_CORTE = date(2026, 5, 6)
 DIAS_VENTANA = 14
 
 DDL = """
-create table if not exists bronze.digip_envios_full (
+create table if not exists bronze.{tabla} (
     preparacion_id      bigint  not null,
     item_id             bigint  not null,
     pedido_codigo       text,
@@ -139,10 +180,10 @@ def pedidos_de_la_ventana(desde, hasta):
     return codigos
 
 
-def filas_de_preparacion(prep, pedido_codigo, pedido_estado):
-    """Las filas de una preparacion, o [] si no va a Full."""
+def filas_de_preparacion(prep, pedido_codigo, pedido_estado, destino="full"):
+    """Las filas de una preparacion, o [] si no va al destino pedido."""
     despacho = prep.get("despachoDescripcion") or prep.get("despachoCodigo") or ""
-    if str(despacho).strip().upper() not in DESPACHOS_A_FULL:
+    if destino_de(despacho) != destino:
         return []
 
     filas = []
@@ -168,14 +209,15 @@ def filas_de_preparacion(prep, pedido_codigo, pedido_estado):
 
 
 def extraer(desde, hasta):
-    print(f"=== Envios a Full ({desde} a {hasta}) ===")
+    """Devuelve ({destino: df}, codigos)."""
+    print(f"=== Envios a Full y a FIXY ({desde} a {hasta}) ===")
     codigos = pedidos_de_la_ventana(desde, hasta)
     print(f"  {len(codigos)} pedidos en el periodo (todos los estados)")
     if not codigos:
         print("  Sin pedidos: no se toca nada.")
-        return None, []
+        return {}, []
 
-    filas = []
+    filas = {clave: [] for clave in DESTINOS}
     despachos = Counter()
     fallados = 0
 
@@ -186,13 +228,15 @@ def extraer(desde, hasta):
             continue
         despacho = prep.get("despachoDescripcion") or prep.get("despachoCodigo") or "(sin despacho)"
         despachos[despacho] += 1
-        filas += filas_de_preparacion(prep, cod, estado)
+        for clave in DESTINOS:
+            filas[clave] += filas_de_preparacion(prep, cod, estado, clave)
         if i % 100 == 0:
             print(f"    {i}/{len(codigos)} preparaciones consultadas...")
 
     print(f"\n  Despachos vistos:")
     for d, n in despachos.most_common(12):
-        marca = "   <-- a Full" if str(d).strip().upper() in DESPACHOS_A_FULL else ""
+        dest = destino_de(d)
+        marca = f"   <-- a {dest.upper()}" if dest else ""
         print(f"    {str(d):<32} {n:>5}{marca}")
 
     if fallados:
@@ -201,55 +245,58 @@ def extraer(desde, hasta):
         # la que este script viene a medir.
         print(f"\n  ATENCION: {fallados} preparaciones no se pudieron consultar.")
 
-    df = pd.DataFrame(filas)
-    if not df.empty:
-        # Una preparacion consolidada trae el mismo item una sola vez, pero un
-        # pedido puede aparecer en dos paginas si algo se movio entre llamadas.
-        df = df.drop_duplicates(subset=["preparacion_id", "item_id"], keep="last")
-        print(f"\n  {len(df)} items a Full, "
-              f"{df['sku'].nunique()} SKU, "
-              f"{df['unidades_satisfecha'].sum():,.0f} unidades satisfechas")
-        parciales = int((df["unidades_satisfecha"] < df["unidades"]).sum())
-        if parciales:
-            print(f"  {parciales} items salieron incompletos (satisfecho < pedido)")
-    return df, [c for c, _ in codigos]
+    dfs = {}
+    for clave, lista in filas.items():
+        df = pd.DataFrame(lista)
+        if not df.empty:
+            # Una preparacion consolidada trae el mismo item una sola vez, pero un
+            # pedido puede aparecer en dos paginas si algo se movio entre llamadas.
+            df = df.drop_duplicates(subset=["preparacion_id", "item_id"], keep="last")
+            print(f"\n  {len(df)} items a {clave.upper()}, "
+                  f"{df['sku'].nunique()} SKU, "
+                  f"{df['unidades_satisfecha'].sum():,.0f} unidades satisfechas")
+            parciales = int((df["unidades_satisfecha"] < df["unidades"]).sum())
+            if parciales:
+                print(f"  {parciales} items salieron incompletos (satisfecho < pedido)")
+        dfs[clave] = df
+    return dfs, [c for c, _ in codigos]
 
 
-def guardar(df, codigos):
+def guardar(df, codigos, tabla="digip_envios_full"):
     """Reemplaza SOLO los pedidos de esta ventana, en una sola transaccion."""
     with engine.begin() as con:
         con.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS bronze;")
-        con.exec_driver_sql(DDL)
+        con.exec_driver_sql(DDL.format(tabla=tabla))
 
     # SI NO HAY NADA CON QUE REEMPLAZAR, NO SE BORRA. Con Digip caido todas las
     # llamadas fallan, el df queda vacio, y borrar igual dejaria la ventana sin
     # envios -- que se leeria como "Mercado Libre nos comio todo eso". Es la
     # misma trampa que dejo a Tienda Nube sin datos desde el 12/06.
     if df is None or df.empty:
-        print("\n  (sin envios a Full en esta ventana: NO se toca lo que ya estaba)")
+        print(f"\n  (sin envios para {tabla} en esta ventana: NO se toca lo que ya estaba)")
         return
 
     try:
         with engine.begin() as con:
             borradas = con.exec_driver_sql(
-                "DELETE FROM bronze.digip_envios_full WHERE pedido_codigo = ANY(%(c)s)",
+                f"DELETE FROM bronze.{tabla} WHERE pedido_codigo = ANY(%(c)s)",
                 {"c": codigos},
             ).rowcount
             print(f"\n  Filas viejas de la ventana borradas: {borradas}")
-            df.to_sql("digip_envios_full", con, schema="bronze",
+            df.to_sql(tabla, con, schema="bronze",
                       if_exists="append", index=False)
     except Exception as e:
         if not es_tabla_inexistente(e):
             raise
-        df.to_sql("digip_envios_full", engine, schema="bronze",
+        df.to_sql(tabla, engine, schema="bronze",
                   if_exists="append", index=False)
 
-    print(f"  Guardado: bronze.digip_envios_full (+{len(df)} filas)")
+    print(f"  Guardado: bronze.{tabla} (+{len(df)} filas)")
 
     resumen = pd.read_sql(
-        """select despacho, count(*) items, count(distinct sku) skus,
+        f"""select despacho, count(*) items, count(distinct sku) skus,
                   sum(unidades_satisfecha) unidades
-             from bronze.digip_envios_full group by 1 order by 1""",
+             from bronze.{tabla} group by 1 order by 1""",
         engine)
     print("\n  Tabla completa:")
     print(resumen.to_string(index=False))
@@ -271,8 +318,9 @@ def main():
     else:
         desde = max(FECHA_CORTE, hoy - timedelta(days=DIAS_VENTANA))
 
-    df, codigos = extraer(desde, hoy)
-    guardar(df, codigos)
+    dfs, codigos = extraer(desde, hoy)
+    for clave, (_, tabla) in DESTINOS.items():
+        guardar(dfs.get(clave), codigos, tabla)
     print("\n=== LISTO ===")
 
 
