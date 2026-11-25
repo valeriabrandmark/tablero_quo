@@ -796,6 +796,19 @@ def construir_fact_ventas():
               WHERE a.id = sv."itemArticuloId"
                 AND (a."rubroCodigo" = '9999' OR a.id = '9990')
           )
+          -- FUERA LOS ENVIOS AL DEPOSITO DE FIXY.
+          --
+          -- Los clientes "<MARCA> - DEP <LUGAR>" (hoy: DIAPER GENIE - DEP
+          -- BUENOS AIRES) son mercaderia propia que se manda al deposito de
+          -- FIXY en Buenos Aires. Sigma lo factura para moverla, pero no es una
+          -- venta: el 18/11/2026 fueron $ 7.636.213 sin IVA, toda la "venta
+          -- mayorista" de Diaper Genie del mes, y ademas inflaban el ritmo de
+          -- venta con el que el tablero de stock calcula la cobertura.
+          -- Sale la factura y su nota de credito, juntas: el corte va por
+          -- cliente, no por comprobante (ver la nota de las ND de arriba).
+          -- Los signos de porcentaje van DUPLICADOS por lo de psycopg2.
+          AND upper(coalesce(sv."clienteNombre", '')) NOT LIKE '%%- DEP %%'
+          AND upper(coalesce(sv."clienteNombre", '')) NOT LIKE '%%- DEPOSITO%%'
     """.format(desde=piso_sql()), engine)
 
     for _, r in sigma.iterrows():
