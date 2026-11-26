@@ -459,11 +459,32 @@ PASOS = [
     # catalogo, y como el catalogo es `primera_del_dia`, queda en la misma
     # corrida.
     #
-    # UNA VEZ POR DIA: la recomendacion de ML es semanal (las ventas vienen por
-    # semana y el plazo dice THIS_WEEK), pedirla cada hora no la cambia. Son
-    # unas 1.800 llamadas sin multiget, en paralelo.
+    # CADA 4 HORAS, y no una vez por dia como al principio. La recomendacion de
+    # ML es semanal y pedirla mas seguido no la cambia, pero de esta misma
+    # respuesta sale el PENDIENTE DE INGRESO a Full (stock_total - lo que ya
+    # esta en Full, ver FULL_POR_SKU en el tablero). Una vez por dia dejaba un
+    # hueco de hasta un dia: el 26/11/2026 Digip armo un envio de 20 u. de
+    # GE01008 a las 12:44, el panel de ML ya las mostraba "en camino" y el
+    # tablero no, porque el dato se habia pedido a las 06:47. Mientras tanto
+    # esas unidades no estan en ningun lado: Digip ya las saco de "disponible"
+    # y ML todavia no figura como pendiente, asi que la cobertura da de menos y
+    # el sugerido de Compras pide de mas. Ese dia eran 298 SKU y ~4.000 u.
+    #
+    # Son unas 1.800 llamadas sin multiget, en paralelo: cada 4 h es el mismo
+    # ritmo que la competencia de Meli y Tienda Nube. Mas seguido no cierra el
+    # hueco del todo --ML tarda en registrar el envio igual-- y carga la API.
+    #
+    # OJO, LA RESTA ES CONTRA LA FOTO DE LA MANANA: lo que ya esta en Full
+    # (ml_stock_full) sale del catalogo, que sigue siendo `primera_del_dia`.
+    # El TOTAL de Full (en Full + pendiente) queda tan fresco como esta
+    # respuesta, que es lo que usan la cobertura y el sugerido; lo que puede
+    # quedar corrido hasta la manana siguiente es el reparto entre las dos
+    # columnas (un envio recibido a la tarde sigue figurando como pendiente).
+    #
+    # El registro de restricciones (ml_restricciones_eventos) compara contra la
+    # foto anterior, asi que correr mas seguido solo anota los cambios antes.
     {"comando": "ml_reposicion_full.py",       "intentos": 2, "espera": 60,
-     "cada_horas": None, "primera_del_dia": True, "critico": False,
+     "cada_horas": 4, "critico": False,
      "escribe": "ml_reposicion_full", "techo": 15 * 60},
 
     # LA FOTO DEL STOCK AL CIERRE DEL MES COMERCIAL.
