@@ -397,9 +397,14 @@ PASOS = [
     #
     # Ademas nadie lo espera: alimenta ml_publicaciones y ml_stock_full, que hoy
     # solo van a servir para la pestana de Stock Full cuando se arme.
+    #
+    # DESDE EL 27/11/2026 ESTE PASO ES SOLO LAS PUBLICACIONES. El stock de Full
+    # salio a su propio paso (`mercadolibre.py --stock-full`, mas abajo), que
+    # corre en cada pasada: las publicaciones cambian poco y reescribirlas es
+    # pesado (60 MB), el stock es lo que Compras necesita fresco.
     {"comando": "mercadolibre.py --catalogo",  "intentos": 2, "espera": 60,
      "cada_horas": None, "primera_del_dia": True, "critico": False,
-     "escribe": "ml_publicaciones, ml_stock_full, ml_stock_full_historico",
+     "escribe": "ml_publicaciones, ml_inventario_sku",
      "techo": 20 * 60},
 
     # El sell in del proveedor, de la planilla de Google. Va al panel de
@@ -492,6 +497,24 @@ PASOS = [
     #
     # El registro de restricciones (ml_restricciones_eventos) compara contra la
     # foto anterior, asi que correr mas seguido solo anota los cambios antes.
+    # EL STOCK QUE YA ESTA EN FULL, EN CADA CORRIDA (27/11/2026).
+    #
+    # Antes salia con el catalogo, una vez por dia a la manana, y el pendiente
+    # de ingreso (que se pide en cada corrida, ver el paso de abajo) se restaba
+    # contra esa foto de la manana: un envio recibido a la tarde seguia
+    # figurando como pendiente. Ahora los dos datos son de la misma corrida.
+    #
+    # Va DESPUES del catalogo (lee los inventarios de ml_publicaciones) y JUSTO
+    # ANTES de la reposicion, para que la resta sea entre dos fotos de minutos
+    # de diferencia. ~3.800 llamadas de a 12 hilos: ~1,5 min.
+    #
+    # Un inventario que ML no contesta conserva su ultimo dato bueno en vez de
+    # quedar en cero (ver heredar_fallados), y la foto diaria queda fija en la
+    # primera del dia (ver guardar_foto_stock).
+    {"comando": "mercadolibre.py --stock-full", "intentos": 2, "espera": 60,
+     "cada_horas": None, "critico": False,
+     "escribe": "ml_stock_full, ml_stock_full_historico", "techo": 10 * 60},
+
     {"comando": "ml_reposicion_full.py",       "intentos": 2, "espera": 60,
      "cada_horas": None, "critico": False,
      "escribe": "ml_reposicion_full", "techo": 15 * 60},

@@ -740,6 +740,55 @@ def rehacer_mapa_inventario_sku():
               "igual pero lento, parseando el JSON como antes.")
 
 
+def stock_full_anterior(engine):
+    """{inventory_id: fila} del ultimo stock de Full que SI contesto la API.
+
+    Si la tabla no existe todavia (primera corrida), vacio.
+    """
+    try:
+        previo = pd.read_sql("select * from bronze.ml_stock_full", engine)
+    except Exception as e:
+        if es_tabla_inexistente(e):
+            return {}
+        raise
+    if previo.empty:
+        return {}
+    if "error" in previo.columns:
+        previo = previo[previo["error"].isna()]
+    previo = previo.where(pd.notna(previo), None)
+    return {r["inventory_id"]: r for r in previo.to_dict("records")}
+
+
+def heredar_fallados(filas, anteriores):
+    """Un inventario que la API no contesto conserva su ULTIMO DATO BUENO.
+
+    POR QUE. Desde el 27/11/2026 este stock se pide en CADA corrida, no una vez
+    por dia. Una fila con `error` no trae unidades, y el tablero (FULL_POR_SKU)
+    la lee como CERO en Full: con una corrida por hora, cualquier 429 suelto
+    haria aparecer y desaparecer stock de Full en Compras de una hora a la otra.
+    El dato de hace una hora es mucho mejor que un cero que no es cierto.
+
+    La fila heredada sigue llevando el `error` --para que se pueda contar y
+    para que NO entre a la foto diaria (ver guardar_foto_stock)-- y una marca
+    `heredado`. Sin dato anterior no hay nada que heredar: queda como estaba.
+
+    Devuelve (filas, cuantas_se_heredaron). Sin base, para probarla.
+    """
+    salida, heredados = [], 0
+    for f in filas:
+        error = f.get("error")
+        previa = anteriores.get(f.get("inventory_id")) if error else None
+        if previa is not None:
+            nueva = {k: v for k, v in previa.items() if k not in ("error", "heredado")}
+            nueva["error"] = error
+            nueva["heredado"] = True
+            salida.append(nueva)
+            heredados += 1
+        else:
+            salida.append({**f, "heredado": False})
+    return salida, heredados
+
+
 def extraer_stock_full():
     """Stock real en Full (fulfillment) por cada inventory_id.
 
@@ -806,14 +855,17 @@ def extraer_stock_full():
     with ThreadPoolExecutor(max_workers=HILOS_STOCK) as pool:
         filas = list(pool.map(pedir, inventory_ids))
 
+    filas, heredados = heredar_fallados(filas, stock_full_anterior(engine))
+
     df = pd.json_normalize(filas)
-    fallados = sum(1 for f in filas if "error" in f)
+    fallados = sum(1 for f in filas if f.get("error"))
     print(f"  Total: {len(df)} registros de stock full")
     if fallados:
         # Se avisa aunque no corte: un stock que baja porque la API no contesto
         # se parece demasiado a un stock que bajo porque se vendio.
-        print(f"  ATENCION: {fallados} inventarios no se pudieron consultar "
-              f"(quedan con `error` en la tabla, no en cero)")
+        print(f"  ATENCION: {fallados} inventarios no se pudieron consultar; "
+              f"{heredados} conservan el ultimo dato bueno, el resto queda con "
+              f"`error` y sin unidades")
     guardar_en_bd(df, "ml_stock_full", modo="replace")
     guardar_foto_stock(df)
 
@@ -905,15 +957,25 @@ def guardar_foto_stock(df):
 
     engine = _asegurar_foto_stock(_crear_engine())
     tabla = "ml_stock_full_historico"
+    # LA FOTO DEL DIA ES LA PRIMERA, Y NO SE PISA. Hasta el 27/11/2026 el stock
+    # de Full se pedia una vez por dia, a la manana, y la foto era esa. Desde
+    # que se pide en cada corrida, pisarla la convertiria en la de la ultima
+    # corrida del dia -- y tablero_quo/stock_diario.py la usa como el stock
+    # AL ABRIR el dia. Asi que la primera queda, y las corridas siguientes sólo
+    # SUMAN los inventarios que todavia no tenian foto hoy (los que fallaron
+    # antes, o los que se agregaron al catalogo en el dia).
     with engine.begin() as con:
-        borradas = con.exec_driver_sql(
-            f'DELETE FROM bronze."{tabla}" WHERE fecha = %(hoy)s', {"hoy": hoy}
-        ).rowcount
-        if borradas:
-            print(f"  (foto de {hoy} ya estaba: se reemplazan {borradas} filas)")
-        foto.to_sql(tabla, con, schema="bronze", if_exists="append", index=False)
+        ya = {r[0] for r in con.exec_driver_sql(
+            f'SELECT inventory_id FROM bronze."{tabla}" WHERE fecha = %(hoy)s',
+            {"hoy": hoy}).fetchall()}
+        nuevos = foto[~foto["inventory_id"].isin(ya)]
+        if not nuevos.empty:
+            nuevos.to_sql(tabla, con, schema="bronze", if_exists="append", index=False)
 
-    print(f"  Foto del {hoy}: bronze.{tabla} ({len(foto)} filas)")
+    if ya:
+        print(f"  Foto del {hoy} ya estaba ({len(ya)} filas): se suman {len(nuevos)}")
+    else:
+        print(f"  Foto del {hoy}: bronze.{tabla} ({len(nuevos)} filas)")
 
 
 # ============================================================
@@ -939,27 +1001,33 @@ def main():
     parser.add_argument("--ventas", action="store_true",
                         help="Solo las ventas (ventana movil, rapido)")
     parser.add_argument("--catalogo", action="store_true",
-                        help="Solo publicaciones y stock full (lento)")
+                        help="Solo las publicaciones (una vez por dia)")
+    parser.add_argument("--stock-full", action="store_true",
+                        help="Solo el stock de Full (en cada corrida)")
     args = parser.parse_args()
 
     # Sin flags = todo, para no romper a quien ya lo corre a mano asi.
-    todo = not (args.ventas or args.catalogo)
+    todo = not (args.ventas or args.catalogo or args.stock_full)
 
     print("ML User ID:", USER_ID)
     if todo or args.ventas:
         extraer_ventas_ml()
     incompleto = None
     if todo or args.catalogo:
-        # SI EL CATALOGO VINO RECORTADO, EL STOCK DE FULL SE SACA IGUAL, con el
-        # catalogo de ayer: la foto diaria de Full no se puede reconstruir
-        # despues, y un dia sin foto es un agujero en los dias con stock. El
-        # paso termina en ERROR al final para que se vea y el orquestador lo
-        # reintente.
+        # SI EL CATALOGO VINO RECORTADO, la tabla no se toca y el paso termina
+        # en ERROR al final, para que se vea y el orquestador lo reintente. El
+        # stock de Full lo pide igual su propio paso (`--stock-full`), con el
+        # catalogo anterior: la foto diaria no se puede reconstruir despues.
         try:
             extraer_publicaciones_ml()
         except CatalogoIncompleto as e:
             incompleto = e
             print(f"\n  ATENCION: {e}")
+    # EL STOCK DE FULL VA APARTE DEL CATALOGO desde el 27/11/2026: el catalogo
+    # cambia poco y es pesado de escribir (una vez por dia), y el stock es lo
+    # que Compras necesita fresco (en cada corrida). Con `--catalogo` solo, ya
+    # no se pide: lo pide el paso `--stock-full` de la misma corrida.
+    if todo or args.stock_full:
         extraer_stock_full()
     if incompleto:
         raise SystemExit(f"Catalogo de ML incompleto: {incompleto}")

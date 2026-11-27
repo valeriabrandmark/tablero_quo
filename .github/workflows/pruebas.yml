@@ -181,6 +181,11 @@ jobs:
       - name: Probar que el catalogo de ML no se guarde recortado
         run: python probar_catalogo_ml.py
 
+      # El stock de Full se pide en cada corrida: un inventario que ML no
+      # contesta tiene que conservar su ultimo dato, no pasar a cero.
+      - name: Probar el stock de Full de cada corrida
+        run: python probar_stock_full_corrida.py
+
       # La ventana era una constante, y eso falla justo cuando el pipeline no
       # corre: un paso caido ocho dias vuelve pidiendo siete, y el dia 1 no
       # entra nunca mas. Lo que se fija es que SOLO se estire, nunca se achique.
