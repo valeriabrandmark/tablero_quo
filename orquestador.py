@@ -459,7 +459,7 @@ PASOS = [
     # catalogo, y como el catalogo es `primera_del_dia`, queda en la misma
     # corrida.
     #
-    # CADA 4 HORAS, y no una vez por dia como al principio. La recomendacion de
+    # EN CADA CORRIDA, y no una vez por dia como al principio. La recomendacion de
     # ML es semanal y pedirla mas seguido no la cambia, pero de esta misma
     # respuesta sale el PENDIENTE DE INGRESO a Full (stock_total - lo que ya
     # esta en Full, ver FULL_POR_SKU en el tablero). Una vez por dia dejaba un
@@ -470,9 +470,18 @@ PASOS = [
     # y ML todavia no figura como pendiente, asi que la cobertura da de menos y
     # el sugerido de Compras pide de mas. Ese dia eran 298 SKU y ~4.000 u.
     #
-    # Son unas 1.800 llamadas sin multiget, en paralelo: cada 4 h es el mismo
-    # ritmo que la competencia de Meli y Tienda Nube. Mas seguido no cierra el
-    # hueco del todo --ML tarda en registrar el envio igual-- y carga la API.
+    # PRIMERO PASO A CADA 4 HORAS (tablero_quo#155) Y DESPUES A CADA CORRIDA,
+    # a pedido de compras (27/11/2026): el pendiente de ingreso tiene que
+    # aparecer apenas ML lo registra. Son unas 1.800 llamadas sin multiget, en
+    # paralelo, y el paso tarda ~3 min (27/11: 01:19:30 a 01:22:23), o sea que
+    # cada corrida pasa de ~4 a ~7 min. El hueco que queda es lo que tarda ML
+    # en registrar el envio, que no depende de nosotros.
+    #
+    # NO SE COMPLETA CON LOS ENVIOS DE DIGIP, A PROPOSITO. Se probo tomar como
+    # pendiente el mayor entre ML y los envios a Full abiertos en Digip, y se
+    # descarto (mi-tablero-app#258, cerrado sin mergear): las preparaciones a
+    # Meli muchas veces se anulan en Digip y darian un pendiente falso. El dato
+    # es solo el de Mercado Libre.
     #
     # OJO, LA RESTA ES CONTRA LA FOTO DE LA MANANA: lo que ya esta en Full
     # (ml_stock_full) sale del catalogo, que sigue siendo `primera_del_dia`.
@@ -484,7 +493,7 @@ PASOS = [
     # El registro de restricciones (ml_restricciones_eventos) compara contra la
     # foto anterior, asi que correr mas seguido solo anota los cambios antes.
     {"comando": "ml_reposicion_full.py",       "intentos": 2, "espera": 60,
-     "cada_horas": 4, "critico": False,
+     "cada_horas": None, "critico": False,
      "escribe": "ml_reposicion_full", "techo": 15 * 60},
 
     # LA FOTO DEL STOCK AL CIERRE DEL MES COMERCIAL.
