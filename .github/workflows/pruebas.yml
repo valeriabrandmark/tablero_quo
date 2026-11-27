@@ -176,6 +176,11 @@ jobs:
       - name: Probar los dias con stock por deposito
         run: python probar_stock_diario.py
 
+      # Entre el 24 y el 27/11/2026 el catalogo de ML perdio 1.996
+      # publicaciones sin que el paso fallara, y con ellas su stock de Full.
+      - name: Probar que el catalogo de ML no se guarde recortado
+        run: python probar_catalogo_ml.py
+
       # La ventana era una constante, y eso falla justo cuando el pipeline no
       # corre: un paso caido ocho dias vuelve pidiendo siete, y el dia 1 no
       # entra nunca mas. Lo que se fija es que SOLO se estire, nunca se achique.
