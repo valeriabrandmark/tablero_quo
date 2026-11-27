@@ -60,6 +60,23 @@ FECHA_INICIO_COMPRAS = date(2026, 1, 1)
 # El resto del historial en bronze.sigma_ventas queda intacto.
 WINDOW_DAYS = 7
 
+# LA VENTANA DE LAS COMPRAS ES MUCHO MAS LARGA QUE LA DE LAS VENTAS, y no por
+# gusto. Sigma filtra las compras por FECHA DE LA FACTURA, y una factura se
+# carga en Sigma cuando llega el papel, no el dia que se emitio: entre junio y
+# agosto de 2026 la demora fue de hasta 57 dias (p99 56, p95 38). Con 7 dias,
+# una factura cargada con mas de una semana de demora ya habia quedado fuera
+# de la ventana cuando aparecia, y no se volvia a pedir NUNCA.
+#
+# Paso desde mediados de agosto: casi 1 de cada 4 facturas de compra no llego
+# a la base (de jun a ago fueron 333 de 1.192 con mas de 7 dias de demora).
+# Caso que lo mostro (27/11/2026): GE07008, tres facturas de Genomma (01/10,
+# 19/10 y 16/11) que el tablero no tenia; figuraba con ultima compra el 12/08.
+#
+# 120 dias cubre con margen la demora maxima, y la primera corrida con este
+# valor rellena sola el agujero (vuelve hasta fines de julio). Son ~500
+# comprobantes por pedido, una vez por dia.
+VENTANA_COMPRAS_DIAS = 120
+
 # Pausa base entre llamadas (segundos). Subila si te bloquean seguido.
 PAUSA = 1.0
 
@@ -245,17 +262,20 @@ def extraer_compras():
     ultimos 7 dias y lo anterior ya no se vuelve a pedir. Paso: el paso estuvo
     apagado desde el 11/06/2026 y quedaron dos meses y medio sin comprobantes.
 
-    Asi que la ventana arranca en la mas VIEJA de dos fechas: los ultimos 7 dias,
-    o la ultima factura que hay cargada. En una corrida normal las dos dan casi
-    lo mismo y se piden 7 dias; despues de un corte, se pide todo lo que falto y
-    el agujero se cierra solo en la primera corrida.
+    Asi que la ventana arranca en la mas VIEJA de dos fechas: los ultimos
+    VENTANA_COMPRAS_DIAS dias, o la ultima factura que hay cargada. En una
+    corrida normal manda la ventana; despues de un corte largo, se pide todo lo
+    que falto y el agujero se cierra solo en la primera corrida.
+
+    La ventana es larga por las facturas que se cargan tarde: ver
+    VENTANA_COMPRAS_DIAS.
 
     El piso es FECHA_INICIO_COMPRAS para que una tabla vacia no dispare un pedido
     sin limite."""
     print("\n=== COMPRAS (facturas de compra) ===")
 
     hoy = date.today()
-    ventana = hoy - timedelta(days=WINDOW_DAYS)
+    ventana = hoy - timedelta(days=VENTANA_COMPRAS_DIAS)
     ultima = _ultima_compra_cargada()
     if ultima:
         print(f"  Ultima compra cargada: {ultima}")
