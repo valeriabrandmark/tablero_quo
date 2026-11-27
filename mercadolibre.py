@@ -510,30 +510,146 @@ def extraer_ventas_ml():
     guardar_ventana(df, "ml_ventas", "date_created", cutoff, clave=("id",))
 
 
-def obtener_ids_publicaciones(access_token):
-    """Trae TODOS los IDs de publicaciones usando scan (sin limite de offset)."""
+class CatalogoIncompleto(RuntimeError):
+    """El catalogo de ML vino recortado: NO se reemplaza el que ya estaba."""
+
+
+# ============================================================================
+#  EL CATALOGO NO SE PUEDE GUARDAR RECORTADO
+# ============================================================================
+#
+# Paso entre el 24 y el 27/11/2026, sin que nada fallara: cada manana el
+# catalogo traia menos publicaciones que el dia anterior (43, 155, 597 y 1.201
+# menos), y como se REEMPLAZA entero, las que faltaban desaparecian del tablero.
+# Con ellas, su inventario de Full: ~280 inventarios y ~2.000 u. que Compras
+# dejo de contar como stock. El caso que lo mostro fue GL44052 (Pegamento en
+# gel Scotch), con 24 u. en Full que el tablero no veia.
+#
+# El agujero estaba en dos lugares que fallaban EN SILENCIO:
+#
+#   - el detalle va de a 20 publicaciones, en paralelo; si una llamada se
+#     rendia (429 repetidos, un 5xx), esas 20 se descartaban y se seguia;
+#   - el scan cortaba en la primera pagina vacia, aunque ML hubiera dicho que
+#     habia mas.
+#
+# Ahora las dos cosas se reintentan, y si al final falta mas de
+# TOLERANCIA_CATALOGO del total, el paso FALLA y no toca la tabla: el catalogo
+# de ayer completo es mejor que el de hoy recortado, y el fallo se ve.
+TOLERANCIA_CATALOGO = 0.005   # medio por ciento
+RONDAS_DETALLE = 4            # la primera en paralelo, las demas de a una
+ESPERA_ENTRE_RONDAS = 20      # segundos: dejar que ML afloje el freno
+CODIGOS_DEFINITIVOS = {400, 403, 404}  # no tiene sentido volver a pedirlos
+
+
+def verificar_completo(que, esperados, obtenidos, tolerancia=TOLERANCIA_CATALOGO):
+    """Tira CatalogoIncompleto si falta mas de `tolerancia` de lo esperado."""
+    if esperados <= 0:
+        return
+    faltan = esperados - obtenidos
+    if faltan > esperados * tolerancia:
+        raise CatalogoIncompleto(
+            f"{que}: se esperaban {esperados} y llegaron {obtenidos} "
+            f"(faltan {faltan}). No se reemplaza el catalogo que ya estaba.")
+
+
+def detalle_en_rondas(ids, pedir_lote, rondas=RONDAS_DETALLE, espera=0,
+                      hilos=1, dormir=time.sleep):
+    """Pide el detalle de `ids` de a 20, reintentando lo que no vino.
+
+    `pedir_lote(lote)` devuelve la respuesta del multiget de /items (una lista
+    de {"code", "body"}) o tira una excepcion. Sin base ni red, para probarla.
+
+    Devuelve (detalles, definitivos, pendientes): los cuerpos que llegaron, los
+    ids que ML contesto que no existen o no son nuestros (no se reintentan) y
+    los que despues de todas las rondas siguen sin venir.
+    """
+    detalles = {}
+    definitivos = set()
+    pendientes = list(dict.fromkeys(ids))
+
+    for ronda in range(rondas):
+        if not pendientes:
+            break
+        if ronda > 0:
+            print(f"  Ronda {ronda + 1}: reintentando {len(pendientes)} publicaciones...")
+            dormir(espera * ronda)
+        lotes = [pendientes[i:i + 20] for i in range(0, len(pendientes), 20)]
+
+        def uno(lote):
+            try:
+                return pedir_lote(lote)
+            except Exception as e:
+                print(f"    lote fallado: {str(e)[:90]}")
+                return []
+
+        # La primera ronda en paralelo, que es la rapida; las de reintento de a
+        # una, porque si fallaron es casi siempre porque ML nos esta frenando.
+        if ronda == 0 and hilos > 1:
+            with ThreadPoolExecutor(max_workers=hilos) as pool:
+                respuestas = list(pool.map(uno, lotes))
+        else:
+            respuestas = [uno(l) for l in lotes]
+
+        for datos in respuestas:
+            for item in datos or []:
+                cuerpo = item.get("body") or {}
+                iid = cuerpo.get("id")
+                if item.get("code") == 200 and iid:
+                    detalles[iid] = cuerpo
+                elif item.get("code") in CODIGOS_DEFINITIVOS and iid:
+                    definitivos.add(iid)
+
+        pendientes = [i for i in pendientes if i not in detalles and i not in definitivos]
+
+    return list(detalles.values()), definitivos, pendientes
+
+
+def obtener_ids_publicaciones(access_token, llamar=None, dormir=time.sleep):
+    """Trae TODOS los IDs de publicaciones usando scan (sin limite de offset).
+
+    Antes cortaba en la primera pagina vacia. Ahora sabe cuantas tiene que
+    haber (`paging.total`), reintenta una pagina vacia que llega antes de
+    tiempo y, si igual faltan, falla en vez de devolver la lista recortada.
+    """
+    llamar = llamar or llamar_ml
     print("  Obteniendo IDs de publicaciones (scan)...")
     ids = []
+    total = None
     scroll_id = None
+    vacias = 0
     while True:
         params = {"search_type": "scan", "limit": 100}
         if scroll_id:
             params["scroll_id"] = scroll_id
-        datos = llamar_ml(f"/users/{USER_ID}/items/search", access_token, params=params)
+        datos = llamar(f"/users/{USER_ID}/items/search", access_token, params=params)
+        if total is None:
+            total = (datos.get("paging") or {}).get("total")
         resultados = datos.get("results", [])
         if not resultados:
+            if total is not None and len(set(ids)) < total and vacias < 3:
+                vacias += 1
+                print(f"    pagina vacia con {len(set(ids))} de {total}: reintento {vacias}/3")
+                dormir(5 * vacias)
+                continue
             break
+        vacias = 0
         ids.extend(resultados)
-        scroll_id = datos.get("scroll_id")
+        scroll_id = datos.get("scroll_id") or scroll_id
         print(f"    IDs acumulados: {len(ids)}")
-        if not scroll_id:
+        if not datos.get("scroll_id"):
             break
+
+    ids = list(dict.fromkeys(ids))
+    if total is not None:
+        print(f"  ML dice que hay {total}; llegaron {len(ids)}")
+        verificar_completo("IDs del scan", total, len(ids))
     return ids
 
 
 def extraer_publicaciones_ml():
     """Trae el detalle de TODAS las publicaciones de ML (activas, pausadas, cerradas).
-       Catalogo -> se reemplaza entero cada vez que corre."""
+       Catalogo -> se reemplaza entero cada vez que corre, PERO SOLO SI VINO
+       COMPLETO (ver CatalogoIncompleto)."""
     print("\n=== PUBLICACIONES MERCADO LIBRE ===")
     access_token = token_ml()
 
@@ -542,33 +658,19 @@ def extraer_publicaciones_ml():
 
     # De a 20 por llamada (lo maximo que acepta el multiget) y varias llamadas a
     # la vez, por lo mismo que el stock: son ~430 llamadas y en fila son minutos.
-    lotes = [ids[i:i + 20] for i in range(0, len(ids), 20)]
-    print(f"  {len(lotes)} lotes de hasta 20 (de a {HILOS_STOCK})")
-
     def pedir_lote(lote):
-        try:
-            return llamar_ml("/items", access_token,
-                             params={"ids": ",".join(lote)}, pausa=False)
-        except Exception as e:
-            print(f"    lote fallado: {str(e)[:90]}")
-            return []
+        return llamar_ml("/items", access_token,
+                         params={"ids": ",".join(lote)}, pausa=False)
 
-    with ThreadPoolExecutor(max_workers=HILOS_STOCK) as pool:
-        respuestas = list(pool.map(pedir_lote, lotes))
+    detalles, definitivos, pendientes = detalle_en_rondas(
+        ids, pedir_lote, espera=ESPERA_ENTRE_RONDAS, hilos=HILOS_STOCK)
 
-    detalles, sin_detalle = [], 0
-    for datos in respuestas:
-        for item in datos:
-            if item.get("code") == 200:
-                detalles.append(item["body"])
-            else:
-                sin_detalle += 1
-
-    # Se cuenta lo que la API no devolvio en vez de descartarlo en silencio: si
-    # un dia faltan mil publicaciones, tiene que verse en el log y no
-    # descubrirse por un total que no cierra.
-    if sin_detalle:
-        print(f"  ATENCION: {sin_detalle} publicaciones sin detalle (la API no las devolvio)")
+    if definitivos:
+        print(f"  {len(definitivos)} publicaciones que ML contesto como inexistentes")
+    if pendientes:
+        print(f"  ATENCION: {len(pendientes)} publicaciones sin detalle despues de "
+              f"{RONDAS_DETALLE} rondas (ej. {', '.join(pendientes[:5])})")
+    verificar_completo("detalle de publicaciones", len(ids) - len(definitivos), len(detalles))
 
     df = pd.json_normalize(detalles)
     print(f"  Total con detalle: {len(df)} publicaciones")
@@ -846,9 +948,21 @@ def main():
     print("ML User ID:", USER_ID)
     if todo or args.ventas:
         extraer_ventas_ml()
+    incompleto = None
     if todo or args.catalogo:
-        extraer_publicaciones_ml()
+        # SI EL CATALOGO VINO RECORTADO, EL STOCK DE FULL SE SACA IGUAL, con el
+        # catalogo de ayer: la foto diaria de Full no se puede reconstruir
+        # despues, y un dia sin foto es un agujero en los dias con stock. El
+        # paso termina en ERROR al final para que se vea y el orquestador lo
+        # reintente.
+        try:
+            extraer_publicaciones_ml()
+        except CatalogoIncompleto as e:
+            incompleto = e
+            print(f"\n  ATENCION: {e}")
         extraer_stock_full()
+    if incompleto:
+        raise SystemExit(f"Catalogo de ML incompleto: {incompleto}")
     print("\n=== LISTO ===")
 
 
